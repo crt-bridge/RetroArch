@@ -260,6 +260,36 @@ static void gfx_ctx_w_vk_input_driver(void *data,
 #endif
 #endif
 
+#ifdef HAVE_GROOVY
+   /* crt-bridge (silent-keyboard diagnostic) : this upstream callback,
+    * UNMODIFIED before this fix, completely ignored
+    * settings->arrays.input_driver and ALWAYS forced dinput below --
+    * only the "raw" case was handled (HAVE_WINRAWINPUT block above).
+    * Bench-measured consequence: input_driver = "mister" was correctly
+    * selected at startup ([Input] Found input driver: "mister".), then
+    * SILENTLY OVERWRITTEN by this same callback as soon as
+    * vulkan_init() called it with a ready HWND (no log line reported
+    * the overwrite) -- the wrapping driver was then never polled
+    * again, and the PC keyboard kept working only by the coincidence
+    * that raw dinput stayed active. The pad kept working (mister_joypad
+    * is a separate GAMEPAD driver, untouched by this callback), which
+    * made the symptom misleading: "pad responds, keyboard doesn't". */
+   {
+      settings_t *settings_groovy = config_get_ptr();
+      if (settings_groovy && string_is_equal(
+               settings_groovy->arrays.input_driver, "mister"))
+      {
+         *input_data = input_driver_init_wrap(&input_mister, joypad_name);
+         if (*input_data)
+         {
+            *input     = &input_mister;
+            dinput_vk  = NULL;
+            return;
+         }
+      }
+   }
+#endif
+
 #ifdef HAVE_DINPUT
    dinput_vk      = input_driver_init_wrap(&input_dinput, joypad_name);
    *input         = dinput_vk ? &input_dinput : NULL;

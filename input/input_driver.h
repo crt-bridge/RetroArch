@@ -1243,6 +1243,10 @@ extern input_driver_t input_dos;
 extern input_driver_t input_winraw;
 extern input_driver_t input_wayland;
 extern input_driver_t input_test;
+/* crt-bridge: wrapping input driver -- instantiates dinput internally
+ * and OR-combines it, does NOT replace the PC keyboard. Registered
+ * under HAVE_GROOVY. */
+extern input_driver_t input_mister;
 
 extern input_device_driver_t dinput_joypad;
 extern input_device_driver_t linuxraw_joypad;
@@ -1268,6 +1272,10 @@ extern input_device_driver_t dos_joypad;
 extern input_device_driver_t rwebpad_joypad;
 extern input_device_driver_t winraw_joypad;
 extern input_device_driver_t test_joypad;
+/* crt-bridge: ported gamepad driver -- permanently registered under
+ * HAVE_GROOVY, inert as long as GROOVY_INPUT doesn't open the channel
+ * on the record_groovy side. */
+extern input_device_driver_t mister_joypad;
 
 #ifdef HAVE_HID
 extern hid_driver_t iohidmanager_hid;

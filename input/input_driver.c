@@ -331,6 +331,11 @@ input_device_driver_t *joypad_drivers[] = {
 #ifdef HAVE_TEST_DRIVERS
    &test_joypad,
 #endif
+#ifdef HAVE_GROOVY
+   /* crt-bridge: ported gamepad driver -- reads state coming from the
+    * receiver via record_groovy, inert without GROOVY_INPUT. */
+   &mister_joypad,
+#endif
    &null_joypad,
    NULL,
 };
@@ -377,6 +382,16 @@ input_driver_t *input_drivers[] = {
 #endif
 #ifdef HAVE_DINPUT
    &input_dinput,
+#endif
+#if defined(HAVE_GROOVY) && defined(HAVE_DINPUT)
+   /* crt-bridge: wrapping input driver -- instantiates dinput
+    * internally, OR-combines it with the Groovy PS/2 state. Nested
+    * under HAVE_DINPUT: mister_input.o is only compiled under Win32
+    * (Makefile.common, HAVE_GROOVY block), so without this guard the
+    * link step fails with "undefined reference to 'input_mister'" on
+    * the Linux build host, AFTER a successful compile. HAVE_DINPUT
+    * depends on -ldinput8: it is 0 under Linux by construction. */
+   &input_mister,
 #endif
 #if (defined(HAVE_SDL) || defined(HAVE_SDL2)) && !(defined(HAVE_COCOA) || defined(HAVE_COCOA_METAL))
    &input_sdl,

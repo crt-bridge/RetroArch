@@ -251,6 +251,12 @@ extern const struct rarch_key_map rarch_key_map_android[];
 extern const struct rarch_key_map rarch_key_map_qnx[];
 extern const struct rarch_key_map rarch_key_map_dos[];
 extern const struct rarch_key_map rarch_key_map_wiiu[];
+#ifdef HAVE_GROOVY
+/* crt-bridge: keyboard mapping table ported from antonioginer/
+ * RetroArch's mister branch -- kept under HAVE_GROOVY (the patch's
+ * convention), not HAVE_MISTER (never defined in this build). */
+extern const struct rarch_key_map rarch_key_map_mister[];
+#endif
 extern const struct rarch_key_map rarch_key_map_winraw[];
 #ifdef HAVE_LIBNX
 extern const struct rarch_key_map rarch_key_map_switch[];

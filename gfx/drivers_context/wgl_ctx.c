@@ -684,6 +684,24 @@ static void gfx_ctx_wgl_input_driver(void *data,
 #endif
 #endif
 
+#ifdef HAVE_GROOVY
+   /* crt-bridge: same fix as gfx_ctx_w_vk_input_driver (w_vk_ctx.c) --
+    * this upstream callback ignored settings->arrays.input_driver and
+    * forced dinput unconditionally (except for the "raw" case above).
+    * glcore is kept as a second active backend, so the same
+    * regression was waiting for anyone switching to it. */
+   if (string_is_equal(settings->arrays.input_driver, "mister"))
+   {
+      *input_data = input_driver_init_wrap(&input_mister, joypad_name);
+      if (*input_data)
+      {
+         *input     = &input_mister;
+         dinput_wgl = NULL;
+         return;
+      }
+   }
+#endif
+
 #ifdef HAVE_DINPUT
    dinput_wgl  = input_driver_init_wrap(&input_dinput, joypad_name);
    *input      = dinput_wgl ? &input_dinput : NULL;
