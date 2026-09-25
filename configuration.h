@@ -271,6 +271,9 @@ typedef struct settings
       unsigned video_msg_bgcolor_green;
       unsigned video_msg_bgcolor_blue;
       unsigned video_stream_port;
+      /* CRT bridge settings */
+      unsigned groovy_audio;   /* enum groovy_audio_mode: 0 off, 1 receiver, 2 both */
+      unsigned groovy_mtu;     /* payload bytes, bounded [GM_MTU_MIN, GM_MTU_MAX] */
       unsigned video_record_quality;
       unsigned video_stream_quality;
       unsigned video_record_scale_factor;
@@ -500,6 +503,22 @@ typedef struct settings
 
       char video_driver[32];
       char record_driver[32];
+      /* CRT bridge: the followers grammar is `ip[:port],key=value;...` and
+       * groovy_followers_parse accepts up to GROOVY_FOLLOWERS_LEN_MAX == 512
+       * characters. 513 = 512 + the trailing zero. Upstream is content with
+       * `char mister_ip[16]`, which only holds an IPv4 address and nothing
+       * else -- copying 16 here would mutilate the grammar. */
+      char groovy_followers[513];
+      /* Numeric address of each additional follower ("Additional Follower N"
+       * in the menu) -- ip[:port], never a hostname here (the provenance
+       * filter of groovy_followers_ip_parse requires four decimal groups;
+       * resolving a name before that check touches path security, tracked
+       * separately). 32 = "255.255.255.255:65535" (21 characters) + margin,
+       * same discipline as the driver arrays above. */
+      char groovy_follower_1_address[32];
+      char groovy_follower_2_address[32];
+      char groovy_follower_3_address[32];
+      char groovy_follower_4_address[32];
       char camera_driver[32];
       char bluetooth_driver[32];
       char wifi_driver[32];
@@ -692,6 +711,18 @@ typedef struct settings
       bool video_disable_composition;
       bool video_post_filter_record;
       bool video_gpu_record;
+      /* CRT bridge settings */
+      bool groovy_bridge_enable;
+      bool groovy_compression;
+      bool groovy_input;
+      /* Four "Additional Follower N" switches, each with its address
+       * (arrays above). Replace, IN THE MENU, the groovy_followers text
+       * field, which stays the expert path (retroarch.cfg only). All off
+       * (default) = no follower. */
+      bool groovy_follower_1_enable;
+      bool groovy_follower_2_enable;
+      bool groovy_follower_3_enable;
+      bool groovy_follower_4_enable;
       bool video_gpu_screenshot;
       bool video_allow_rotate;
       bool video_shared_context;

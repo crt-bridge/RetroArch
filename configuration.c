@@ -1605,6 +1605,16 @@ static struct config_array_setting *populate_settings_array(
 #endif
 
    SETTING_ARRAY("record_driver",                settings->arrays.record_driver, false, NULL, true);
+   /* CRT bridge: free-form string, never a path. Same shape as the upstream
+    * mister_ip. No `&` in front of an array, and the empty default is set
+    * here (NULL) rather than through a macro. */
+   SETTING_ARRAY("groovy_followers",             settings->arrays.groovy_followers, false, NULL, true);
+   /* Numeric address of each additional follower, free-form string, same
+    * shape as groovy_followers above. */
+   SETTING_ARRAY("groovy_follower_1_address",    settings->arrays.groovy_follower_1_address, false, NULL, true);
+   SETTING_ARRAY("groovy_follower_2_address",    settings->arrays.groovy_follower_2_address, false, NULL, true);
+   SETTING_ARRAY("groovy_follower_3_address",    settings->arrays.groovy_follower_3_address, false, NULL, true);
+   SETTING_ARRAY("groovy_follower_4_address",    settings->arrays.groovy_follower_4_address, false, NULL, true);
    SETTING_ARRAY("camera_driver",                settings->arrays.camera_driver, false, NULL, true);
    SETTING_ARRAY("camera_device",                settings->arrays.camera_device, false, NULL, true);
    SETTING_ARRAY("bluetooth_driver",             settings->arrays.bluetooth_driver, false, NULL, true);
@@ -1797,6 +1807,17 @@ static struct config_bool_setting *populate_settings_bool(
    SETTING_BOOL("ui_companion_toggle",           &settings->bools.ui_companion_toggle, false, DEFAULT_UI_COMPANION_TOGGLE, false);
    SETTING_BOOL("desktop_menu_enable",           &settings->bools.desktop_menu_enable, true, DEFAULT_DESKTOP_MENU_ENABLE, false);
    SETTING_BOOL("video_gpu_record",              &settings->bools.video_gpu_record, true, DEFAULT_GPU_RECORD, false);
+   /* CRT bridge settings. Playable defaults. */
+   SETTING_BOOL("groovy_bridge_enable",          &settings->bools.groovy_bridge_enable, true, DEFAULT_GROOVY_BRIDGE_ENABLE, false);
+   SETTING_BOOL("groovy_compression",            &settings->bools.groovy_compression, true, DEFAULT_GROOVY_COMPRESSION, false);
+   SETTING_BOOL("groovy_input",                  &settings->bools.groovy_input, true, DEFAULT_GROOVY_INPUT, false);
+   /* Four "Additional Follower N" switches, default off -- all off means no
+    * follower, no string manipulation needed (replaces, IN THE MENU, the
+    * groovy_followers text field below, which stays available). */
+   SETTING_BOOL("groovy_follower_1_enable",      &settings->bools.groovy_follower_1_enable, true, DEFAULT_GROOVY_FOLLOWER_1_ENABLE, false);
+   SETTING_BOOL("groovy_follower_2_enable",      &settings->bools.groovy_follower_2_enable, true, DEFAULT_GROOVY_FOLLOWER_2_ENABLE, false);
+   SETTING_BOOL("groovy_follower_3_enable",      &settings->bools.groovy_follower_3_enable, true, DEFAULT_GROOVY_FOLLOWER_3_ENABLE, false);
+   SETTING_BOOL("groovy_follower_4_enable",      &settings->bools.groovy_follower_4_enable, true, DEFAULT_GROOVY_FOLLOWER_4_ENABLE, false);
    SETTING_BOOL("input_descriptor_label_show",   &settings->bools.input_descriptor_label_show, true, DEFAULT_INPUT_DESCRIPTOR_LABEL_SHOW, false);
    SETTING_BOOL("input_descriptor_hide_unbound", &settings->bools.input_descriptor_hide_unbound, true, DEFAULT_INPUT_DESCRIPTOR_HIDE_UNBOUND, false);
    SETTING_BOOL("load_dummy_on_core_shutdown",   &settings->bools.load_dummy_on_core_shutdown, true, DEFAULT_LOAD_DUMMY_ON_CORE_SHUTDOWN, false);
@@ -2597,6 +2618,9 @@ static struct config_uint_setting *populate_settings_uint(
    SETTING_UINT("video_msg_bgcolor_blue",        &settings->uints.video_msg_bgcolor_blue, true, DEFAULT_MESSAGE_BGCOLOR_BLUE, false);
 
    SETTING_UINT("video_stream_port",             &settings->uints.video_stream_port, true, RARCH_STREAM_DEFAULT_PORT, false);
+   /* CRT bridge settings. */
+   SETTING_UINT("groovy_audio",                  &settings->uints.groovy_audio, true, DEFAULT_GROOVY_AUDIO, false);
+   SETTING_UINT("groovy_mtu",                    &settings->uints.groovy_mtu, true, DEFAULT_GROOVY_MTU, false);
    SETTING_UINT("video_record_threads",          &settings->uints.video_record_threads, true, DEFAULT_VIDEO_RECORD_THREADS, false);
    SETTING_UINT("video_record_quality",          &settings->uints.video_record_quality, true, RECORD_CONFIG_TYPE_RECORDING_MED_QUALITY, false);
    SETTING_UINT("video_stream_quality",          &settings->uints.video_stream_quality, true, RECORD_CONFIG_TYPE_STREAMING_MED_QUALITY, false);

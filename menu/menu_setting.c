@@ -155,6 +155,8 @@
 #include "../libretro-common/vfs/vfs_implementation_smb.h"
 #endif
 
+#include "../record/drivers/groovy_audio.h"   /* enum groovy_audio_mode, groovy_audio_mode_name */
+
 /* Forward declaration for Win32 native menubar rebuild.
  * Defined in ui/drivers/ui_win32.c. Declared here rather than included
  * via ui/drivers/ui_win32.h to avoid dragging <windows.h> and friends
@@ -3061,6 +3063,20 @@ static size_t setting_get_string_representation_streaming_mode(
                      MENU_ENUM_LABEL_VALUE_VIDEO_STREAMING_MODE_CUSTOM), len);
       }
    }
+   return 0;
+}
+
+/* The bridge's three audio states. The words shown in the menu are EXACTLY
+ * what GROOVY_AUDIO accepts -- groovy_audio_mode_name is called rather than
+ * copied, so there is only one source of truth for "off", "receiver" and
+ * "both". Three fewer value MSG_HASH entries, and one less divergence to
+ * worry about. */
+static size_t setting_get_string_representation_groovy_audio(
+      rarch_setting_t *setting, char *s, size_t len)
+{
+   if (setting)
+      return strlcpy(s, groovy_audio_mode_name(
+               (enum groovy_audio_mode)*setting->value.target.unsigned_integer), len);
    return 0;
 }
 
@@ -16993,6 +17009,272 @@ static bool setting_append_list(
                   general_read_handler,
                   SD_FLAG_NONE
                   );
+
+            /* --- MASTER receiver address --------------------------------
+             * Seventh groovy entry, AHEAD of the six that follow -- without
+             * a receiver, none of the six is any use. Sits on the SAME
+             * variable as the upstream RECORD_CONFIG entry (hidden under
+             * this driver, see menu_displaylist.c): settings->paths.path_record_config,
+             * persisted under the "video_record_config" retroarch.cfg key.
+             * NO new key -- a single source of truth. String form, never
+             * the path form (same discipline as groovy_followers), virtual
+             * keyboard, same template as streaming_title just above. */
+            CONFIG_STRING(
+                  list, list_info,
+                  settings->paths.path_record_config,
+                  sizeof(settings->paths.path_record_config),
+                  MENU_ENUM_LABEL_GROOVY_MASTER_ADDRESS,
+                  MENU_ENUM_LABEL_VALUE_GROOVY_MASTER_ADDRESS,
+                  "",
+                  &group_info,
+                  &subgroup_info,
+                  parent_group,
+                  general_write_handler,
+                  general_read_handler);
+            SETTINGS_DATA_LIST_CURRENT_ADD_FLAGS(list, list_info, SD_FLAG_ALLOW_INPUT);
+            (*list)[list_info->index - 1].ui_type       = ST_UI_TYPE_STRING_LINE_EDIT;
+            /* NO action_start here, and that is deliberate. A setting's
+             * Start button means "reset to default", and this field's
+             * default is the EMPTY string -- there is no sensible default
+             * receiver address, the driver refuses to start without one. An
+             * accidental Start would therefore erase the CRT's address and
+             * the bridge would stop starting, with no word explaining why.
+             * The followers field, by contrast, keeps its action_start: the
+             * empty string IS its normal value, a single receiver. The call
+             * is guarded by `if (setting->action_start)` in this file's
+             * Start action handler: leaving this pointer null does not
+             * crash, the button simply has no effect on this entry.
+             * Found during a user validation session. */
+
+            /* --- CRT bridge settings --------------------------------------
+             * Six settings, existing Recording category. The GROOVY_*
+             * environment variables always win over these values; the
+             * driver says so on screen when it is forced. */
+            CONFIG_BOOL(
+                  list, list_info,
+                  &settings->bools.groovy_bridge_enable,
+                  MENU_ENUM_LABEL_GROOVY_BRIDGE_ENABLE,
+                  MENU_ENUM_LABEL_VALUE_GROOVY_BRIDGE_ENABLE,
+                  DEFAULT_GROOVY_BRIDGE_ENABLE,
+                  MENU_ENUM_LABEL_VALUE_OFF,
+                  MENU_ENUM_LABEL_VALUE_ON,
+                  &group_info,
+                  &subgroup_info,
+                  parent_group,
+                  general_write_handler,
+                  general_read_handler,
+                  SD_FLAG_NONE
+                  );
+            CONFIG_BOOL(
+                  list, list_info,
+                  &settings->bools.groovy_compression,
+                  MENU_ENUM_LABEL_GROOVY_COMPRESSION,
+                  MENU_ENUM_LABEL_VALUE_GROOVY_COMPRESSION,
+                  DEFAULT_GROOVY_COMPRESSION,
+                  MENU_ENUM_LABEL_VALUE_OFF,
+                  MENU_ENUM_LABEL_VALUE_ON,
+                  &group_info,
+                  &subgroup_info,
+                  parent_group,
+                  general_write_handler,
+                  general_read_handler,
+                  SD_FLAG_NONE
+                  );
+            CONFIG_BOOL(
+                  list, list_info,
+                  &settings->bools.groovy_input,
+                  MENU_ENUM_LABEL_GROOVY_INPUT,
+                  MENU_ENUM_LABEL_VALUE_GROOVY_INPUT,
+                  DEFAULT_GROOVY_INPUT,
+                  MENU_ENUM_LABEL_VALUE_OFF,
+                  MENU_ENUM_LABEL_VALUE_ON,
+                  &group_info,
+                  &subgroup_info,
+                  parent_group,
+                  general_write_handler,
+                  general_read_handler,
+                  SD_FLAG_NONE
+                  );
+            CONFIG_UINT(
+                  list, list_info,
+                  &settings->uints.groovy_audio,
+                  MENU_ENUM_LABEL_GROOVY_AUDIO,
+                  MENU_ENUM_LABEL_VALUE_GROOVY_AUDIO,
+                  DEFAULT_GROOVY_AUDIO,
+                  &group_info,
+                  &subgroup_info,
+                  parent_group,
+                  general_write_handler,
+                  general_read_handler);
+            (*list)[list_info->index - 1].action_ok = &setting_action_ok_uint;
+            (*list)[list_info->index - 1].get_string_representation =
+                  &setting_get_string_representation_groovy_audio;
+            menu_settings_list_current_add_range(list, list_info, 0, GROOVY_AUDIO_BOTH, 1, true, true);
+            /* 548 and 3800 are GM_MTU_MIN and GM_MTU_MAX (libgm/include/gm.h).
+             * Written as numbers because gm.h is not on menu/'s include
+             * path. This bound is an INPUT CONVENIENCE: the effective
+             * authority stays groovy_mtu_parse / gm_set_mtu, which fall
+             * back to the default for any invalid value. A test
+             * (emitter/test/test_groovy_menu_settings_template.py in
+             * crt-bridge) refuses to let these two numbers diverge from
+             * gm.h. */
+            CONFIG_UINT(
+                  list, list_info,
+                  &settings->uints.groovy_mtu,
+                  MENU_ENUM_LABEL_GROOVY_MTU,
+                  MENU_ENUM_LABEL_VALUE_GROOVY_MTU,
+                  DEFAULT_GROOVY_MTU,
+                  &group_info,
+                  &subgroup_info,
+                  parent_group,
+                  general_write_handler,
+                  general_read_handler);
+            (*list)[list_info->index - 1].action_ok = &setting_action_ok_uint;
+            menu_settings_list_current_add_range(list, list_info, 548, 3800, 1, true, true);
+            /* groovy_followers (the retroarch.cfg key itself) NO LONGER HAS
+             * A MENU WIDGET. The single text field could not be cleared
+             * from the menu (menu_input_st_string_cb refuses an empty
+             * string) and a typo could leave a user with no picture and no
+             * way back (the Start button, the only way out, is mapped to
+             * Enter by default). The key stays the expert path -- hand-
+             * editable in retroarch.cfg, and always takes precedence over
+             * the four switches below whenever it is non-empty (see the
+             * three-tier precedence in record_groovy.c, groovy_new()).
+             *
+             * REPLACED IN THE MENU by four "Additional Follower N" switches,
+             * each with its own address -- all off (default) = no follower,
+             * no string manipulation needed. The per-follower options (mtu,
+             * compression, audio, inputs, shape, pad) and hostnames DO NOT
+             * COME UP here: only the expert path carries them. The address
+             * is only visible while its switch is on (menu_displaylist.c,
+             * is_groovy && settings->bools.groovy_follower_N_enable). */
+            CONFIG_BOOL(
+                  list, list_info,
+                  &settings->bools.groovy_follower_1_enable,
+                  MENU_ENUM_LABEL_GROOVY_FOLLOWER_1_ENABLE,
+                  MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWER_1_ENABLE,
+                  DEFAULT_GROOVY_FOLLOWER_1_ENABLE,
+                  MENU_ENUM_LABEL_VALUE_OFF,
+                  MENU_ENUM_LABEL_VALUE_ON,
+                  &group_info,
+                  &subgroup_info,
+                  parent_group,
+                  general_write_handler,
+                  general_read_handler,
+                  SD_FLAG_NONE
+                  );
+            /* Never the path form (same discipline as groovy_followers
+             * above): a file browser has no business handling a network
+             * address. Numeric only -- a hostname is not accepted here,
+             * the sublabel says so. */
+            CONFIG_STRING(
+                  list, list_info,
+                  settings->arrays.groovy_follower_1_address,
+                  sizeof(settings->arrays.groovy_follower_1_address),
+                  MENU_ENUM_LABEL_GROOVY_FOLLOWER_1_ADDRESS,
+                  MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWER_1_ADDRESS,
+                  "",
+                  &group_info,
+                  &subgroup_info,
+                  parent_group,
+                  general_write_handler,
+                  general_read_handler);
+            SETTINGS_DATA_LIST_CURRENT_ADD_FLAGS(list, list_info, SD_FLAG_ALLOW_INPUT);
+            (*list)[list_info->index - 1].ui_type       = ST_UI_TYPE_STRING_LINE_EDIT;
+            (*list)[list_info->index - 1].action_start  = setting_generic_action_start_default;
+
+            CONFIG_BOOL(
+                  list, list_info,
+                  &settings->bools.groovy_follower_2_enable,
+                  MENU_ENUM_LABEL_GROOVY_FOLLOWER_2_ENABLE,
+                  MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWER_2_ENABLE,
+                  DEFAULT_GROOVY_FOLLOWER_2_ENABLE,
+                  MENU_ENUM_LABEL_VALUE_OFF,
+                  MENU_ENUM_LABEL_VALUE_ON,
+                  &group_info,
+                  &subgroup_info,
+                  parent_group,
+                  general_write_handler,
+                  general_read_handler,
+                  SD_FLAG_NONE
+                  );
+            CONFIG_STRING(
+                  list, list_info,
+                  settings->arrays.groovy_follower_2_address,
+                  sizeof(settings->arrays.groovy_follower_2_address),
+                  MENU_ENUM_LABEL_GROOVY_FOLLOWER_2_ADDRESS,
+                  MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWER_2_ADDRESS,
+                  "",
+                  &group_info,
+                  &subgroup_info,
+                  parent_group,
+                  general_write_handler,
+                  general_read_handler);
+            SETTINGS_DATA_LIST_CURRENT_ADD_FLAGS(list, list_info, SD_FLAG_ALLOW_INPUT);
+            (*list)[list_info->index - 1].ui_type       = ST_UI_TYPE_STRING_LINE_EDIT;
+            (*list)[list_info->index - 1].action_start  = setting_generic_action_start_default;
+
+            CONFIG_BOOL(
+                  list, list_info,
+                  &settings->bools.groovy_follower_3_enable,
+                  MENU_ENUM_LABEL_GROOVY_FOLLOWER_3_ENABLE,
+                  MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWER_3_ENABLE,
+                  DEFAULT_GROOVY_FOLLOWER_3_ENABLE,
+                  MENU_ENUM_LABEL_VALUE_OFF,
+                  MENU_ENUM_LABEL_VALUE_ON,
+                  &group_info,
+                  &subgroup_info,
+                  parent_group,
+                  general_write_handler,
+                  general_read_handler,
+                  SD_FLAG_NONE
+                  );
+            CONFIG_STRING(
+                  list, list_info,
+                  settings->arrays.groovy_follower_3_address,
+                  sizeof(settings->arrays.groovy_follower_3_address),
+                  MENU_ENUM_LABEL_GROOVY_FOLLOWER_3_ADDRESS,
+                  MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWER_3_ADDRESS,
+                  "",
+                  &group_info,
+                  &subgroup_info,
+                  parent_group,
+                  general_write_handler,
+                  general_read_handler);
+            SETTINGS_DATA_LIST_CURRENT_ADD_FLAGS(list, list_info, SD_FLAG_ALLOW_INPUT);
+            (*list)[list_info->index - 1].ui_type       = ST_UI_TYPE_STRING_LINE_EDIT;
+            (*list)[list_info->index - 1].action_start  = setting_generic_action_start_default;
+
+            CONFIG_BOOL(
+                  list, list_info,
+                  &settings->bools.groovy_follower_4_enable,
+                  MENU_ENUM_LABEL_GROOVY_FOLLOWER_4_ENABLE,
+                  MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWER_4_ENABLE,
+                  DEFAULT_GROOVY_FOLLOWER_4_ENABLE,
+                  MENU_ENUM_LABEL_VALUE_OFF,
+                  MENU_ENUM_LABEL_VALUE_ON,
+                  &group_info,
+                  &subgroup_info,
+                  parent_group,
+                  general_write_handler,
+                  general_read_handler,
+                  SD_FLAG_NONE
+                  );
+            CONFIG_STRING(
+                  list, list_info,
+                  settings->arrays.groovy_follower_4_address,
+                  sizeof(settings->arrays.groovy_follower_4_address),
+                  MENU_ENUM_LABEL_GROOVY_FOLLOWER_4_ADDRESS,
+                  MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWER_4_ADDRESS,
+                  "",
+                  &group_info,
+                  &subgroup_info,
+                  parent_group,
+                  general_write_handler,
+                  general_read_handler);
+            SETTINGS_DATA_LIST_CURRENT_ADD_FLAGS(list, list_info, SD_FLAG_ALLOW_INPUT);
+            (*list)[list_info->index - 1].ui_type       = ST_UI_TYPE_STRING_LINE_EDIT;
+            (*list)[list_info->index - 1].action_start  = setting_generic_action_start_default;
 
             END_SUB_GROUP(list, list_info, parent_group);
             END_GROUP(list, list_info, parent_group);

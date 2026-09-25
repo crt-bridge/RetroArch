@@ -3394,6 +3394,29 @@ enum msg_hash_enums
 #endif
    MENU_LABEL(VIDEO_VFILTER),
    MENU_LABEL(VIDEO_GPU_RECORD),
+   /* Master receiver address: seventh groovy entry, AHEAD of the six below
+    * -- without a receiver, none of the six is any use. Sits on the same
+    * upstream variable as RECORD_CONFIG (settings->paths.path_record_config
+    * / video_record_config), no new retroarch.cfg key. */
+   MENU_LABEL(GROOVY_MASTER_ADDRESS),
+   /* CRT bridge settings */
+   MENU_LABEL(GROOVY_BRIDGE_ENABLE),
+   MENU_LABEL(GROOVY_COMPRESSION),
+   MENU_LABEL(GROOVY_INPUT),
+   MENU_LABEL(GROOVY_AUDIO),
+   MENU_LABEL(GROOVY_MTU),
+   MENU_LABEL(GROOVY_FOLLOWERS),
+   /* Four "Additional Follower N" switches plus their addresses, which
+    * replace, IN THE MENU, the text field above (removed from the menu, see
+    * menu_setting.c) -- the groovy_followers key stays the expert path. */
+   MENU_LABEL(GROOVY_FOLLOWER_1_ENABLE),
+   MENU_LABEL(GROOVY_FOLLOWER_1_ADDRESS),
+   MENU_LABEL(GROOVY_FOLLOWER_2_ENABLE),
+   MENU_LABEL(GROOVY_FOLLOWER_2_ADDRESS),
+   MENU_LABEL(GROOVY_FOLLOWER_3_ENABLE),
+   MENU_LABEL(GROOVY_FOLLOWER_3_ADDRESS),
+   MENU_LABEL(GROOVY_FOLLOWER_4_ENABLE),
+   MENU_LABEL(GROOVY_FOLLOWER_4_ADDRESS),
    MENU_LABEL(RECORD_CONFIG),
    MENU_LABEL(STREAM_CONFIG),
    MENU_LABEL(VIDEO_POST_FILTER_RECORD),

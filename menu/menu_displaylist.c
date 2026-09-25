@@ -9605,6 +9605,15 @@ unsigned menu_displaylist_build_list(
             bool has_video          = is_ffmpeg
                || !strcmp(
                      settings->arrays.record_driver, "avfoundation");
+            bool is_groovy          = !strcmp(
+                     settings->arrays.record_driver, "groovy");
+            /* An additional follower's address is only visible while its
+             * own switch is on -- same mechanism as is_groovy, one level
+             * down. */
+            bool groovy_follower_1_on = settings->bools.groovy_follower_1_enable;
+            bool groovy_follower_2_on = settings->bools.groovy_follower_2_enable;
+            bool groovy_follower_3_on = settings->bools.groovy_follower_3_enable;
+            bool groovy_follower_4_on = settings->bools.groovy_follower_4_enable;
             static menu_displaylist_build_info_selective_t build_list[] = {
                {MENU_ENUM_LABEL_RECORD_DRIVER,                                         PARSE_ONLY_STRING_OPTIONS, true},
                {MENU_ENUM_LABEL_VIDEO_RECORD_QUALITY,                                  PARSE_ONLY_UINT,           false},
@@ -9618,9 +9627,36 @@ unsigned menu_displaylist_build_list(
                {MENU_ENUM_LABEL_STREAMING_TITLE,                                       PARSE_ONLY_STRING,         false},
                {MENU_ENUM_LABEL_STREAMING_URL,                                         PARSE_ONLY_STRING,         false},
                {MENU_ENUM_LABEL_UDP_STREAM_PORT,                                       PARSE_ONLY_UINT,           false},
+               /* CRT bridge settings -- ADDED AT THE END on purpose: indices
+                * 0 to 11 and their existing .checked lines below do not
+                * shift by a single slot. Inserting in the middle would
+                * force renumbering twelve lines for nothing. The master
+                * receiver address is added HERE, AHEAD of the seven groovy
+                * entries (indices 12 to 18) -- without a receiver, none of
+                * the other six settings is any use. This renumbers the six
+                * groovy .checked lines, never the twelve before them. */
+               {MENU_ENUM_LABEL_GROOVY_MASTER_ADDRESS,                                 PARSE_ONLY_STRING,         false},
+               {MENU_ENUM_LABEL_GROOVY_BRIDGE_ENABLE,                                  PARSE_ONLY_BOOL,           false},
+               {MENU_ENUM_LABEL_GROOVY_COMPRESSION,                                    PARSE_ONLY_BOOL,           false},
+               {MENU_ENUM_LABEL_GROOVY_INPUT,                                          PARSE_ONLY_BOOL,           false},
+               {MENU_ENUM_LABEL_GROOVY_AUDIO,                                          PARSE_ONLY_UINT,           false},
+               {MENU_ENUM_LABEL_GROOVY_MTU,                                            PARSE_ONLY_UINT,           false},
+               /* groovy_followers (the single text field) NO LONGER has an
+                * entry here -- replaced, IN THE MENU, by the four
+                * "Additional Follower N" switches and their addresses
+                * below (indices 18 to 25). The key stays the expert path,
+                * hand-editable in retroarch.cfg. */
+               {MENU_ENUM_LABEL_GROOVY_FOLLOWER_1_ENABLE,                              PARSE_ONLY_BOOL,           false},
+               {MENU_ENUM_LABEL_GROOVY_FOLLOWER_1_ADDRESS,                             PARSE_ONLY_STRING,         false},
+               {MENU_ENUM_LABEL_GROOVY_FOLLOWER_2_ENABLE,                              PARSE_ONLY_BOOL,           false},
+               {MENU_ENUM_LABEL_GROOVY_FOLLOWER_2_ADDRESS,                             PARSE_ONLY_STRING,         false},
+               {MENU_ENUM_LABEL_GROOVY_FOLLOWER_3_ENABLE,                              PARSE_ONLY_BOOL,           false},
+               {MENU_ENUM_LABEL_GROOVY_FOLLOWER_3_ADDRESS,                             PARSE_ONLY_STRING,         false},
+               {MENU_ENUM_LABEL_GROOVY_FOLLOWER_4_ENABLE,                              PARSE_ONLY_BOOL,           false},
+               {MENU_ENUM_LABEL_GROOVY_FOLLOWER_4_ADDRESS,                             PARSE_ONLY_STRING,         false},
             };
             build_list[1].checked  = has_video; /* MENU_ENUM_LABEL_VIDEO_RECORD_QUALITY */
-            build_list[2].checked  = is_ffmpeg; /* MENU_ENUM_LABEL_RECORD_CONFIG */
+            build_list[2].checked  = is_ffmpeg; /* MENU_ENUM_LABEL_RECORD_CONFIG -- hidden under groovy (master address), the upstream entry opens a file browser that is useless for a network address */
             build_list[3].checked  = is_ffmpeg; /* MENU_ENUM_LABEL_VIDEO_RECORD_THREADS */
             build_list[4].checked  = has_video; /* MENU_ENUM_LABEL_VIDEO_POST_FILTER_RECORD */
             build_list[5].checked  = has_video; /* MENU_ENUM_LABEL_VIDEO_GPU_RECORD */
@@ -9629,6 +9665,20 @@ unsigned menu_displaylist_build_list(
             build_list[8].checked  = is_ffmpeg; /* MENU_ENUM_LABEL_STREAM_CONFIG */
             build_list[9].checked  = is_ffmpeg; /* MENU_ENUM_LABEL_STREAMING_TITLE */
             build_list[10].checked = is_ffmpeg; /* MENU_ENUM_LABEL_STREAMING_URL */
+            build_list[12].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_MASTER_ADDRESS */
+            build_list[13].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_BRIDGE_ENABLE */
+            build_list[14].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_COMPRESSION */
+            build_list[15].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_INPUT */
+            build_list[16].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_AUDIO */
+            build_list[17].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_MTU */
+            build_list[18].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_1_ENABLE */
+            build_list[19].checked = is_groovy && groovy_follower_1_on; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_1_ADDRESS */
+            build_list[20].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_2_ENABLE */
+            build_list[21].checked = is_groovy && groovy_follower_2_on; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_2_ADDRESS */
+            build_list[22].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_3_ENABLE */
+            build_list[23].checked = is_groovy && groovy_follower_3_on; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_3_ADDRESS */
+            build_list[24].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_4_ENABLE */
+            build_list[25].checked = is_groovy && groovy_follower_4_on; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_4_ADDRESS */
 
             for (i = 0; i < ARRAY_SIZE(build_list); i++)
             {

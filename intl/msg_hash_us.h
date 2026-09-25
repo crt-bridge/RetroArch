@@ -5253,6 +5253,144 @@ MSG_HASH(
    MENU_ENUM_SUBLABEL_VIDEO_GPU_RECORD,
    "Record output of GPU shaded material if available."
    )
+/* The MASTER receiver address, AHEAD of the six settings below -- without a
+ * receiver, none of the six is any use. Same upstream key as the
+ * RECORD_CONFIG entry hidden under this driver (video_record_config /
+ * settings->paths.path_record_config): no new key, and no GROOVY_*
+ * environment variable overrides it (a hostname is accepted anywhere an IP
+ * address is). */
+MSG_HASH(
+   MENU_ENUM_LABEL_VALUE_GROOVY_MASTER_ADDRESS,
+   "Groovy Master Address"
+   )
+MSG_HASH(
+   MENU_ENUM_SUBLABEL_GROOVY_MASTER_ADDRESS,
+   "IP address or hostname of the master CRT receiver, as ip[:port] -- port defaults to 32100 when omitted. Hostnames are accepted (short forms like 127.1 are rejected on purpose). Extra receivers go in Groovy Followers below, in addition to this one."
+   )
+/* CRT bridge settings. Each sublabel NAMES the environment variable that
+ * overrides the setting: it is in the menu, not in a document, that a user
+ * should learn the bench can force it. */
+MSG_HASH(
+   MENU_ENUM_LABEL_VALUE_GROOVY_BRIDGE_ENABLE,
+   "Groovy Bridge"
+   )
+MSG_HASH(
+   MENU_ENUM_SUBLABEL_GROOVY_BRIDGE_ENABLE,
+   "Send video, audio and gamepad over the network to a CRT receiver. Stays armed across game changes. The --record command-line argument arms the bridge as well."
+   )
+MSG_HASH(
+   MENU_ENUM_LABEL_VALUE_GROOVY_COMPRESSION,
+   "Groovy Compression (LZ4)"
+   )
+MSG_HASH(
+   MENU_ENUM_SUBLABEL_GROOVY_COMPRESSION,
+   "Compress every frame with LZ4 before sending. Overridden by the GROOVY_COMPRESSION environment variable."
+   )
+MSG_HASH(
+   MENU_ENUM_LABEL_VALUE_GROOVY_INPUT,
+   "Groovy Gamepad Channel"
+   )
+MSG_HASH(
+   MENU_ENUM_SUBLABEL_GROOVY_INPUT,
+   "Read the gamepad plugged into the receiver. Two pads at most. Overridden by the GROOVY_INPUT environment variable."
+   )
+MSG_HASH(
+   MENU_ENUM_LABEL_VALUE_GROOVY_AUDIO,
+   "Groovy Audio"
+   )
+MSG_HASH(
+   MENU_ENUM_SUBLABEL_GROOVY_AUDIO,
+   "Where sound is played: off nowhere, receiver on the CRT machine, both on each side. Overridden by the GROOVY_AUDIO environment variable."
+   )
+MSG_HASH(
+   MENU_ENUM_LABEL_VALUE_GROOVY_MTU,
+   "Groovy MTU"
+   )
+MSG_HASH(
+   MENU_ENUM_SUBLABEL_GROOVY_MTU,
+   "Payload bytes per datagram, 548 to 3800. Lower it when the receiver is reached through a VPN. Overridden by the GROOVY_MTU environment variable."
+   )
+MSG_HASH(
+   MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWERS,
+   "Groovy Followers"
+   )
+MSG_HASH(
+   MENU_ENUM_SUBLABEL_GROOVY_FOLLOWERS,
+   "Extra receivers, in addition to the master set in Groovy Master Address above, written as ip[:port],key=value;... A malformed entry stops the bridge instead of being silently dropped. Overridden by the GROOVY_FOLLOWERS environment variable."
+   )
+/* Four "Additional Follower N" switches, each with its address -- replace,
+ * IN THE MENU, the Groovy Followers text field above, which stayed
+ * impossible to clear from the menu (the Start button, the only way out
+ * upstream, is mapped to Enter by default) and let a typo block the bridge
+ * with no way back. All off = no follower. Neither the per-follower options
+ * (mtu, compression, audio, inputs, shape, pad) nor hostnames come up to the
+ * menu here -- the expert path (GROOVY_FOLLOWERS, or the groovy_followers
+ * key above) alone carries them, and always wins over these four
+ * switches. */
+MSG_HASH(
+   MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWER_1_ENABLE,
+   "Additional Follower 1"
+   )
+MSG_HASH(
+   MENU_ENUM_SUBLABEL_GROOVY_FOLLOWER_1_ENABLE,
+   "Send video, audio and gamepad state to this additional CRT receiver, in addition to the master, at the address set below. Ignored whenever GROOVY_FOLLOWERS is set, or the groovy_followers text setting in retroarch.cfg is not empty."
+   )
+MSG_HASH(
+   MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWER_1_ADDRESS,
+   "Additional Follower 1 Address"
+   )
+MSG_HASH(
+   MENU_ENUM_SUBLABEL_GROOVY_FOLLOWER_1_ADDRESS,
+   "Numeric IP address of this additional receiver, as ip[:port] -- port defaults to 32100 when omitted. Hostnames are not accepted here. Only used while Additional Follower 1 above is on."
+   )
+MSG_HASH(
+   MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWER_2_ENABLE,
+   "Additional Follower 2"
+   )
+MSG_HASH(
+   MENU_ENUM_SUBLABEL_GROOVY_FOLLOWER_2_ENABLE,
+   "Send video, audio and gamepad state to this additional CRT receiver, in addition to the master, at the address set below. Ignored whenever GROOVY_FOLLOWERS is set, or the groovy_followers text setting in retroarch.cfg is not empty."
+   )
+MSG_HASH(
+   MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWER_2_ADDRESS,
+   "Additional Follower 2 Address"
+   )
+MSG_HASH(
+   MENU_ENUM_SUBLABEL_GROOVY_FOLLOWER_2_ADDRESS,
+   "Numeric IP address of this additional receiver, as ip[:port] -- port defaults to 32100 when omitted. Hostnames are not accepted here. Only used while Additional Follower 2 above is on."
+   )
+MSG_HASH(
+   MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWER_3_ENABLE,
+   "Additional Follower 3"
+   )
+MSG_HASH(
+   MENU_ENUM_SUBLABEL_GROOVY_FOLLOWER_3_ENABLE,
+   "Send video, audio and gamepad state to this additional CRT receiver, in addition to the master, at the address set below. Ignored whenever GROOVY_FOLLOWERS is set, or the groovy_followers text setting in retroarch.cfg is not empty."
+   )
+MSG_HASH(
+   MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWER_3_ADDRESS,
+   "Additional Follower 3 Address"
+   )
+MSG_HASH(
+   MENU_ENUM_SUBLABEL_GROOVY_FOLLOWER_3_ADDRESS,
+   "Numeric IP address of this additional receiver, as ip[:port] -- port defaults to 32100 when omitted. Hostnames are not accepted here. Only used while Additional Follower 3 above is on."
+   )
+MSG_HASH(
+   MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWER_4_ENABLE,
+   "Additional Follower 4"
+   )
+MSG_HASH(
+   MENU_ENUM_SUBLABEL_GROOVY_FOLLOWER_4_ENABLE,
+   "Send video, audio and gamepad state to this additional CRT receiver, in addition to the master, at the address set below. Ignored whenever GROOVY_FOLLOWERS is set, or the groovy_followers text setting in retroarch.cfg is not empty."
+   )
+MSG_HASH(
+   MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWER_4_ADDRESS,
+   "Additional Follower 4 Address"
+   )
+MSG_HASH(
+   MENU_ENUM_SUBLABEL_GROOVY_FOLLOWER_4_ADDRESS,
+   "Numeric IP address of this additional receiver, as ip[:port] -- port defaults to 32100 when omitted. Hostnames are not accepted here. Only used while Additional Follower 4 above is on."
+   )
 MSG_HASH(
    MENU_ENUM_LABEL_VALUE_STREAMING_MODE,
    "Streaming Mode"

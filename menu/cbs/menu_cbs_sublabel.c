@@ -760,6 +760,25 @@ DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_video_windowed_fullscreen,     MENU_
 DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_video_autoswitch_refresh_rate, MENU_ENUM_SUBLABEL_VIDEO_AUTOSWITCH_REFRESH_RATE)
 DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_video_autoswitch_pal_threshold,MENU_ENUM_SUBLABEL_VIDEO_AUTOSWITCH_PAL_THRESHOLD)
 DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_video_gpu_record,              MENU_ENUM_SUBLABEL_VIDEO_GPU_RECORD)
+DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_groovy_master_address,        MENU_ENUM_SUBLABEL_GROOVY_MASTER_ADDRESS)
+DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_groovy_bridge_enable,         MENU_ENUM_SUBLABEL_GROOVY_BRIDGE_ENABLE)
+DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_groovy_compression,           MENU_ENUM_SUBLABEL_GROOVY_COMPRESSION)
+DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_groovy_input,                 MENU_ENUM_SUBLABEL_GROOVY_INPUT)
+DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_groovy_audio,                 MENU_ENUM_SUBLABEL_GROOVY_AUDIO)
+DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_groovy_mtu,                   MENU_ENUM_SUBLABEL_GROOVY_MTU)
+/* groovy_followers (the text field) no longer has a sublabel bound here --
+ * its menu widget is gone (see menu_setting.c), replaced by the four
+ * switches below. The MENU_ENUM_SUBLABEL_GROOVY_FOLLOWERS string stays
+ * registered (intl/msg_hash_us.h) for the expert path, deliberately
+ * orphaned here. */
+DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_groovy_follower_1_enable,     MENU_ENUM_SUBLABEL_GROOVY_FOLLOWER_1_ENABLE)
+DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_groovy_follower_1_address,    MENU_ENUM_SUBLABEL_GROOVY_FOLLOWER_1_ADDRESS)
+DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_groovy_follower_2_enable,     MENU_ENUM_SUBLABEL_GROOVY_FOLLOWER_2_ENABLE)
+DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_groovy_follower_2_address,    MENU_ENUM_SUBLABEL_GROOVY_FOLLOWER_2_ADDRESS)
+DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_groovy_follower_3_enable,     MENU_ENUM_SUBLABEL_GROOVY_FOLLOWER_3_ENABLE)
+DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_groovy_follower_3_address,    MENU_ENUM_SUBLABEL_GROOVY_FOLLOWER_3_ADDRESS)
+DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_groovy_follower_4_enable,     MENU_ENUM_SUBLABEL_GROOVY_FOLLOWER_4_ENABLE)
+DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_groovy_follower_4_address,    MENU_ENUM_SUBLABEL_GROOVY_FOLLOWER_4_ADDRESS)
 DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_savestate_auto_index,          MENU_ENUM_SUBLABEL_SAVESTATE_AUTO_INDEX)
 DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_replay_auto_index,             MENU_ENUM_SUBLABEL_REPLAY_AUTO_INDEX)
 DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_block_sram_overwrite,          MENU_ENUM_SUBLABEL_BLOCK_SRAM_OVERWRITE)
@@ -4308,6 +4327,48 @@ int menu_cbs_init_bind_sublabel(menu_file_list_cbs_t *cbs,
             break;
          case MENU_ENUM_LABEL_VIDEO_GPU_RECORD:
             BIND_ACTION_SUBLABEL(cbs, action_bind_sublabel_video_gpu_record);
+            break;
+         case MENU_ENUM_LABEL_GROOVY_MASTER_ADDRESS:
+            BIND_ACTION_SUBLABEL(cbs, action_bind_sublabel_groovy_master_address);
+            break;
+         case MENU_ENUM_LABEL_GROOVY_BRIDGE_ENABLE:
+            BIND_ACTION_SUBLABEL(cbs, action_bind_sublabel_groovy_bridge_enable);
+            break;
+         case MENU_ENUM_LABEL_GROOVY_COMPRESSION:
+            BIND_ACTION_SUBLABEL(cbs, action_bind_sublabel_groovy_compression);
+            break;
+         case MENU_ENUM_LABEL_GROOVY_INPUT:
+            BIND_ACTION_SUBLABEL(cbs, action_bind_sublabel_groovy_input);
+            break;
+         case MENU_ENUM_LABEL_GROOVY_AUDIO:
+            BIND_ACTION_SUBLABEL(cbs, action_bind_sublabel_groovy_audio);
+            break;
+         case MENU_ENUM_LABEL_GROOVY_MTU:
+            BIND_ACTION_SUBLABEL(cbs, action_bind_sublabel_groovy_mtu);
+            break;
+         case MENU_ENUM_LABEL_GROOVY_FOLLOWER_1_ENABLE:
+            BIND_ACTION_SUBLABEL(cbs, action_bind_sublabel_groovy_follower_1_enable);
+            break;
+         case MENU_ENUM_LABEL_GROOVY_FOLLOWER_1_ADDRESS:
+            BIND_ACTION_SUBLABEL(cbs, action_bind_sublabel_groovy_follower_1_address);
+            break;
+         case MENU_ENUM_LABEL_GROOVY_FOLLOWER_2_ENABLE:
+            BIND_ACTION_SUBLABEL(cbs, action_bind_sublabel_groovy_follower_2_enable);
+            break;
+         case MENU_ENUM_LABEL_GROOVY_FOLLOWER_2_ADDRESS:
+            BIND_ACTION_SUBLABEL(cbs, action_bind_sublabel_groovy_follower_2_address);
+            break;
+         case MENU_ENUM_LABEL_GROOVY_FOLLOWER_3_ENABLE:
+            BIND_ACTION_SUBLABEL(cbs, action_bind_sublabel_groovy_follower_3_enable);
+            break;
+         case MENU_ENUM_LABEL_GROOVY_FOLLOWER_3_ADDRESS:
+            BIND_ACTION_SUBLABEL(cbs, action_bind_sublabel_groovy_follower_3_address);
+            break;
+         case MENU_ENUM_LABEL_GROOVY_FOLLOWER_4_ENABLE:
+            BIND_ACTION_SUBLABEL(cbs, action_bind_sublabel_groovy_follower_4_enable);
+            break;
+         case MENU_ENUM_LABEL_GROOVY_FOLLOWER_4_ADDRESS:
+            BIND_ACTION_SUBLABEL(cbs, action_bind_sublabel_groovy_follower_4_address);
             break;
          case MENU_ENUM_LABEL_VIDEO_FULLSCREEN:
             BIND_ACTION_SUBLABEL(cbs, action_bind_sublabel_video_fullscreen);

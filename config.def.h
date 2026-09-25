@@ -1033,6 +1033,48 @@
 /* Record post-shaded GPU output instead of raw game footage if available. */
 #define DEFAULT_GPU_RECORD false
 
+/* --- CRT bridge settings --------------------------------------------------
+ * The bridge settings RetroArch now knows about. They live in retroarch.cfg
+ * and are configured from the menu, Recording category.
+ *
+ * THEIR DEFAULT IS PLAYABLE: a user who opens the shortcut without knowing
+ * anything about the project gets sound on the receiver, the gamepad, and
+ * compression -- exactly what scripts/launch-emitter.ps1 gives by default.
+ * This replaces an earlier default that only turned these settings on
+ * through the launch script; the two diverging defaults are gone.
+ *
+ * THE GROOVY_* ENVIRONMENT VARIABLES ALWAYS WIN over these values -- that is
+ * what makes a bench session reproducible. See
+ * record/drivers/groovy_menu_precedence.h.
+ */
+#define DEFAULT_GROOVY_BRIDGE_ENABLE true
+#define DEFAULT_GROOVY_COMPRESSION true
+#define DEFAULT_GROOVY_INPUT true
+
+/* 1 == GROOVY_AUDIO_RECEIVER (record/drivers/groovy_audio.h). The integer is
+ * written here rather than the enum: config.def.h must not depend on any
+ * driver header. A test refuses to let the two diverge
+ * (emitter/test/test_groovy_menu_settings_template.py in crt-bridge). */
+#define DEFAULT_GROOVY_AUDIO 1
+
+/* 1472 == GM_MTU_DEFAULT (libgm/include/gm.h). Same reason, same guard: the
+ * menu never becomes a second source of truth for the bounds. */
+#define DEFAULT_GROOVY_MTU 1472
+
+/* Four "Additional Follower 1" to "4" switches replace, IN THE MENU, the
+ * groovy_followers text field above (removed from the menu, see
+ * menu/menu_setting.c) -- that field could not be cleared from the menu
+ * (menu_input_st_string_cb refuses an empty string), and a typo could leave
+ * a user with no picture and no way back (the Start button, the only way
+ * out upstream, is mapped by default to Enter, which already confirms).
+ * All off by default = no follower, no string manipulation needed. The
+ * addresses have no default macro (empty string, same reason as
+ * groovy_followers above). */
+#define DEFAULT_GROOVY_FOLLOWER_1_ENABLE false
+#define DEFAULT_GROOVY_FOLLOWER_2_ENABLE false
+#define DEFAULT_GROOVY_FOLLOWER_3_ENABLE false
+#define DEFAULT_GROOVY_FOLLOWER_4_ENABLE false
+
 /* Watch shader files for changes and auto-apply as necessary. */
 #define DEFAULT_VIDEO_SHADER_WATCH_FILES false
 

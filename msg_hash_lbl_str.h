@@ -1072,6 +1072,32 @@
 #define MENU_ENUM_LABEL_VIDEO_FULLSCREEN_STR "video_fullscreen"
 #define MENU_ENUM_LABEL_VIDEO_GAMMA_STR "video_gamma"
 #define MENU_ENUM_LABEL_VIDEO_GPU_RECORD_STR "video_gpu_record"
+/* Master receiver address: this string is NOT a retroarch.cfg key -- the
+ * widget sits on settings->paths.path_record_config, already persisted
+ * under "video_record_config" by the upstream RECORD_CONFIG entry. Same
+ * situation as MENU_ENUM_LABEL_RECORD_CONFIG_STR ("record_config"), which
+ * likewise does not match "video_record_config". */
+#define MENU_ENUM_LABEL_GROOVY_MASTER_ADDRESS_STR "groovy_master_address"
+/* CRT bridge settings. The string IS the retroarch.cfg key: it is through
+ * this exact equality, and only through it, that a setting is persisted
+ * under the name declared in configuration.c. */
+#define MENU_ENUM_LABEL_GROOVY_BRIDGE_ENABLE_STR "groovy_bridge_enable"
+#define MENU_ENUM_LABEL_GROOVY_COMPRESSION_STR "groovy_compression"
+#define MENU_ENUM_LABEL_GROOVY_INPUT_STR "groovy_input"
+#define MENU_ENUM_LABEL_GROOVY_AUDIO_STR "groovy_audio"
+#define MENU_ENUM_LABEL_GROOVY_MTU_STR "groovy_mtu"
+#define MENU_ENUM_LABEL_GROOVY_FOLLOWERS_STR "groovy_followers"
+/* Four "Additional Follower N" switches (menu), which replace the text
+ * field above IN THE MENU only -- the key stays the expert path. Each
+ * string IS the retroarch.cfg key. */
+#define MENU_ENUM_LABEL_GROOVY_FOLLOWER_1_ENABLE_STR "groovy_follower_1_enable"
+#define MENU_ENUM_LABEL_GROOVY_FOLLOWER_1_ADDRESS_STR "groovy_follower_1_address"
+#define MENU_ENUM_LABEL_GROOVY_FOLLOWER_2_ENABLE_STR "groovy_follower_2_enable"
+#define MENU_ENUM_LABEL_GROOVY_FOLLOWER_2_ADDRESS_STR "groovy_follower_2_address"
+#define MENU_ENUM_LABEL_GROOVY_FOLLOWER_3_ENABLE_STR "groovy_follower_3_enable"
+#define MENU_ENUM_LABEL_GROOVY_FOLLOWER_3_ADDRESS_STR "groovy_follower_3_address"
+#define MENU_ENUM_LABEL_GROOVY_FOLLOWER_4_ENABLE_STR "groovy_follower_4_enable"
+#define MENU_ENUM_LABEL_GROOVY_FOLLOWER_4_ADDRESS_STR "groovy_follower_4_address"
 #define MENU_ENUM_LABEL_VIDEO_GPU_SCREENSHOT_STR "video_gpu_screenshot"
 #define MENU_ENUM_LABEL_VIDEO_HARD_SYNC_STR "video_hard_sync"
 #define MENU_ENUM_LABEL_VIDEO_HARD_SYNC_FRAMES_STR "video_hard_sync_frames"

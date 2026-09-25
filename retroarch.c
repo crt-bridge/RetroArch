@@ -8393,7 +8393,31 @@ bool retroarch_main_init(int argc, char *argv[])
    command_event(CMD_EVENT_REWIND_INIT, NULL);
 #endif
 
-   if (*rec_st->path)
+   /* CRT bridge. The gate used to look ONLY at the path set by --record --
+    * a field that recording_deinit() clears on every content close
+    * (record/record_driver.c, "Forget cached path"), and content_load()
+    * goes through RARCH_CTL_MAIN_DEINIT then retroarch_main_init() on EVERY
+    * load, including a game change within the same session. That is, and
+    * only that, why the bridge did not survive a game change.
+    *
+    * settings is neither reloaded nor reset between two content_load()
+    * calls: the persisted flag read here is still true on the second pass.
+    * This holds because of that fact, not because of an extra safeguard.
+    *
+    * --record stays intact and always takes precedence. The two branches
+    * do not know about each other, and that is deliberate -- a bench
+    * session arms regardless of what is in the user's configuration.
+    *
+    * No further line is needed to set rec_st->enable: the
+    * CMD_EVENT_RECORD_INIT handler sets it itself before calling
+    * recording_init(), whichever path triggered the event.
+    *
+    * At the very first startup, before any content is chosen, this branch
+    * fires the event under the dummy core: recording_init() cleanly refuses
+    * (CORE_TYPE_DUMMY guard), the log carries a warning, and RECORD_DEINIT
+    * cleans up with no effect. One more log line, never a visible error,
+    * never a byte on the wire. */
+   if (*rec_st->path || settings->bools.groovy_bridge_enable)
       command_event(CMD_EVENT_RECORD_INIT, NULL);
 
    command_event(CMD_EVENT_SET_PER_GAME_RESOLUTION, NULL);
