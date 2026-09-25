@@ -232,7 +232,8 @@ SYMBOL_MAP := -Wl,-Map=output.map
 
 $(TARGET): $(RARCH_OBJ)
 	@$(if $(Q), $(shell echo echo LD $@),)
-	$(Q)$(LINK) -o $@ $(RARCH_OBJ) $(LIBS) $(LDFLAGS) $(LIBRARY_DIRS)
+	$(file >obj-list.txt,$(RARCH_OBJ))
+	$(Q)$(LINK) -o $@ @obj-list.txt $(LIBS) $(LDFLAGS) $(LIBRARY_DIRS)
 
 # Compile the Metal shader library used by gfx/drivers/metal.m via
 # [device newDefaultLibrary]. Xcode produces this automatically for the

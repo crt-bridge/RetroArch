@@ -34,16 +34,20 @@
 #include "drivers/record_ffmpeg.h"
 #include "drivers/record_wav.h"
 #include "drivers/record_avfoundation.h"
+#ifdef HAVE_GROOVY
+#include "drivers/record_groovy.h"
+#endif
 
 static recording_state_t recording_state = {0};
 
 static const record_driver_t record_null = {
-   NULL, /* new */
+   NULL, /* init */
    NULL, /* free */
    NULL, /* push_video */
    NULL, /* push_audio */
    NULL, /* finalize */
    "null",
+   NULL, /* push_av_info — crt-bridge geometry hook */
 };
 
 const record_driver_t *record_drivers[] = {
@@ -54,6 +58,9 @@ const record_driver_t *record_drivers[] = {
    &record_ffmpeg,
 #endif
    &record_wav,
+#ifdef HAVE_GROOVY
+   &record_groovy,
+#endif
    &record_null,
    NULL,
 };
@@ -316,7 +323,45 @@ bool recording_init(void)
       }
    }
 
+   /* crt-bridge: HW-core native-FBO capture — size the
+    * record buffer from the core's native av_info ceiling, not the window
+    * viewport (irrelevant for native capture, may even be unavailable).
+    * gpu_width/gpu_height carry the buffer ceiling; recording_dump_frame's
+    * native branch grows it if a frame ever exceeds it. */
    if (  video_gpu_record
+      && video_st->current_video->read_native
+      && video_driver_is_hw_context()
+      && av_info->geometry.max_width
+      && av_info->geometry.max_height)
+   {
+      unsigned gpu_size;
+      unsigned max_w = av_info->geometry.max_width;
+      unsigned max_h = av_info->geometry.max_height;
+
+      params.out_width  = av_info->geometry.base_width;
+      params.out_height = av_info->geometry.base_height;
+      params.fb_width   = next_pow2(max_w);
+      params.fb_height  = next_pow2(max_h);
+
+      if (video_force_aspect &&
+            (video_st->aspect_ratio > 0.0f))
+         params.aspect_ratio = video_st->aspect_ratio;
+      else if (params.out_height)
+         params.aspect_ratio = (float)params.out_width / params.out_height;
+
+      params.pix_fmt            = FFEMU_PIX_BGR24;
+      recording_st->gpu_width   = max_w;
+      recording_st->gpu_height  = max_h;
+
+      RARCH_LOG("[Recording] Native HW capture: buffer ceiling %ux%u, "
+            "current native %ux%u.\n",
+            max_w, max_h, params.out_width, params.out_height);
+
+      gpu_size = max_w * max_h * 3;
+      if (!(video_st->record_gpu_buffer = (uint8_t*)malloc(gpu_size)))
+         return false;
+   }
+   else if (  video_gpu_record
       && video_st->current_video->read_viewport)
    {
       unsigned gpu_size;

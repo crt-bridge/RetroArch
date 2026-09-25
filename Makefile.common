@@ -2586,6 +2586,34 @@ ifeq ($(HAVE_FFMPEG), 1)
    INCLUDE_DIRS += -Iffmpeg
 endif
 
+# crt-bridge record_groovy driver
+# Enable: HAVE_GROOVY=1 LIBGM_DIR=/path/to/libgm
+ifeq ($(HAVE_GROOVY), 1)
+   OBJ += record/drivers/record_groovy.o
+   # crt-bridge: ported joypad driver -- lives under the same guard as
+   # record_groovy, whose input API it consumes.
+   OBJ += input/drivers_joypad/mister_joypad.o
+   # crt-bridge: the keyboard/mouse wrapper driver (mister_input.c) wraps
+   # input_dinput end to end, and the two libraries below are Win32-only.
+   # One branch per platform, never on the shared line -- same idiom as
+   # the neighboring HAVE_CRTSWITCHRES block.
+   # $(OS) comes from qb/qb.system.sh, written into config.mk by
+   # ./configure: Win32 under MSYS2/MinGW, Linux on the build host. NEVER
+   # reintroduce a $(shell uname -s) here, the detection is already done
+   # upstream of this point.
+   ifneq ($(findstring Win32,$(OS)),)
+      # crt-bridge: keyboard/mouse wrapper input driver -- instantiates
+      # dinput internally.
+      OBJ  += input/drivers/mister_input.o
+      LIBS += -lws2_32 -lwinmm
+   endif
+   ifneq ($(LIBGM_DIR),)
+      INCLUDE_DIRS += -I$(LIBGM_DIR)/include
+      LIBS         += -L$(LIBGM_DIR) -lgm
+   endif
+   DEFINES += -DHAVE_GROOVY
+endif
+
 # CRT mode switching
 ifeq ($(HAVE_CRTSWITCHRES), 1)
    INCLUDE_DIRS += -I$(DEPS_DIR)/switchres
