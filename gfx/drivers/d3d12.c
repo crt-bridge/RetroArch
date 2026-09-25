@@ -24,6 +24,7 @@
 #define CINTERFACE
 #define WIN32_LEAN_AND_MEAN
 
+#include <stdlib.h>
 #include <string.h>
 #include <malloc.h>
 
@@ -54,6 +55,7 @@
 #endif
 
 #include "../../verbosity.h"
+#include "../../record/record_driver.h"
 #include "../../configuration.h"
 #include "../../retroarch.h"
 #include "../font_driver.h"
@@ -442,6 +444,32 @@ typedef struct
 #endif
    uint32_t flags;
    int8_t wait_for_vblank;
+   /* crt-bridge: native-resolution capture path — the
+    * D3D12 counterpart of the GL, Vulkan and D3D11 ports.
+    *
+    * This is the only one of the four with no shortcut. The core's texture is
+    * handed to us directly (hw_render_texture, already in COPY_SOURCE state),
+    * which is convenient, but everything else is manual: a readback heap
+    * sized from GetCopyableFootprints, our own command-list submission with a
+    * fence wait, and a render-target descriptor that has to be carved out of
+    * a heap whose size is fixed at init. */
+   struct
+   {
+      D3D12Resource               readback;   /* HEAP_TYPE_READBACK buffer */
+      d3d12_texture_t             compose;    /* native-dims render target */
+      D3D12Resource               src;        /* what read_native copies from */
+      D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint;
+      UINT64                      total_bytes;
+      UINT                        num_rows;
+      UINT64                      row_size;
+      DXGI_FORMAT                 format;
+      unsigned                    width;
+      unsigned                    height;
+      unsigned                    compose_w;
+      unsigned                    compose_h;
+      bool                        src_is_compose;
+      bool                        ready;
+   } native;
 } d3d12_video_t;
 
 #define D3D12_ROLLING_SCANLINE_SIMULATION
@@ -3508,6 +3536,10 @@ error:
    return false;
 }
 
+/* crt-bridge: defined further down, needed by the
+ * teardown path above it. */
+static void d3d12_deinit_native(d3d12_video_t *d3d12);
+
 static void d3d12_gfx_free(void* data)
 {
    unsigned       i;
@@ -3515,6 +3547,10 @@ static void d3d12_gfx_free(void* data)
 
    if (!d3d12)
       return;
+
+   /* crt-bridge: release the native capture
+    * resources while the device is still alive. */
+   d3d12_deinit_native(d3d12);
 
    {
       D3D12Fence fence = d3d12->queue.fence;
@@ -4051,7 +4087,9 @@ static void d3d12_init_descriptors(d3d12_video_t* d3d12)
     * + 1 reserved at the end for the HDR readback tonemap target used by
     * d3d12_gfx_read_viewport().  The reserved slot is at fixed offset
     * (countof(renderTargets) + GFX_MAX_SHADERS * 2). */
-   d3d12->desc.rtv_heap.desc.NumDescriptors = countof(d3d12->chain.renderTargets) + GFX_MAX_SHADERS * 2 + 1;
+   /* crt-bridge: +1 more for the native-capture
+    * compositing target, one slot past the HDR readback one. */
+   d3d12->desc.rtv_heap.desc.NumDescriptors = countof(d3d12->chain.renderTargets) + GFX_MAX_SHADERS * 2 + 2;
    d3d12->desc.rtv_heap.desc.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
    d3d12_init_descriptor_heap(d3d12->device, &d3d12->desc.rtv_heap);
 
@@ -4675,6 +4713,392 @@ static INLINE void d3d12_wait_for_vblank(d3d12_video_t* d3d12)
       DXGIWaitForVBlank(pOutput);
       Release(pOutput);
    }
+}
+
+/* crt-bridge: native-resolution capture path for D3D12.
+ *
+ * Same contract as the three other ports: the core's native surface delivered
+ * as TOP-DOWN BGR24, refused whenever the dims in flight contradict what the
+ * caller is about to declare on the wire.
+ *
+ * D3D12 is the most verbose of the four, and the reasons are structural:
+ *  - the readback destination is a BUFFER, not a texture, so its size and row
+ *    pitch come from GetCopyableFootprints and the rows arrive padded to
+ *    D3D12_TEXTURE_DATA_PITCH_ALIGNMENT rather than tightly packed;
+ *  - nothing is implicit. The copy is recorded into a command list we reset,
+ *    close, execute and then wait on with a fence, exactly as
+ *    d3d12_gfx_read_viewport already does for the window path;
+ *  - the compositing surface needs a render-target descriptor, and the RTV
+ *    heap is sized once at init. Making room for ours means changing that
+ *    allocation — a constraint none of the other three backends imposed.
+ */
+
+static bool d3d12_native_capture_active(d3d12_video_t *d3d12)
+{
+   recording_state_t *rec_st = recording_state_get_ptr();
+   return d3d12
+       && d3d12->hw_render_texture
+       && rec_st
+       && rec_st->enable
+       && video_driver_is_hw_context();
+}
+
+static void d3d12_deinit_native(d3d12_video_t *d3d12)
+{
+   Release(d3d12->native.readback);
+   d3d12_release_texture(&d3d12->native.compose);
+   memset(&d3d12->native.compose, 0, sizeof(d3d12->native.compose));
+   d3d12->native.readback  = NULL;
+   d3d12->native.src       = NULL;
+   d3d12->native.width     = 0;
+   d3d12->native.height    = 0;
+   d3d12->native.compose_w = 0;
+   d3d12->native.compose_h = 0;
+   d3d12->native.ready     = false;
+}
+
+/* Readback buffer, sized from the footprint of a texture of these dims and
+ * format. Rebuilt when either changes — both do at runtime, 240p gameplay
+ * against the 480i menus of the game. */
+static bool d3d12_init_native_readback(d3d12_video_t *d3d12,
+      unsigned width, unsigned height, DXGI_FORMAT format)
+{
+   D3D12_HEAP_PROPERTIES heap_props;
+   D3D12_RESOURCE_DESC   tex_desc;
+   D3D12_RESOURCE_DESC   buf_desc;
+
+   Release(d3d12->native.readback);
+   d3d12->native.readback = NULL;
+   d3d12->native.ready    = false;
+
+   if (!width || !height)
+      return false;
+
+   memset(&tex_desc, 0, sizeof(tex_desc));
+   tex_desc.Dimension          = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+   tex_desc.Alignment          = 0;
+   tex_desc.Width              = width;
+   tex_desc.Height             = height;
+   tex_desc.DepthOrArraySize   = 1;
+   tex_desc.MipLevels          = 1;
+   tex_desc.Format             = format;
+   tex_desc.SampleDesc.Count   = 1;
+   tex_desc.SampleDesc.Quality = 0;
+   tex_desc.Layout             = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+   tex_desc.Flags              = D3D12_RESOURCE_FLAG_NONE;
+
+   d3d12->device->lpVtbl->GetCopyableFootprints(d3d12->device,
+         &tex_desc, 0, 1, 0,
+         &d3d12->native.footprint,
+         &d3d12->native.num_rows,
+         &d3d12->native.row_size,
+         &d3d12->native.total_bytes);
+
+   heap_props.Type                 = D3D12_HEAP_TYPE_READBACK;
+   heap_props.CPUPageProperty      = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+   heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+   heap_props.CreationNodeMask     = 1;
+   heap_props.VisibleNodeMask      = 1;
+
+   memset(&buf_desc, 0, sizeof(buf_desc));
+   buf_desc.Dimension          = D3D12_RESOURCE_DIMENSION_BUFFER;
+   buf_desc.Alignment          = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+   buf_desc.Width              = d3d12->native.total_bytes;
+   buf_desc.Height             = 1;
+   buf_desc.DepthOrArraySize   = 1;
+   buf_desc.MipLevels          = 1;
+   buf_desc.Format             = DXGI_FORMAT_UNKNOWN;
+   buf_desc.SampleDesc.Count   = 1;
+   buf_desc.SampleDesc.Quality = 0;
+   buf_desc.Layout             = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+   buf_desc.Flags              = D3D12_RESOURCE_FLAG_NONE;
+
+   if (FAILED(d3d12->device->lpVtbl->CreateCommittedResource(d3d12->device,
+               &heap_props, D3D12_HEAP_FLAG_NONE, &buf_desc,
+               D3D12_RESOURCE_STATE_COPY_DEST, NULL,
+               uuidof(ID3D12Resource), (void**)&d3d12->native.readback)))
+   {
+      RARCH_ERR("[D3D12] Native capture readback buffer %ux%u failed.\n",
+            width, height);
+      return false;
+   }
+
+   d3d12->native.width  = width;
+   d3d12->native.height = height;
+   d3d12->native.format = format;
+   d3d12->native.ready  = true;
+   RARCH_LOG("[D3D12] Native capture readback (re)sized to %ux%u"
+         " (source format %u, row pitch %u).\n",
+         width, height, (unsigned)format,
+         (unsigned)d3d12->native.footprint.Footprint.RowPitch);
+   return true;
+}
+
+/* Compositing target: a surface WE own, at native dims, into which the core's
+ * frame is copied and the menu is then drawn. Never draw into the core's own
+ * texture. Its render-target descriptor lives in the slot reserved for us at
+ * the end of the RTV heap. */
+static bool d3d12_native_compose_target(d3d12_video_t *d3d12,
+      unsigned width, unsigned height, DXGI_FORMAT format)
+{
+   if (   d3d12->native.compose.handle
+       && d3d12->native.compose_w == width
+       && d3d12->native.compose_h == height
+       && d3d12->native.compose.desc.Format == format)
+      return true;
+
+   d3d12_release_texture(&d3d12->native.compose);
+   memset(&d3d12->native.compose, 0, sizeof(d3d12->native.compose));
+   d3d12->native.compose_w = 0;
+   d3d12->native.compose_h = 0;
+
+   if (!width || !height)
+      return false;
+
+   d3d12->native.compose.desc.Width  = width;
+   d3d12->native.compose.desc.Height = height;
+   d3d12->native.compose.desc.Format = format;
+   d3d12->native.compose.desc.Flags  = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+   d3d12->native.compose.srv_heap    = &d3d12->desc.srv_heap;
+
+   d3d12_init_texture(d3d12->device, &d3d12->native.compose);
+
+   if (!d3d12->native.compose.handle)
+   {
+      RARCH_ERR("[D3D12] Native compositing target %ux%u failed —"
+            " menu will not reach the bridge.\n", width, height);
+      return false;
+   }
+
+   /* Render-target view, in the slot reserved for us one past the HDR
+    * readback slot. The heap is sized for it at init. */
+   d3d12->native.compose.rt_view.ptr = d3d12->desc.rtv_heap.cpu.ptr
+      + (uintptr_t)(countof(d3d12->chain.renderTargets) + GFX_MAX_SHADERS * 2 + 1)
+      * d3d12->desc.rtv_heap.stride;
+
+   d3d12->device->lpVtbl->CreateRenderTargetView(d3d12->device,
+         d3d12->native.compose.handle, NULL, d3d12->native.compose.rt_view);
+
+   d3d12->native.compose_w = width;
+   d3d12->native.compose_h = height;
+   RARCH_LOG("[D3D12] Native compositing target (re)sized to %ux%u.\n",
+         width, height);
+   return true;
+}
+
+/* One native capture pass, recorded into the frame's command list.
+ *
+ * Menu closed — all of gameplay — nothing is recorded at all: read_native
+ * copies straight from the core's texture, which the core already leaves in
+ * COPY_SOURCE state for us.
+ *
+ * Menu open, we compose: the core's texture is copied into OUR surface, the
+ * menu is drawn over it, and the surface is left in COPY_SOURCE so
+ * read_native can take it from there. */
+static void d3d12_native_capture_step(d3d12_video_t *d3d12,
+      D3D12GraphicsCommandList cmd)
+{
+   unsigned width     = 0;
+   unsigned height    = 0;
+   DXGI_FORMAT format = d3d12->hw_render_texture_format;
+   D3D12_RESOURCE_DESC src_desc;
+
+   if (!d3d12->hw_render_texture)
+      return;
+
+   src_desc = d3d12->hw_render_texture->lpVtbl->GetDesc(
+         d3d12->hw_render_texture);
+   width    = (unsigned)src_desc.Width;
+   height   = (unsigned)src_desc.Height;
+
+   if (!width || !height)
+      return;
+
+   d3d12->native.src            = d3d12->hw_render_texture;
+   d3d12->native.src_is_compose = false;
+
+#if defined(HAVE_MENU)
+   if (   (d3d12->flags & D3D12_ST_FLAG_MENU_ENABLE)
+       && d3d12->menu.texture.handle
+       && d3d12_native_compose_target(d3d12, width, height, format))
+   {
+      D3D12_VIEWPORT vp;
+      D3D12_RECT     rect;
+
+      /* 1. Core texture -> our surface. Both carry the same format, so a
+       *    plain CopyResource is exact — no conversion to arrange, unlike
+       *    the Vulkan port where the compositing surface was forced to the
+       *    swapchain format. */
+      D3D12_RESOURCE_TRANSITION(cmd, d3d12->native.compose.handle,
+            D3D12_RESOURCE_STATE_COPY_SOURCE,
+            D3D12_RESOURCE_STATE_COPY_DEST);
+
+      cmd->lpVtbl->CopyResource(cmd,
+            d3d12->native.compose.handle, d3d12->hw_render_texture);
+
+      D3D12_RESOURCE_TRANSITION(cmd, d3d12->native.compose.handle,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+      /* 2. Draw the menu over it. The viewport is the whole native surface:
+       *    on the CRT the native frame IS the screen. */
+      vp.TopLeftX = 0.0f;
+      vp.TopLeftY = 0.0f;
+      vp.Width    = (float)width;
+      vp.Height   = (float)height;
+      vp.MinDepth = 0.0f;
+      vp.MaxDepth = 1.0f;
+      rect.left   = 0;
+      rect.top    = 0;
+      rect.right  = (LONG)width;
+      rect.bottom = (LONG)height;
+
+      cmd->lpVtbl->OMSetRenderTargets(cmd, 1,
+            &d3d12->native.compose.rt_view, FALSE, NULL);
+      cmd->lpVtbl->RSSetViewports(cmd, 1, &vp);
+      cmd->lpVtbl->RSSetScissorRects(cmd, 1, &rect);
+      cmd->lpVtbl->IASetPrimitiveTopology(cmd,
+            D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+      cmd->lpVtbl->SetPipelineState(cmd,
+            d3d12->pipes[VIDEO_SHADER_STOCK_BLEND]);
+      cmd->lpVtbl->SetGraphicsRootConstantBufferView(cmd, ROOT_ID_UBO,
+            d3d12->ubo_view.BufferLocation);
+      cmd->lpVtbl->SetGraphicsRootDescriptorTable(cmd, ROOT_ID_TEXTURE_T,
+            d3d12->menu.texture.gpu_descriptor[0]);
+      cmd->lpVtbl->SetGraphicsRootDescriptorTable(cmd, ROOT_ID_SAMPLER_T,
+            d3d12->menu.texture.sampler);
+      cmd->lpVtbl->IASetVertexBuffers(cmd, 0, 1, &d3d12->menu.vbo_view);
+      cmd->lpVtbl->DrawInstanced(cmd, 4, 1, 0, 0);
+
+      /* 3. Leave it as a copy source for read_native. */
+      D3D12_RESOURCE_TRANSITION(cmd, d3d12->native.compose.handle,
+            D3D12_RESOURCE_STATE_RENDER_TARGET,
+            D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+      d3d12->native.src            = d3d12->native.compose.handle;
+      d3d12->native.src_is_compose = true;
+   }
+#endif
+
+   if (   !d3d12->native.ready
+       || d3d12->native.width  != width
+       || d3d12->native.height != height
+       || d3d12->native.format != format)
+      d3d12_init_native_readback(d3d12, width, height, format);
+}
+
+/* Deliver one native frame as TOP-DOWN BGR24 (positive pitch = width*3).
+ *
+ * The copy is submitted here rather than in the frame's list, and waited on
+ * with a fence, exactly as d3d12_gfx_read_viewport does. That keeps the read
+ * self-contained at the cost of a stall — the same trade-off D3D11 makes,
+ * noted rather than hidden. */
+static bool d3d12_read_native(void *data, uint8_t *buffer,
+      unsigned width, unsigned height)
+{
+   d3d12_video_t *d3d12 = (d3d12_video_t*)data;
+   D3D12GraphicsCommandList cmd;
+   D3D12_TEXTURE_COPY_LOCATION dst_loc;
+   D3D12_TEXTURE_COPY_LOCATION src_loc;
+   D3D12_RANGE read_range;
+   const uint8_t *rows = NULL;
+   void *mapped        = NULL;
+   unsigned x, y;
+   UINT row_pitch;
+   static int flip     = -1;
+
+   if (!d3d12 || !buffer || !width || !height)
+      return false;
+
+   if (   !d3d12->native.ready
+       || !d3d12->native.readback
+       || !d3d12->native.src)
+      return false;
+
+   if (d3d12->native.width != width || d3d12->native.height != height)
+      return false;
+
+   /* Record and submit the copy on the driver's queue, then wait for it. */
+   d3d12->queue.allocator->lpVtbl->Reset(d3d12->queue.allocator);
+   cmd = d3d12->queue.cmd;
+   cmd->lpVtbl->Reset(cmd, d3d12->queue.allocator, NULL);
+
+   dst_loc.pResource       = d3d12->native.readback;
+   dst_loc.Type            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+   dst_loc.PlacedFootprint = d3d12->native.footprint;
+
+   src_loc.pResource        = d3d12->native.src;
+   src_loc.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+   src_loc.SubresourceIndex = 0;
+
+   cmd->lpVtbl->CopyTextureRegion(cmd, &dst_loc, 0, 0, 0, &src_loc, NULL);
+   cmd->lpVtbl->Close(cmd);
+   d3d12->queue.handle->lpVtbl->ExecuteCommandLists(d3d12->queue.handle, 1,
+         (ID3D12CommandList* const*)&d3d12->queue.cmd);
+
+   {
+      D3D12Fence fence = d3d12->queue.fence;
+      d3d12->queue.handle->lpVtbl->Signal(d3d12->queue.handle, fence,
+            ++d3d12->queue.fenceValue);
+      if (fence->lpVtbl->GetCompletedValue(fence) < d3d12->queue.fenceValue)
+      {
+         fence->lpVtbl->SetEventOnCompletion(fence,
+               d3d12->queue.fenceValue, d3d12->queue.fenceEvent);
+         WaitForSingleObject(d3d12->queue.fenceEvent, INFINITE);
+      }
+   }
+
+   read_range.Begin = 0;
+   read_range.End   = (SIZE_T)d3d12->native.total_bytes;
+   if (FAILED(d3d12->native.readback->lpVtbl->Map(d3d12->native.readback, 0,
+               &read_range, &mapped)) || !mapped)
+      return false;
+
+   /* D3D12 textures are top-down, like D3D11 and Vulkan and unlike GL FBOs,
+    * so no row flip is expected. Settled at the bench, not by reasoning:
+    * GROOVY_D3D_FLIP=1 forces the other direction without a rebuild. */
+   if (flip < 0)
+   {
+      const char *env = getenv("GROOVY_D3D_FLIP");
+      flip = (env && *env == '1') ? 1 : 0;
+   }
+
+   rows      = (const uint8_t*)mapped;
+   row_pitch = d3d12->native.footprint.Footprint.RowPitch;
+
+   for (y = 0; y < height; y++)
+   {
+      const uint8_t *in = rows + (size_t)row_pitch * y;
+      uint8_t *out      = buffer + (size_t)3 * width
+         * (flip ? (height - y - 1) : y);
+
+      switch (d3d12->native.format)
+      {
+         case DXGI_FORMAT_R8G8B8A8_UNORM:
+            for (x = 0; x < width; x++)
+            {
+               out[3 * x + 0] = in[4 * x + 2];
+               out[3 * x + 1] = in[4 * x + 1];
+               out[3 * x + 2] = in[4 * x + 0];
+            }
+            break;
+         case DXGI_FORMAT_B8G8R8A8_UNORM:
+         default:
+            for (x = 0; x < width; x++)
+            {
+               out[3 * x + 0] = in[4 * x + 0];
+               out[3 * x + 1] = in[4 * x + 1];
+               out[3 * x + 2] = in[4 * x + 2];
+            }
+            break;
+      }
+   }
+
+   read_range.Begin = 0;
+   read_range.End   = 0;
+   d3d12->native.readback->lpVtbl->Unmap(d3d12->native.readback, 0,
+         &read_range);
+   return true;
 }
 
 static bool d3d12_gfx_frame(
@@ -5945,6 +6369,12 @@ static bool d3d12_gfx_frame(
          D3D12_RESOURCE_STATE_RENDER_TARGET,
          D3D12_RESOURCE_STATE_PRESENT);
 
+   /* crt-bridge: compose the native capture into
+    * this frame's list, after everything else is drawn. It touches
+    * only our own surface, never the back buffer. */
+   if (d3d12_native_capture_active(d3d12))
+      d3d12_native_capture_step(d3d12, cmd);
+
    cmd->lpVtbl->Close(cmd);
    d3d12->queue.handle->lpVtbl->ExecuteCommandLists(d3d12->queue.handle, 1,
          (ID3D12CommandList* const*)&d3d12->queue.cmd);
@@ -7146,6 +7576,7 @@ video_driver_t video_d3d12 = {
    d3d12_shader_load_begin,
    d3d12_shader_load_step,
 #ifdef HAVE_GFX_WIDGETS
-   d3d12_gfx_widgets_enabled
+   d3d12_gfx_widgets_enabled,
 #endif
+   d3d12_read_native /* crt-bridge native-resolution capture */
 };
