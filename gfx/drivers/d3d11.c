@@ -27,6 +27,7 @@
 #define D3D11_NO_HELPERS
 #endif
 
+#include <stdlib.h>
 #include <string.h>
 #include <malloc.h>
 
@@ -55,6 +56,7 @@
 #include "../common/win32_common.h"
 #include "../video_shader_parse.h"
 #include "../../verbosity.h"
+#include "../../record/record_driver.h"
 #include "../../configuration.h"
 #include "../../retroarch.h"
 #include "../../performance_counters.h"
@@ -430,6 +432,26 @@ typedef struct
    IDXGIAdapter1 *current_adapter;
    IDXGIAdapter1 *adapters[D3D11_MAX_GPU_COUNT];
    d3d11_texture_t      luts[GFX_MAX_TEXTURES];
+   /* crt-bridge: native-resolution capture path — the
+    * D3D11 counterpart of gl3.c's native-FBO readback and vulkan.c's.
+    *
+    * D3D11 is the cheapest of the three so far, because the driver already
+    * copies the core's HW texture into frame.texture[0] at exactly the native
+    * dims (see the RETRO_HW_FRAME_BUFFER_VALID block in d3d11_gfx_frame).
+    * That texture IS the native surface: we never have to reach for the
+    * core's own resource. */
+   struct
+   {
+      d3d11_texture_t staging;   /* USAGE_STAGING + CPU_ACCESS_READ */
+      d3d11_texture_t compose;   /* BIND_RENDER_TARGET, native dims */
+      D3D11Texture2D  src;       /* what the next read_native should map */
+      DXGI_FORMAT     format;    /* format of `src`, read not guessed */
+      unsigned        width;
+      unsigned        height;
+      unsigned        compose_w;
+      unsigned        compose_h;
+      bool            ready;
+   } native;
 } d3d11_video_t;
 
 
@@ -2755,6 +2777,10 @@ error:
    return false;
 }
 
+/* crt-bridge: defined further down, needed by the
+ * teardown path above it. */
+static void d3d11_deinit_native(d3d11_video_t *d3d11);
+
 static void d3d11_gfx_free(void* data)
 {
    int i;
@@ -2764,6 +2790,9 @@ static void d3d11_gfx_free(void* data)
 
    if (!d3d11)
       return;
+
+   /* crt-bridge */
+   d3d11_deinit_native(d3d11);
 
    if (d3d11->flags & D3D11_ST_FLAG_WAITABLE_SWAPCHAINS)
       CloseHandle(d3d11->frameLatencyWaitableObject);
@@ -3905,6 +3934,319 @@ static INLINE void d3d11_wait_for_vblank(d3d11_video_t* d3d11)
    Release(pOutput);
 }
 
+/* crt-bridge: native-resolution capture path for D3D11.
+ *
+ * Same contract as the GL and Vulkan ports: deliver the core's native surface
+ * as TOP-DOWN BGR24, and refuse delivery whenever the pipeline holds a frame
+ * whose dims contradict what the caller is about to declare on the wire.
+ *
+ * What differs from the other two, and why it is shorter:
+ *  - the driver ALREADY copies the core's HW texture into frame.texture[0] at
+ *    the native dims, so there is no need to reach into the core's resource.
+ *  - the readback is synchronous. D3D11 has an immediate context: CopyResource
+ *    then Map with D3D11_MAP_READ, no ring, no fence, no in-flight dims to
+ *    reason about. That removes the whole class of "refuse while refilling"
+ *    logic the async paths need.
+ *  - the flip is explicit in the conversion loop rather than a negative
+ *    stride, because we write the swizzle by hand anyway.
+ *
+ * The synchronous read is a real trade-off, not a free win: it stalls until
+ * the GPU has finished the copy. Measured acceptable on this bench; noted in
+ * the effort log rather than hidden.
+ */
+
+static bool d3d11_native_capture_active(d3d11_video_t *d3d11)
+{
+   recording_state_t *rec_st = recording_state_get_ptr();
+   return d3d11
+       && d3d11->frame.texture[0].handle
+       && rec_st
+       && rec_st->enable
+       && video_driver_is_hw_context();
+}
+
+static void d3d11_deinit_native(d3d11_video_t *d3d11)
+{
+   d3d11_release_texture(&d3d11->native.staging);
+   d3d11_release_texture(&d3d11->native.compose);
+   memset(&d3d11->native.staging, 0, sizeof(d3d11->native.staging));
+   memset(&d3d11->native.compose, 0, sizeof(d3d11->native.compose));
+   d3d11->native.src       = NULL;
+   d3d11->native.width     = 0;
+   d3d11->native.height    = 0;
+   d3d11->native.compose_w = 0;
+   d3d11->native.compose_h = 0;
+   d3d11->native.ready     = false;
+}
+
+/* Staging texture the CPU reads from. Rebuilt whenever the native dims or the
+ * source format change — both happen at runtime, 240p gameplay against the
+ * 480i menus of the game. */
+static bool d3d11_init_native_staging(d3d11_video_t *d3d11,
+      unsigned width, unsigned height, DXGI_FORMAT format)
+{
+   D3D11_TEXTURE2D_DESC desc;
+
+   d3d11_release_texture(&d3d11->native.staging);
+   memset(&d3d11->native.staging, 0, sizeof(d3d11->native.staging));
+
+   if (!width || !height)
+      return false;
+
+   memset(&desc, 0, sizeof(desc));
+   desc.Width              = width;
+   desc.Height             = height;
+   desc.MipLevels          = 1;
+   desc.ArraySize          = 1;
+   desc.Format             = format;
+   desc.SampleDesc.Count   = 1;
+   desc.SampleDesc.Quality = 0;
+   desc.Usage              = D3D11_USAGE_STAGING;
+   desc.BindFlags          = 0;
+   desc.CPUAccessFlags     = D3D11_CPU_ACCESS_READ;
+   desc.MiscFlags          = 0;
+
+   if (FAILED(d3d11->device->lpVtbl->CreateTexture2D(d3d11->device, &desc,
+               NULL, &d3d11->native.staging.handle)))
+   {
+      RARCH_ERR("[D3D11] Native capture staging %ux%u (format %u) failed.\n",
+            width, height, (unsigned)format);
+      return false;
+   }
+
+   d3d11->native.staging.desc = desc;
+   d3d11->native.width        = width;
+   d3d11->native.height       = height;
+   d3d11->native.format       = format;
+   d3d11->native.ready        = true;
+   RARCH_LOG("[D3D11] Native capture readback (re)sized to %ux%u"
+         " (source format %u).\n", width, height, (unsigned)format);
+   return true;
+}
+
+/* Compositing target: a surface WE own, at native dims, into which the core's
+ * frame is copied and the menu is then drawn. Never draw into
+ * frame.texture[0] — the shader chain reads it. */
+static bool d3d11_native_compose_target(d3d11_video_t *d3d11,
+      unsigned width, unsigned height, DXGI_FORMAT format)
+{
+   if (   d3d11->native.compose.handle
+       && d3d11->native.compose_w == width
+       && d3d11->native.compose_h == height
+       && d3d11->native.compose.desc.Format == format)
+      return true;
+
+   d3d11_release_texture(&d3d11->native.compose);
+   memset(&d3d11->native.compose, 0, sizeof(d3d11->native.compose));
+   d3d11->native.compose_w = 0;
+   d3d11->native.compose_h = 0;
+
+   if (!width || !height)
+      return false;
+
+   d3d11->native.compose.desc.Width     = width;
+   d3d11->native.compose.desc.Height    = height;
+   d3d11->native.compose.desc.Format    = format;
+   d3d11->native.compose.desc.Usage     = D3D11_USAGE_DEFAULT;
+   d3d11->native.compose.desc.BindFlags = D3D11_BIND_RENDER_TARGET
+                                        | D3D11_BIND_SHADER_RESOURCE;
+
+   d3d11_init_texture(d3d11->device, &d3d11->native.compose);
+
+   if (!d3d11->native.compose.handle || !d3d11->native.compose.rt_view)
+   {
+      RARCH_ERR("[D3D11] Native compositing target %ux%u failed —"
+            " menu will not reach the bridge.\n", width, height);
+      d3d11_release_texture(&d3d11->native.compose);
+      memset(&d3d11->native.compose, 0, sizeof(d3d11->native.compose));
+      return false;
+   }
+
+   d3d11->native.compose_w = width;
+   d3d11->native.compose_h = height;
+   RARCH_LOG("[D3D11] Native compositing target (re)sized to %ux%u.\n",
+         width, height);
+   return true;
+}
+
+/* One native capture pass, called from d3d11_gfx_frame once the core's frame
+ * has landed in frame.texture[0].
+ *
+ * Menu closed — all of gameplay — the staging copy is taken straight from the
+ * core's frame texture: one CopyResource, nothing else.
+ *
+ * Menu open, we compose: the core's frame is copied into OUR surface, the menu
+ * is drawn over it, and that surface is what gets copied to staging. */
+static void d3d11_native_capture_step(d3d11_video_t *d3d11)
+{
+   D3D11DeviceContext context = d3d11->context;
+   d3d11_texture_t   *frame   = &d3d11->frame.texture[0];
+   unsigned width             = frame->desc.Width;
+   unsigned height            = frame->desc.Height;
+   DXGI_FORMAT format         = frame->desc.Format;
+   D3D11Texture2D  src        = frame->handle;
+
+   if (!width || !height || !src)
+      return;
+
+#if defined(HAVE_MENU)
+   if (   (d3d11->flags & D3D11_ST_FLAG_MENU_ENABLE)
+       && d3d11->menu.texture.handle
+       && d3d11_native_compose_target(d3d11, width, height, format))
+   {
+      D3D11_VIEWPORT vp;
+      D3D11RenderTargetView null_rt = NULL;
+
+      /* 1. Core frame -> our surface. Same format on both sides, so a plain
+       *    CopyResource is exact — no swizzle to worry about, unlike the
+       *    Vulkan port where the compositing surface had to take the
+       *    swapchain format and the copy had to become a converting blit. */
+      context->lpVtbl->CopyResource(context,
+            (D3D11Resource)d3d11->native.compose.handle,
+            (D3D11Resource)src);
+
+      /* 2. Draw the menu over it. The viewport is the whole native surface:
+       *    on the CRT the native frame IS the screen. */
+      vp.TopLeftX = 0.0f;
+      vp.TopLeftY = 0.0f;
+      vp.Width    = (float)width;
+      vp.Height   = (float)height;
+      vp.MinDepth = 0.0f;
+      vp.MaxDepth = 1.0f;
+
+      context->lpVtbl->OMSetRenderTargets(context, 1,
+            &d3d11->native.compose.rt_view, NULL);
+      context->lpVtbl->RSSetViewports(context, 1, &vp);
+
+      /* D3D11 keeps pipeline state on the immediate context, and by
+       * the time this runs at the end of the frame the topology, the
+       * blend state and the rasteriser state are whatever the last
+       * draw left behind. The driver sets all three before its own
+       * menu draw; so do we, or Draw() silently produces nothing. */
+      context->lpVtbl->IASetPrimitiveTopology(context,
+            D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+      context->lpVtbl->OMSetBlendState(context, d3d11->blend_enable,
+            NULL, D3D11_DEFAULT_SAMPLE_MASK);
+      context->lpVtbl->RSSetState(context, d3d11->scissor_disabled);
+
+      {
+         d3d11_shader_t *shader = &d3d11->shaders[VIDEO_SHADER_STOCK_BLEND];
+         context->lpVtbl->IASetInputLayout(context, shader->layout);
+         context->lpVtbl->VSSetShader(context, shader->vs, NULL, 0);
+         context->lpVtbl->PSSetShader(context, shader->ps, NULL, 0);
+         context->lpVtbl->GSSetShader(context, shader->gs, NULL, 0);
+      }
+      {
+         UINT stride = sizeof(d3d11_vertex_t);
+         UINT offset = 0;
+         context->lpVtbl->IASetVertexBuffers(context, 0, 1,
+               &d3d11->menu.vbo, &stride, &offset);
+      }
+      context->lpVtbl->VSSetConstantBuffers(context, 0, 1, &d3d11->ubo);
+      {
+         d3d11_texture_t *tex = &d3d11->menu.texture;
+         context->lpVtbl->PSSetShaderResources(context, 0, 1, &tex->view);
+         context->lpVtbl->PSSetSamplers(context, 0, 1,
+               (D3D11SamplerState*)&tex->sampler);
+      }
+      context->lpVtbl->Draw(context, 4, 0);
+
+      /* 3. Unbind our surface before it is used as a copy source — D3D11
+       *    refuses a resource bound as a render target on the input side, and
+       *    the debug layer says so loudly. */
+      context->lpVtbl->OMSetRenderTargets(context, 1, &null_rt, NULL);
+
+      src = d3d11->native.compose.handle;
+   }
+#endif
+
+   if (   !d3d11->native.ready
+       || d3d11->native.width  != width
+       || d3d11->native.height != height
+       || d3d11->native.format != format)
+   {
+      if (!d3d11_init_native_staging(d3d11, width, height, format))
+         return;
+   }
+
+   context->lpVtbl->CopyResource(context,
+         (D3D11Resource)d3d11->native.staging.handle,
+         (D3D11Resource)src);
+   d3d11->native.src = src;
+}
+
+/* Deliver one native frame as TOP-DOWN BGR24 (positive pitch = width*3). */
+static bool d3d11_read_native(void *data, uint8_t *buffer,
+      unsigned width, unsigned height)
+{
+   d3d11_video_t *d3d11 = (d3d11_video_t*)data;
+   D3D11_MAPPED_SUBRESOURCE map;
+   const uint8_t *rows;
+   unsigned x, y;
+   static int flip = -1;
+
+   if (!d3d11 || !buffer || !width || !height)
+      return false;
+
+   if (   !d3d11->native.ready
+       || !d3d11->native.staging.handle
+       || !d3d11->native.src)
+      return false;
+
+   /* Dims changed since the copy was taken: refuse rather than ship content
+    * whose dims contradict what the caller will declare downstream. */
+   if (d3d11->native.width != width || d3d11->native.height != height)
+      return false;
+
+   if (FAILED(d3d11->context->lpVtbl->Map(d3d11->context,
+               (D3D11Resource)d3d11->native.staging.handle, 0,
+               D3D11_MAP_READ, 0, &map)))
+      return false;
+
+   /* D3D11 textures are top-down, like Vulkan images and unlike GL FBOs, so
+    * no row flip is expected. Settled at the bench, not by reasoning:
+    * GROOVY_D3D_FLIP=1 forces the other direction without a rebuild. */
+   if (flip < 0)
+   {
+      const char *env = getenv("GROOVY_D3D_FLIP");
+      flip = (env && *env == '1') ? 1 : 0;
+   }
+
+   rows = (const uint8_t*)map.pData;
+
+   for (y = 0; y < height; y++)
+   {
+      const uint8_t *in = rows + (size_t)map.RowPitch * y;
+      uint8_t *out      = buffer + (size_t)3 * width
+         * (flip ? (height - y - 1) : y);
+
+      switch (d3d11->native.format)
+      {
+         case DXGI_FORMAT_R8G8B8A8_UNORM:
+            for (x = 0; x < width; x++)
+            {
+               out[3 * x + 0] = in[4 * x + 2];
+               out[3 * x + 1] = in[4 * x + 1];
+               out[3 * x + 2] = in[4 * x + 0];
+            }
+            break;
+         case DXGI_FORMAT_B8G8R8A8_UNORM:
+         default:
+            for (x = 0; x < width; x++)
+            {
+               out[3 * x + 0] = in[4 * x + 0];
+               out[3 * x + 1] = in[4 * x + 1];
+               out[3 * x + 2] = in[4 * x + 2];
+            }
+            break;
+      }
+   }
+
+   d3d11->context->lpVtbl->Unmap(d3d11->context,
+         (D3D11Resource)d3d11->native.staging.handle, 0);
+   return true;
+}
+
 static bool d3d11_gfx_frame(
       void*               data,
       const void*         frame,
@@ -4971,6 +5313,13 @@ static bool d3d11_gfx_frame(
       d3d11->flags &= ~D3D11_ST_FLAG_FRAME_DUPE_LOCK;
    }
 
+   /* crt-bridge: take the native capture once all
+    * drawing is done. Independent of the window readback: the bridge
+    * needs the native surface whether or not the window path records,
+    * and it must keep feeding the CRT while the menu is open. */
+   if (d3d11_native_capture_active(d3d11))
+      d3d11_native_capture_step(d3d11);
+
    Release(rtv);
 
    return true;
@@ -5726,6 +6075,7 @@ video_driver_t video_d3d11 = {
    d3d11_shader_load_begin,
    d3d11_shader_load_step,
 #if defined(HAVE_GFX_WIDGETS)
-   d3d11_gfx_widgets_enabled
+   d3d11_gfx_widgets_enabled,
 #endif
+   d3d11_read_native /* crt-bridge native-resolution capture */
 };
