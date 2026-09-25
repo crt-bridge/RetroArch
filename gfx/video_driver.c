@@ -1169,6 +1169,30 @@ void video_driver_gpu_record_deinit(void)
    video_st->record_gpu_buffer = NULL;
 }
 
+/* crt-bridge: true when the recording sink is the bridge — native capture
+ * of a hardware core — AND the menu is open.
+ *
+ * The bridge is not a video file, it is a screen. When the core is paused
+ * behind the menu, RetroArch keeps presenting its window by replaying the
+ * last frame; the CRT must be presented the same way, or it freezes on the
+ * pre-menu image — and the menu, composited into the native capture, would
+ * never reach it.
+ *
+ * `read_native` is our own extension of the video driver table: no upstream
+ * driver provides it, so this test identifies exactly our path. */
+static bool video_driver_bridge_menu_live(void)
+{
+#ifdef HAVE_MENU
+   video_driver_state_t *video_st = &video_driver_st;
+   return video_st->current_video
+       && video_st->current_video->read_native
+       && video_driver_is_hw_context()
+       && ((menu_state_get_ptr()->flags & MENU_ST_FLAG_ALIVE) != 0);
+#else
+   return false;
+#endif
+}
+
 static void recording_dump_frame(
       const void *data, unsigned width,
       unsigned height, size_t pitch, bool is_idle)
@@ -1186,6 +1210,58 @@ static void recording_dump_frame(
 
    if (video_st->record_gpu_buffer)
    {
+      /* crt-bridge: HW-core native-FBO capture.
+       * A hardware core's post-downsample output lives in the driver's
+       * hw_render FBO at the NATIVE dims this function receives (width,
+       * height args). Capture that surface — never the window viewport —
+       * and survive native dim changes (240p<->480i) by growing the
+       * buffer instead of terminating the recording. */
+      if (vid && vid->read_native && video_driver_is_hw_context())
+      {
+         /* crt-bridge: menu open, a frame with no new content from the
+          * core is NOT a duplicate frame for the bridge — the composited
+          * surface changes every frame (cursor, menu animation). So it
+          * is captured anyway. Menu closed, the original short-circuit
+          * is preserved verbatim. */
+         if (!data && !video_driver_bridge_menu_live())
+            ffemu_data.is_dupe = true; /* HW dupe — no new frame in the FBO */
+         else
+         {
+            /* Native dims exceed the buffer (sized from the av_info
+             * ceiling at init): grow it. No CMD_EVENT_RECORD_DEINIT —
+             * recording survives every mode change. */
+            if (      ((size_t)width * height * 3)
+                    > (record_st->gpu_width * record_st->gpu_height * 3))
+            {
+               uint8_t *buf = (uint8_t*)realloc(
+                     video_st->record_gpu_buffer,
+                     (size_t)width * height * 3);
+               if (!buf)
+                  return;
+               video_st->record_gpu_buffer = buf;
+               record_st->gpu_width        = width;
+               record_st->gpu_height       = height;
+               RARCH_LOG("[Recording] Native capture buffer grown to %ux%u.\n",
+                     width, height);
+            }
+
+            /* Async pipeline refilling (recording start / dim change):
+             * drop the frame instead of pushing stale-dim content. */
+            if (!vid->read_native(video_st->data,
+                     video_st->record_gpu_buffer, width, height))
+               return;
+
+            ffemu_data.width  = width;
+            ffemu_data.height = height;
+            ffemu_data.pitch  = (int)(width * 3); /* top-down BGR24 */
+            ffemu_data.data   = video_st->record_gpu_buffer;
+         }
+
+         record_st->driver->push_video(record_st->data, &ffemu_data);
+         return;
+      }
+
+      {
       struct video_viewport vp;
 
       vp.x                        = 0;
@@ -1236,6 +1312,7 @@ static void recording_dump_frame(
       ffemu_data.data   = video_st->record_gpu_buffer + (ffemu_data.height - 1) * ffemu_data.pitch;
 
       ffemu_data.pitch  = -ffemu_data.pitch;
+      }
    }
    else
       ffemu_data.is_dupe = !data;
@@ -3183,8 +3260,11 @@ void video_driver_cached_frame(void)
    void             *recording    = recording_st->data;
    struct retro_callbacks *cbs    = &runloop_st->retro_ctx;
 
-   /* Cannot allow recording when pushing duped frames. */
-   recording_st->data             = NULL;
+   /* Cannot allow recording when pushing duped frames.
+    * crt-bridge: except for the bridge with menu open — see
+    * video_driver_bridge_menu_live above. */
+   if (!video_driver_bridge_menu_live())
+      recording_st->data          = NULL;
 
    if (runloop_st->current_core.flags & RETRO_CORE_FLAG_INITED)
       cbs->frame_cb(
@@ -4164,6 +4244,29 @@ void video_driver_frame(const void *data, unsigned width,
 
    status_text[0]                 = '\0';
    video_driver_msg[0]            = '\0';
+
+   /* + crt-bridge instrumentation, kept deliberately in the patch series:
+    * log the dims the CORE submits per frame, on change only.
+    * data == RETRO_HW_FRAME_BUFFER_VALID means the frame lives in the HW
+    * FBO (dims still meaningful); NULL means dupe. Primary verification
+    * signal for the native-FBO capture path. */
+   {
+      static unsigned core_frame_last_w = 0, core_frame_last_h = 0;
+      static const void *core_frame_last_kind = (const void*)-1;
+      const void *kind = (data == RETRO_HW_FRAME_BUFFER_VALID)
+            ? (const void*)1 : (data ? (const void*)2 : NULL);
+      if (width != core_frame_last_w || height != core_frame_last_h
+            || kind != core_frame_last_kind)
+      {
+         RARCH_LOG("[spike007] core frame: %ux%u pitch=%u data=%s\n",
+               width, height, (unsigned)pitch,
+               (data == RETRO_HW_FRAME_BUFFER_VALID) ? "HW_FBO"
+               : (data ? "SW_PTR" : "DUPE"));
+         core_frame_last_w    = width;
+         core_frame_last_h    = height;
+         core_frame_last_kind = kind;
+      }
+   }
 
    if (!video_driver_active)
       return;

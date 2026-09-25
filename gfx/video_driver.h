@@ -783,6 +783,16 @@ typedef struct video_driver
     * if set to false, will use OSD as a fallback */
    bool (*gfx_widgets_enabled)(void *data);
 #endif
+
+   /* crt-bridge: optional native-resolution readback for
+    * HW-render cores. Reads the (0,0)-(width,height) region of the core's
+    * hw_render FBO — the post-downsample NATIVE surface — into buffer as
+    * TOP-DOWN BGR24 (positive pitch = width*3). width/height are the native
+    * dims the core submitted for the current frame; the driver must refuse
+    * (return false) while its async pipeline holds frames of other dims.
+    * NULL (default, zero-initialized) = driver has no native capture path. */
+   bool (*read_native)(void *data, uint8_t *buffer,
+         unsigned width, unsigned height);
 } video_driver_t;
 
 typedef struct

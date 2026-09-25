@@ -97,6 +97,12 @@ typedef struct gl3
    GLsync fences[GL_CORE_NUM_FENCES];
    void *readback_buffer_screenshot;
    struct scaler_ctx pbo_readback_scaler;
+   /* crt-bridge: the native-FBO capture path owns its own PBO ring and
+    * scaler. It used to share the window-viewport ring, and the two tore
+    * it down under each other: a screenshot rebuilt the ring at viewport
+    * dims without clearing pbo_readback_valid[], then read an
+    * uninitialized buffer — black PNGs at window size. */
+   struct scaler_ctx pbo_native_scaler;
 
    video_info_t video_info;
    video_viewport_t vp;
@@ -106,6 +112,11 @@ typedef struct gl3
    GLuint vao;
    GLuint menu_texture;
    GLuint pbo_readback[GL_CORE_NUM_PBOS];
+   GLuint pbo_native[GL_CORE_NUM_PBOS];   /* crt-bridge */
+   /* crt-bridge: our own surface, at native dims, where the core's frame
+    * is copied and the menu is then drawn. */
+   GLuint native_compose_fbo;
+   GLuint native_compose_tex;
 
    /* Render chain for non-Slang shaders only. */
    struct
@@ -176,6 +187,14 @@ typedef struct gl3
    unsigned pbo_readback_index;
    unsigned hw_render_max_width;
    unsigned hw_render_max_height;
+   /* crt-bridge: native dims the core submitted for the most recent
+    * frame — the readback region of hw_render_fbo when the native-FBO
+    * capture path is active. */
+   unsigned native_capture_width;
+   unsigned native_capture_height;
+   unsigned pbo_native_index;             /* crt-bridge */
+   unsigned native_compose_w;             /* crt-bridge */
+   unsigned native_compose_h;
    unsigned menu_texture_width;
    unsigned menu_texture_height;
    GLuint scratch_vbos[GL_CORE_NUM_VBOS];
@@ -192,6 +211,10 @@ typedef struct gl3
    uint16_t flags;
 
    bool pbo_readback_valid[GL_CORE_NUM_PBOS];
+   /* crt-bridge: native ring state. pbo_native_ready is false until the
+    * ring is allocated at pbo_native_scaler's dims. */
+   bool pbo_native_valid[GL_CORE_NUM_PBOS];
+   bool pbo_native_ready;
    bool menu_texture_rgb32;
 } gl3_t;
 
@@ -1448,6 +1471,197 @@ static void gl3_deinit_pbo_readback(gl3_t *gl)
    scaler_ctx_gen_reset(&gl->pbo_readback_scaler);
 }
 
+/* crt-bridge: native-FBO capture path.
+ *
+ * When a HW-render core (e.g. SwanStation GL) is being recorded, the
+ * post-downsample NATIVE surface lives in gl->hw_render_fbo at the dims the
+ * core submitted per frame. The window-viewport readback is useless for
+ * the wire protocol (window dims, bottom-up). These helpers own a SEPARATE
+ * async PBO ring aimed at the native FBO region and deliver top-down
+ * BGR24.
+ *
+ * The ring used to be the window-viewport one, re-targeted in place. That
+ * broke every screenshot — gl3_read_viewport rebuilt the shared ring at
+ * viewport dims without clearing pbo_readback_valid[], then read an
+ * uninitialized buffer. Separate rings, separate scalers, no interference. */
+static bool gl3_native_capture_active(gl3_t *gl)
+{
+   return (gl->flags & GL3_FLAG_HW_RENDER_ENABLE)
+       &&  gl->hw_render_fbo != 0
+       &&  recording_state_get_ptr()->enable
+       &&  video_driver_is_hw_context();
+}
+
+static void gl3_deinit_pbo_native(gl3_t *gl)
+{
+   int i;
+   for (i = 0; i < GL_CORE_NUM_PBOS; i++)
+      if (gl->pbo_native[i] != 0)
+         glDeleteBuffers(1, &gl->pbo_native[i]);
+   memset(gl->pbo_native,       0, sizeof(gl->pbo_native));
+   memset(gl->pbo_native_valid, 0, sizeof(gl->pbo_native_valid));
+   gl->pbo_native_index = 0;
+   gl->pbo_native_ready = false;
+   scaler_ctx_gen_reset(&gl->pbo_native_scaler);
+}
+
+static bool gl3_init_pbo_native(gl3_t *gl,
+      unsigned width, unsigned height)
+{
+   int i;
+   struct scaler_ctx *scaler = NULL;
+
+   /* Tear down the previous native ring, rebuild at the new dims, and
+    * invalidate every in-flight readback — their content has stale dims. */
+   gl3_deinit_pbo_native(gl);
+
+   glGenBuffers(GL_CORE_NUM_PBOS, gl->pbo_native);
+   for (i = 0; i < GL_CORE_NUM_PBOS; i++)
+   {
+      glBindBuffer(GL_PIXEL_PACK_BUFFER, gl->pbo_native[i]);
+      glBufferData(GL_PIXEL_PACK_BUFFER,
+            width * height * sizeof(uint32_t),
+            NULL, GL_STREAM_READ);
+   }
+   glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+
+   scaler                    = &gl->pbo_native_scaler;
+
+   scaler->in_width          = width;
+   scaler->in_height         = height;
+   scaler->out_width         = width;
+   scaler->out_height        = height;
+   scaler->in_stride         = width * sizeof(uint32_t);
+   scaler->out_stride        = width * 3;
+   scaler->in_fmt            = SCALER_FMT_ABGR8888;
+   scaler->out_fmt           = SCALER_FMT_BGR24;
+   scaler->scaler_type       = SCALER_TYPE_POINT;
+
+   if (!scaler_ctx_gen_filter(scaler))
+   {
+      RARCH_ERR("[GLCore] Failed to initialize native pixel conversion for PBO.\n");
+      glDeleteBuffers(GL_CORE_NUM_PBOS, gl->pbo_native);
+      memset(gl->pbo_native, 0, sizeof(gl->pbo_native));
+      return false;
+   }
+
+   gl->pbo_native_ready = true;
+   RARCH_LOG("[GLCore] Native-FBO PBO readback (re)sized to %ux%u.\n",
+         width, height);
+   return true;
+}
+
+/* crt-bridge: compositing target for the native capture.
+ *
+ * A surface WE own, at the core's native dims, into which the core's frame is
+ * copied and the menu is then drawn. Never draw into hw_render_fbo — it
+ * belongs to the core, which may read it back. Allocated lazily on the first
+ * frame that needs it (menu open), kept across frames, resized on dim change.
+ * Costs nothing while the menu is closed: the readback then reads the core's
+ * FBO directly, exactly as before. */
+static bool gl3_native_compose_target(gl3_t *gl,
+      unsigned width, unsigned height)
+{
+   if (   gl->native_compose_fbo != 0
+       && gl->native_compose_w   == width
+       && gl->native_compose_h   == height)
+      return true;
+
+   if (gl->native_compose_fbo != 0)
+      glDeleteFramebuffers(1, &gl->native_compose_fbo);
+   if (gl->native_compose_tex != 0)
+      glDeleteTextures(1, &gl->native_compose_tex);
+   gl->native_compose_fbo = 0;
+   gl->native_compose_tex = 0;
+   gl->native_compose_w   = 0;
+   gl->native_compose_h   = 0;
+
+   if (!width || !height)
+      return false;
+
+   glGenTextures(1, &gl->native_compose_tex);
+   glBindTexture(GL_TEXTURE_2D, gl->native_compose_tex);
+   glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, width, height);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,     GL_CLAMP_TO_EDGE);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,     GL_CLAMP_TO_EDGE);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+   glBindTexture(GL_TEXTURE_2D, 0);
+
+   glGenFramebuffers(1, &gl->native_compose_fbo);
+   glBindFramebuffer(GL_FRAMEBUFFER, gl->native_compose_fbo);
+   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+         GL_TEXTURE_2D, gl->native_compose_tex, 0);
+
+   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+   {
+      RARCH_ERR("[GLCore] Native compositing target %ux%u incomplete —"
+            " menu will not reach the bridge.\n", width, height);
+      glBindFramebuffer(GL_FRAMEBUFFER, 0);
+      glDeleteFramebuffers(1, &gl->native_compose_fbo);
+      glDeleteTextures(1, &gl->native_compose_tex);
+      gl->native_compose_fbo = 0;
+      gl->native_compose_tex = 0;
+      return false;
+   }
+
+   glBindFramebuffer(GL_FRAMEBUFFER, 0);
+   gl->native_compose_w = width;
+   gl->native_compose_h = height;
+   RARCH_LOG("[GLCore] Native compositing target (re)sized to %ux%u.\n",
+         width, height);
+   return true;
+}
+
+static void gl3_deinit_native_compose(gl3_t *gl)
+{
+   if (gl->native_compose_fbo != 0)
+      glDeleteFramebuffers(1, &gl->native_compose_fbo);
+   if (gl->native_compose_tex != 0)
+      glDeleteTextures(1, &gl->native_compose_tex);
+   gl->native_compose_fbo = 0;
+   gl->native_compose_tex = 0;
+   gl->native_compose_w   = 0;
+   gl->native_compose_h   = 0;
+}
+
+static void gl3_pbo_async_readback_native(gl3_t *gl, GLuint src_fbo)
+{
+   unsigned width  = gl->native_capture_width;
+   unsigned height = gl->native_capture_height;
+
+   if (!width || !height)
+      return;
+
+   /* Native dims change at runtime (240p gameplay <-> 480i menus):
+    * re-size the PBO ring + scaler before issuing the read. */
+   if (   !gl->pbo_native_ready
+       || (unsigned)gl->pbo_native_scaler.in_width  != width
+       || (unsigned)gl->pbo_native_scaler.in_height != height)
+   {
+      if (!gl3_init_pbo_native(gl, width, height))
+         return;
+   }
+
+   glBindBuffer(GL_PIXEL_PACK_BUFFER,
+         gl->pbo_native[gl->pbo_native_index++]);
+   glPixelStorei(GL_PACK_ALIGNMENT, 4);
+   glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+
+   if (gl->pbo_native_index >= GL_CORE_NUM_PBOS)
+      gl->pbo_native_index = 0;
+   gl->pbo_native_valid[gl->pbo_native_index] = true;
+
+   /* Read the native (0,0)-(w,h) region of src_fbo — the core's HW FBO when
+    * the menu is closed, our compositing target when it is open. Never the
+    * window back buffer. */
+   glBindFramebuffer(GL_READ_FRAMEBUFFER, src_fbo);
+   glReadPixels(0, 0, (GLsizei)width, (GLsizei)height,
+         GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+   glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+   glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+}
+
 static void gl3_pbo_async_readback(gl3_t *gl)
 {
    glBindBuffer(GL_PIXEL_PACK_BUFFER,
@@ -1762,6 +1976,8 @@ static void gl3_destroy_resources(gl3_t *gl)
 #endif
    gl3_deinit_fences(gl);
    gl3_deinit_pbo_readback(gl);
+   gl3_deinit_pbo_native(gl);      /* crt-bridge */
+   gl3_deinit_native_compose(gl);  /* crt-bridge */
    gl3_deinit_hw_render(gl);
 }
 
@@ -3578,7 +3794,13 @@ static bool gl3_read_viewport(void *data, uint8_t *buffer, bool is_idle)
        || (unsigned)gl->pbo_readback_scaler.in_height != gl->vp.height)
    {
       recording_state_t *rec_st = recording_state_get_ptr();
-      if (rec_st && rec_st->enable)
+      /* crt-bridge: when the native-FBO capture path is
+       * driving the recording, this ring is NOT what recording reads — arming
+       * it here only starves the screenshot of its synchronous fallback and
+       * hands back an uninitialized buffer (black PNG at window size). Leave
+       * the flag alone and let the slow readback below do its job, exactly as
+       * on an unmodified RetroArch. */
+      if (rec_st && rec_st->enable && !gl3_native_capture_active(gl))
       {
          /* Tear down old PBO resources before reinitializing */
          if (gl->flags & GL3_FLAG_PBO_READBACK_ENABLE)
@@ -3655,6 +3877,76 @@ static bool gl3_read_viewport(void *data, uint8_t *buffer, bool is_idle)
    return true;
 
 error:
+   if (gl->flags & GL3_FLAG_USE_SHARED_CONTEXT)
+      gl->ctx_driver->bind_hw_render(gl->ctx_data, true);
+   return false;
+}
+
+/* crt-bridge: deliver one native-FBO frame from the async
+ * PBO ring as TOP-DOWN BGR24 (positive pitch = width*3). Returns false while
+ * the pipeline refills (recording just started, or native dims changed and
+ * gl3_pbo_async_readback_native has not yet re-filled the ring at the new
+ * dims) — the caller drops the frame and retries next frame. */
+static bool gl3_read_native(void *data, uint8_t *buffer,
+      unsigned width, unsigned height)
+{
+   gl3_t *gl              = (gl3_t*)data;
+   const void *ptr        = NULL;
+   struct scaler_ctx *ctx = NULL;
+
+   if (!gl || !buffer || !width || !height)
+      return false;
+
+   if (gl->flags & GL3_FLAG_USE_SHARED_CONTEXT)
+      gl->ctx_driver->bind_hw_render(gl->ctx_data, false);
+
+   /* Ring not allocated yet (recording just started): gl3_frame arms it on
+    * its next pass. */
+   if (!gl->pbo_native_ready)
+      goto refilling;
+
+   ctx = &gl->pbo_native_scaler;
+
+   /* Dim change in flight: the ring still holds frames at the previous
+    * native dims. Refuse delivery — never ship content whose dims
+    * contradict what the caller will declare downstream. */
+   if (   (unsigned)ctx->in_width  != width
+       || (unsigned)ctx->in_height != height)
+      goto refilling;
+
+   if (!gl->pbo_native_valid[gl->pbo_native_index])
+      goto refilling;
+
+   gl->pbo_native_valid[gl->pbo_native_index] = false;
+   glBindBuffer(GL_PIXEL_PACK_BUFFER,
+         gl->pbo_native[gl->pbo_native_index]);
+
+   ptr = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0,
+         width * height * sizeof(uint32_t), GL_MAP_READ_BIT);
+   if (ptr)
+   {
+      if (gl->flags & GL3_FLAG_HW_RENDER_BOTTOM_LEFT)
+      {
+         /* GL FBO readback is bottom-up: write rows in reverse (negative
+          * out stride from the last row) so the caller gets top-down BGR24
+          * (Pitfall-2 fix — record_groovy consumes positive pitch). */
+         int out_stride  = (int)(width * 3);
+         ctx->out_stride = -out_stride;
+         scaler_ctx_scale_direct(ctx,
+               buffer + (size_t)(height - 1) * (size_t)out_stride, ptr);
+         ctx->out_stride = out_stride;
+      }
+      else
+         scaler_ctx_scale_direct(ctx, buffer, ptr);
+      glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+   }
+   glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+
+   if (gl->flags & GL3_FLAG_USE_SHARED_CONTEXT)
+      gl->ctx_driver->bind_hw_render(gl->ctx_data, true);
+   return ptr != NULL;
+
+refilling:
    if (gl->flags & GL3_FLAG_USE_SHARED_CONTEXT)
       gl->ctx_driver->bind_hw_render(gl->ctx_data, true);
    return false;
@@ -3777,7 +4069,127 @@ static void gl3_draw_menu_texture(gl3_t *gl,
 
    glDisable(GL_BLEND);
 }
+
+/* crt-bridge: the menu, drawn into OUR compositing surface at native dims.
+ *
+ * Two differences from gl3_draw_menu_texture above, and not one more:
+ *  - the render viewport is always the whole surface (0,0,w,h); on the CRT
+ *    the native frame IS the screen, there is no window viewport;
+ *  - the vertical direction is chosen by the caller. The surface receives a
+ *    DIRECT COPY of the core's buffer, whereas the back buffer receives a
+ *    version already flipped by the shader chain. The menu must therefore be
+ *    drawn in the other direction here so it comes out right-side up after
+ *    the row-flip that gl3_read_native performs. */
+static void gl3_draw_menu_texture_native(gl3_t *gl,
+      unsigned width, unsigned height, bool yflip)
+{
+   const float vbo_data[32] = {
+      0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, gl->menu_texture_alpha,
+      1.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 1.0f, gl->menu_texture_alpha,
+      0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, gl->menu_texture_alpha,
+      1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, gl->menu_texture_alpha,
+   };
+   const math_matrix_4x4 *mvp = yflip ? &gl->mvp_no_rot_yflip
+                                      : &gl->mvp_no_rot;
+
+   glEnable(GL_BLEND);
+   glDisable(GL_CULL_FACE);
+   glDisable(GL_DEPTH_TEST);
+   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+   glBlendEquation(GL_FUNC_ADD);
+   glViewport(0, 0, (GLsizei)width, (GLsizei)height);
+
+   glActiveTexture(GL_TEXTURE0 + 1);
+   glBindTexture(GL_TEXTURE_2D, gl->menu_texture);
+
+   if (gl->chain.active)
+   {
+      gl->chain.shader->use(gl,
+            gl->chain.shader_data, VIDEO_SHADER_STOCK_BLEND, true);
+      gl->chain.coords.vertices = 4;
+      gl->chain.shader->set_coords(gl->chain.shader_data, &gl->chain.coords);
+      gl->chain.shader->set_mvp(gl->chain.shader_data, mvp);
+      glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+   }
+#ifdef HAVE_SLANG
+   else
+   {
+      glUseProgram(gl->pipelines.alpha_blend);
+      if (gl->pipelines.alpha_blend_loc.flat_ubo_vertex >= 0)
+         glUniform4fv(gl->pipelines.alpha_blend_loc.flat_ubo_vertex, 4,
+               mvp->data);
+
+      glEnableVertexAttribArray(0);
+      glEnableVertexAttribArray(1);
+      glEnableVertexAttribArray(2);
+      gl3_bind_scratch_vbo(gl, vbo_data, sizeof(vbo_data));
+      glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE,
+            8 * sizeof(float), (void *)(uintptr_t)0);
+      glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE,
+            8 * sizeof(float), (void *)(uintptr_t)(2 * sizeof(float)));
+      glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE,
+            8 * sizeof(float), (void *)(uintptr_t)(4 * sizeof(float)));
+      glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+      glDisableVertexAttribArray(0);
+      glDisableVertexAttribArray(1);
+      glDisableVertexAttribArray(2);
+      glBindBuffer(GL_ARRAY_BUFFER, 0);
+   }
 #endif
+
+   glDisable(GL_BLEND);
+   glActiveTexture(GL_TEXTURE0);
+}
+#endif
+
+/* crt-bridge: one native-capture step.
+ *
+ * Menu closed — the case for essentially all of play time — the readback
+ * targets the core's buffer directly, with no intermediate surface or draw
+ * pass: cost strictly identical to before.
+ *
+ * Menu open, we compose: the core's buffer is copied into OUR surface, the
+ * menu is drawn on top, and that surface is read back instead. The core's
+ * buffer is never written — it belongs to the core, which may read it
+ * back. */
+static void gl3_native_capture_step(gl3_t *gl)
+{
+#if defined(HAVE_MENU)
+   unsigned width  = gl->native_capture_width;
+   unsigned height = gl->native_capture_height;
+
+   if (   (gl->flags & GL3_FLAG_MENU_TEXTURE_ENABLE)
+       && gl->menu_texture != 0
+       && width && height
+       && gl3_native_compose_target(gl, width, height))
+   {
+      GLint prev_vp[4];
+      glGetIntegerv(GL_VIEWPORT, prev_vp);
+
+      glBindFramebuffer(GL_READ_FRAMEBUFFER, gl->hw_render_fbo);
+      glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gl->native_compose_fbo);
+      glBlitFramebuffer(0, 0, (GLint)width, (GLint)height,
+                        0, 0, (GLint)width, (GLint)height,
+                        GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+      glBindFramebuffer(GL_FRAMEBUFFER, gl->native_compose_fbo);
+      /* Direction verified on the bench, not inferred: with the core's
+       * buffer in bottom-left origin, it is the flipped MVP that yields a
+       * right-side-up menu AFTER gl3_read_native's row-flip. The other
+       * choice was tried and renders the menu upside down. */
+      gl3_draw_menu_texture_native(gl, width, height,
+            (gl->flags & GL3_FLAG_HW_RENDER_BOTTOM_LEFT) != 0);
+
+      glBindFramebuffer(GL_FRAMEBUFFER, 0);
+      glViewport(prev_vp[0], prev_vp[1],
+            (GLsizei)prev_vp[2], (GLsizei)prev_vp[3]);
+
+      gl3_pbo_async_readback_native(gl, gl->native_compose_fbo);
+      return;
+   }
+#endif
+   gl3_pbo_async_readback_native(gl, gl->hw_render_fbo);
+}
 
 static void gl3_update_input_size(gl3_t *gl, unsigned width, unsigned height)
 {
@@ -4043,6 +4455,10 @@ static bool gl3_frame(void *data, const void *frame,
       {
          streamed->width    = frame_width;
          streamed->height   = frame_height;
+         /* crt-bridge: remember the native dims the core submitted — the
+          * readback region for the native-FBO capture path. */
+         gl->native_capture_width  = frame_width;
+         gl->native_capture_height = frame_height;
       }
       else
          gl3_update_cpu_texture(gl, streamed, frame,
@@ -4385,6 +4801,19 @@ static bool gl3_frame(void *data, const void *frame,
 
    if (gl->ctx_driver->update_window_title)
       gl->ctx_driver->update_window_title(gl->ctx_data);
+
+   /* crt-bridge: the native-FBO capture ring is its own thing — issue it
+    * here, independently of GL3_FLAG_PBO_READBACK_ENABLE and of whatever
+    * the window path is doing.
+    *
+    * NO menu-mode guard here, unlike the window path below. The
+    * bridge must keep feeding the CRT while the menu is open — the guard used
+    * to freeze the tube on the last frame the moment RGUI appeared — and the
+    * menu itself is composited into the capture by gl3_native_capture_step.
+    * The call sits after menu_driver_frame above, so the menu texture of THIS
+    * frame is the one that gets composed. */
+   if (gl3_native_capture_active(gl))
+      gl3_native_capture_step(gl);
 
    if (gl->readback_buffer_screenshot)
    {
@@ -4911,6 +5340,7 @@ video_driver_t video_gl3 = {
    NULL, /* shader_load_step */
 #endif
 #ifdef HAVE_GFX_WIDGETS
-   gl3_gfx_widgets_enabled
+   gl3_gfx_widgets_enabled,
 #endif
+   gl3_read_native, /* crt-bridge native-FBO capture */
 };
