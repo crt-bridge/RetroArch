@@ -1,0 +1,273 @@
+name: crt-bridge emitter release
+
+# Triggered by a version tag Sir pushes on crt-bridge (job `meta` validates
+# it), or manually for a build-only smoke test. `workflow_dispatch` never
+# creates a release -- see job `publish`.
+on:
+  push:
+    tags:
+      - "v*-crtbridge.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Version to stamp, e.g. v1.22.2-crtbridge.1. A manual run only
+          uploads build artifacts, it never creates a release.
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crt-bridge-release-${{ github.ref }}
+  cancel-in-progress: false
+
+# The version is only ever read via $VERSION inside scripts, never
+# interpolated into a run: block -- see the `meta` job's validation step.
+env:
+  VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+
+jobs:
+  meta:
+    name: Validate tag and read pinned commits
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      base: ${{ steps.check.outputs.base }}
+      libgm_commit: ${{ steps.check.outputs.libgm_commit }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          submodules: false
+          persist-credentials: false
+
+      - name: Validate version, ancestry, and the libgm pin
+        id: check
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-crtbridge\.[1-9][0-9]*$ ]]; then
+            echo "::error::VERSION '$VERSION' does not match v<major>.<minor>.<patch>-crtbridge.<N>"
+            exit 1
+          fi
+
+          base=$(sed -n 's/^#define PACKAGE_VERSION "\(.*\)"$/\1/p' version.all)
+          if [ -z "$base" ]; then
+            echo "::error::could not read PACKAGE_VERSION from version.all"
+            exit 1
+          fi
+          tag_base="${VERSION#v}"
+          tag_base="${tag_base%-crtbridge.*}"
+          if [ "$tag_base" != "$base" ]; then
+            echo "::error::tag base '$tag_base' does not match version.all's PACKAGE_VERSION '$base'"
+            exit 1
+          fi
+
+          git fetch --no-tags origin crt-bridge
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            echo "::error::commit $GITHUB_SHA is not an ancestor of origin/crt-bridge"
+            exit 1
+          fi
+
+          libgm_commit=$(git ls-tree HEAD libgm | awk '$2=="commit"{print $3}')
+          if [ -z "$libgm_commit" ]; then
+            echo "::error::libgm is not a pinned commit (gitlink) at HEAD"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "libgm_commit=$libgm_commit" >> "$GITHUB_OUTPUT"
+
+  windows:
+    name: Build Windows x64
+    needs: meta
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: true
+          persist-credentials: false
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        with:
+          msystem: MINGW64
+          update: true
+          install: base-devel git mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf mingw-w64-x86_64-python
+
+      - name: Stamp version
+        run: |
+          set -euo pipefail
+          sed -i "s/^#define PACKAGE_VERSION \".*\"$/#define PACKAGE_VERSION \"${VERSION#v}\"/" version.all
+          grep -q "PACKAGE_VERSION \"${VERSION#v}\"" version.all
+
+      - name: Build libgm
+        run: make -C libgm CC=gcc AR=ar libgm.a libgm.dll
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          ./configure --disable-cheevos --disable-translate
+          grep -q '^HAVE_VULKAN = 1' config.mk
+
+      - name: Build
+        run: make -j"$(nproc)" HAVE_GROOVY=1 LIBGM_DIR="$PWD/libgm"
+
+      - name: Check libgm import
+        run: |
+          objdump -p retroarch.exe | grep -q 'DLL Name: libgm.dll'
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          MINGW_BIN="$(cygpath -m /mingw64/bin)"
+          MSYS_ROOT="$(cygpath -m /)"
+          python pkg/crt-bridge/package-release.py stage \
+            --platform windows --fork-dir . --libgm-dir libgm \
+            --binary retroarch.exe --version "$VERSION" \
+            --fork-commit "$GITHUB_SHA" \
+            --libgm-commit "${{ needs.meta.outputs.libgm_commit }}" \
+            --out dist --mingw-bin "$MINGW_BIN" --msys-root "$MSYS_ROOT"
+          python pkg/crt-bridge/package-release.py check \
+            --platform windows --dir "dist/crt-bridge-emitter-$VERSION-windows-x64" \
+            --mingw-bin "$MINGW_BIN" --require-branding
+          python pkg/crt-bridge/package-release.py archive \
+            --platform windows --dir "dist/crt-bridge-emitter-$VERSION-windows-x64" \
+            --out "dist/crt-bridge-emitter-$VERSION-windows-x64.zip"
+          python pkg/crt-bridge/package-release.py check \
+            --platform windows --archive "dist/crt-bridge-emitter-$VERSION-windows-x64.zip" \
+            --mingw-bin "$MINGW_BIN" --require-branding
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-x64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  linux:
+    name: Build Linux x64
+    needs: meta
+    runs-on: ubuntu-latest
+    container:
+      image: debian:12
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Before checkout: without git in the container, actions/checkout
+      # cannot fetch the libgm submodule.
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential pkg-config git ca-certificates python3 \
+            libsdl2-dev libasound2-dev libudev-dev libx11-xcb-dev libvulkan-dev
+
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: true
+          persist-credentials: false
+
+      - name: Stamp version
+        run: |
+          set -euo pipefail
+          sed -i "s/^#define PACKAGE_VERSION \".*\"$/#define PACKAGE_VERSION \"${VERSION#v}\"/" version.all
+          grep -q "PACKAGE_VERSION \"${VERSION#v}\"" version.all
+
+      - name: Build libgm
+        run: make -C libgm libgm.a
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          ./configure --disable-cheevos --disable-translate
+          grep -q '^HAVE_VULKAN = 1' config.mk
+          grep -q '^HAVE_SDL2 = 1' config.mk
+
+      - name: Build
+        run: make -j"$(nproc)" HAVE_GROOVY=1 LIBGM_DIR="$PWD/libgm"
+
+      - name: Check libgm link
+        run: nm retroarch | grep -qw gm_init
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          python3 pkg/crt-bridge/package-release.py stage \
+            --platform linux --fork-dir . --libgm-dir libgm \
+            --binary retroarch --version "$VERSION" \
+            --fork-commit "$GITHUB_SHA" \
+            --libgm-commit "${{ needs.meta.outputs.libgm_commit }}" \
+            --out dist
+          python3 pkg/crt-bridge/package-release.py check \
+            --platform linux --dir "dist/crt-bridge-emitter-$VERSION-linux-x64" \
+            --require-branding
+          python3 pkg/crt-bridge/package-release.py archive \
+            --platform linux --dir "dist/crt-bridge-emitter-$VERSION-linux-x64" \
+            --out "dist/crt-bridge-emitter-$VERSION-linux-x64.tar.gz"
+          python3 pkg/crt-bridge/package-release.py check \
+            --platform linux --archive "dist/crt-bridge-emitter-$VERSION-linux-x64.tar.gz" \
+            --require-branding
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-x64
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish draft release
+    needs: [meta, windows, linux]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Write release notes
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          # crt-bridge emitter $VERSION
+
+          Based on RetroArch ${{ needs.meta.outputs.base }}. Not affiliated with, or endorsed by, the libretro project.
+
+          Pre-release: first builds, awaiting feedback from outside the test bench.
+
+          libgm source for this build: https://github.com/crt-bridge/libgm/tree/${{ needs.meta.outputs.libgm_commit }}
+
+          Fork source: https://github.com/crt-bridge/RetroArch/tree/$GITHUB_SHA
+
+          No libretro core is included.
+
+          Windows binaries are not code-signed.
+          EOF
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$VERSION" \
+            "dist/crt-bridge-emitter-$VERSION-windows-x64.zip" \
+            "dist/crt-bridge-emitter-$VERSION-linux-x64.tar.gz" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --draft --prerelease \
+            --title "crt-bridge emitter $VERSION" \
+            --notes-file notes.md
