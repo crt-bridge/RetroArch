@@ -1768,7 +1768,7 @@ static void *groovy_new(const struct record_params *params)
             }
 
             RARCH_LOG("[groovy] follower %u: target=%s mtu=%u compression=%s "
-                      "audio=%s entrees=%s pad=%s\n",
+                      "audio=%s inputs=%s pad=%s\n",
                       i + 1u, rx->target, rx->mtu,
                       groovy_compression_mode_name((enum groovy_compression_mode)rx->compression),
                       rx->audio_on ? "on" : "off",
@@ -1801,12 +1801,12 @@ static void *groovy_new(const struct record_params *params)
                 } else {
                     RARCH_WARN("[groovy-input] hookup failed towards %s\n", rx->target);
                 }
-                RARCH_LOG("[groovy-input] follower %s: entrees=%s (%s)\n",
+                RARCH_LOG("[groovy-input] follower %s: inputs=%s (%s)\n",
                           rx->target,
                           (rx->inputs == GROOVY_INPUTS_P1) ? "p1" : "p2",
                           ok_bind ? "hooked" : "not hooked");
             } else if (st->input_mode == GROOVY_INPUT_ON) {
-                RARCH_LOG("[groovy-input] follower %s: entrees=off (not hooked)\n", rx->target);
+                RARCH_LOG("[groovy-input] follower %s: inputs=off (not hooked)\n", rx->target);
             }
         }
         st->n_rx = 1u + n_f;
@@ -3198,7 +3198,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
                 RARCH_LOG("[groovy-lat] target=%s role=%s n=%u inflight(min/p50/p95/max)=%u/%u/%u/%u "
                           "net=%u/%u/%u/%u queue=%u/%u/%u/%u backlog_max=%u "
                           "anomalies=%u sent=%u echo=%u shown=%u rejects=%u saturations=%u "
-                          "entrees=%u announces=%u/%u\n",
+                          "inputs=%u announces=%u/%u\n",
                           rx->target, groovy_role_name(rx->role),
                           rx->lat.n,
                           imin, ip50, ip95, imax,
