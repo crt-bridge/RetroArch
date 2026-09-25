@@ -1,3 +1,15 @@
+> **This is the crt-bridge fork of RetroArch.** It adds a recording driver that sends each
+> frame, at the core's native resolution, over the network to a 15 kHz CRT receiver or to
+> another computer, using the Groovy protocol designed by psakhis. The changes live on this
+> `crt-bridge` branch, one commit per change on top of upstream RetroArch. It is a small hobby
+> project, written largely with an AI coding assistant — see
+> [github.com/crt-bridge](https://github.com/crt-bridge) for what it is, how it was made, and
+> credits. It is not affiliated with, or endorsed by, the libretro project.
+>
+> *Everything below this note is the original RetroArch README, unchanged.*
+
+---
+
 [![Build Status](https://travis-ci.org/libretro/RetroArch.svg?branch=master)](https://travis-ci.org/libretro/RetroArch)
 [![Coverity Scan Build Status](https://scan.coverity.com/projects/8936/badge.svg)](https://scan.coverity.com/projects/retroarch)
 [![Crowdin](https://badges.crowdin.net/retroarch/localized.svg)](https://crowdin.com/project/retroarch)
