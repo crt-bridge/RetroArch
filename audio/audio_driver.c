@@ -274,6 +274,53 @@ audio_driver_state_t *audio_state_get_ptr(void)
    return &audio_driver_st;
 }
 
+/* crt-bridge -- clock-servo term, accessor declared here (before
+ * audio_driver_flush below) so both branches of that function can read
+ * audio_groovy_term directly; declaration grouped with
+ * audio_driver_set_buffer_size in audio_driver.h. */
+#define AUDIO_GROOVY_TERM_DEV_MAX 0.0027  /* 2700 ppm: the TOTAL term of crt-bridge, not
+                                           * just the servo's own authority. It has two
+                                           * parts: a feed-forward of -1922 ppm in 480i
+                                           * (gap between the receiver mode's rate and
+                                           * video_refresh_rate) plus +/-500 ppm of servo
+                                           * on the crystal residual (authority raised
+                                           * from 300 to 500). Worst case |2422.4| ppm;
+                                           * the factor seen here is its INVERSE (the
+                                           * core's speed varies as 1/T), i.e.
+                                           * 1/(1-0.0024224) = 1.0024283, hence a
+                                           * deviation of 2428.3 ppm. 0.0027 leaves
+                                           * 271.7 ppm of margin. DO NOT put back 0.002
+                                           * or 0.0025: the former predates the
+                                           * feed-forward, the latter predates the 500
+                                           * authority; either would reject the
+                                           * saturated 480i. This value predated the
+                                           * feed-forward and would reject ANY term in
+                                           * 480i. */
+
+static double   audio_groovy_term       = 1.0;
+static unsigned audio_groovy_term_refused = 0;
+
+void audio_driver_set_groovy_term(double term)
+{
+   /* Both tests are written in the NEGATIVE to also catch NaN: any
+    * comparison against NaN is false, so !(...) is true. */
+   if (   !(term > (1.0 - AUDIO_GROOVY_TERM_DEV_MAX))
+       || !(term < (1.0 + AUDIO_GROOVY_TERM_DEV_MAX)))
+   {
+      if (audio_groovy_term_refused++ == 0)
+         RARCH_ERR("[Audio] groovy term refused: %.9f outside 1 +/- %.4f "
+                   "(previous value kept)\n",
+                   term, AUDIO_GROOVY_TERM_DEV_MAX);
+      return;
+   }
+   audio_groovy_term = term;
+}
+
+double audio_driver_get_groovy_term(void)
+{
+   return audio_groovy_term;
+}
+
 /**
  * config_get_audio_driver_options:
  *
@@ -540,6 +587,11 @@ static void audio_driver_flush(audio_driver_state_t *audio_st,
       if (is_slowmotion)
          rate_adjust                *= slowmotion_ratio;
 
+      /* crt-bridge: servo term, a separate factor. BOTH branches of
+       * audio_driver_flush carry it; changing only one would leave a
+       * latent bug the day audio_driver changes. */
+      rate_adjust *= audio_groovy_term;
+
       /* Note: mute/volume is not applied here - driver must handle or ignore */
       audio->write_raw(audio_st->context_audio_data,
             data, frames, input_rate, rate_adjust, audio_volume_gain);
@@ -622,7 +674,12 @@ static void audio_driver_flush(audio_driver_state_t *audio_st,
          double adjust               = 1.0 + effective_delta * direction;
 
          audio_st->free_samples_buf[write_idx] = avail;
-         audio_st->src_ratio_curr = audio_st->src_ratio_orig * adjust;
+         /* crt-bridge: src_ratio_orig x adjust x groovy_term. `adjust` is
+          * unchanged (it equals exactly 1.0 whenever the audio
+          * rate-control delta, locked at zero, is null); the term is a
+          * separate factor, never a reactivation of that delta. */
+         audio_st->src_ratio_curr = audio_st->src_ratio_orig * adjust
+                                  * audio_groovy_term;
 
 #if 0
          if (verbosity_is_enabled())

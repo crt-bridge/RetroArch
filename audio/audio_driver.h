@@ -287,6 +287,15 @@ bool audio_driver_dsp_filter_init(const char *device);
 
 void audio_driver_set_buffer_size(size_t bufsize);
 
+/* crt-bridge -- clock-servo term.
+ * A SEPARATE factor multiplied into src_ratio_curr; it neither replaces
+ * nor modifies `adjust`, which equals exactly 1.0 as long as the audio
+ * rate-control delta (retroarch.cfg, locked at zero) is null.
+ * Written by a single owner: record_groovy. The setter REFUSES any term
+ * outside 1 +/- AUDIO_GROOVY_TERM_DEV_MAX and any non-finite term. */
+void   audio_driver_set_groovy_term(double term);
+double audio_driver_get_groovy_term(void);
+
 bool audio_driver_get_devices_list(void **ptr);
 
 void audio_driver_setup_rewind(void);
