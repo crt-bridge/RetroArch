@@ -1,0 +1,24 @@
+crt-bridge emitter -- third-party components and licenses
+===========================================================
+
+This archive bundles the following components. The full license text for
+each is in this LICENSES/ directory, under the filename listed below.
+
+- crt-bridge emitter, a modified RetroArch
+  Copyright (C) 2010-2025 The RetroArch team
+  License: GPL-3.0-or-later
+  Text: emitter-GPL-3.0.txt
+
+- libgm, the crt-bridge Groovy protocol library
+  License: GPL-3.0-or-later
+  Text: libgm-GPL-3.0-or-later.txt
+
+- LZ4, by Yann Collet
+  License: BSD-2-Clause
+  Text: lz4-BSD-2-Clause.txt
+
+Windows builds only:
+
+- MinGW-w64 runtime DLLs (libstdc++, libgcc_s_seh, libwinpthread, liblzma)
+  Each DLL's license is under mingw-runtime/, one subdirectory per source
+  package, copied unmodified from the MSYS2 package database at build time.
