@@ -2683,9 +2683,48 @@ bool runloop_environment_cb(unsigned cmd, void *data)
                   (*info)->timing.fps,
                   (*info)->timing.sample_rate);
 
+            /* + crt-bridge: capture the pre-change sample rate before av_info
+             * is overwritten — the seamless gate below only holds when the
+             * audio format is actually unchanged. */
+            {
+               double gm_prev_sample_rate = av_info->timing.sample_rate;
+               bool gm_groovy_live        = rec_st && rec_st->data
+                     && rec_st->driver && rec_st->driver->ident
+                     && string_is_equal(rec_st->driver->ident, "groovy");
+
             memcpy(av_info, *info, sizeof(*av_info));
 
-            command_event(CMD_EVENT_REINIT, &reinit_flags);
+            /* + crt-bridge: notify record driver of geometry change BEFORE
+             * the reinit / restart-recording cascade. Lets record_groovy emit
+             * CMD_SWITCHRES on the live socket so the daemon re-syncs without
+             * a daemon restart. */
+            if (rec_st && rec_st->driver && rec_st->driver->push_av_info)
+               rec_st->driver->push_av_info(rec_st->data, av_info);
+
+            /* + crt-bridge: seamless AV-info transition.
+             * With the groovy record driver live, push_av_info above already
+             * carried the new timing/geometry to the receiver (CMD_SWITCHRES →
+             * MMIO regime toggle). Running CMD_EVENT_REINIT here for a pure
+             * fps change (240p 59.94 ↔ 480i 59.83, same sample rate) stalls
+             * the runloop mid-frame: the audio device reopen is the audible
+             * micro-cut, and the leftover driver reinits (MIDI retries a
+             * midiStreamOpen that fails on this host, ~tens of ms) freeze the
+             * UDP frame stream mid-transfer — the receiver logs
+             * continuation_escape and scans out stale fields (the residual
+             * flash-glitch). Nothing in the remaining reinit set is needed
+             * for a timing-only change, so skip the REINIT entirely.
+             * Stock behavior is untouched when groovy is not recording. */
+            if (gm_groovy_live
+                  && no_video_reinit
+                  && av_info->timing.sample_rate == gm_prev_sample_rate)
+            {
+               RARCH_LOG("[groovy] SET_SYSTEM_AV_INFO: seamless transition — driver reinit skipped entirely (fps %.2f, sample rate %.2f Hz unchanged).\n",
+                     av_info->timing.fps, av_info->timing.sample_rate);
+               /* fall through: the no_video_reinit block below still emits
+                * CMD_EVENT_VIDEO_SET_ASPECT_RATIO for the new geometry. */
+            }
+            else
+               command_event(CMD_EVENT_REINIT, &reinit_flags);
 
             if (no_video_reinit)
                command_event(CMD_EVENT_VIDEO_SET_ASPECT_RATIO, NULL);
@@ -2695,8 +2734,14 @@ bool runloop_environment_cb(unsigned cmd, void *data)
 
             /* Cannot continue recording with different parameters.
              * Take the easiest route out and just restart
-             * the recording. */
-            if (rec_st->data)
+             * the recording.
+             * + crt-bridge exception: record_groovy is
+             * designed for live parameter changes — classify_mode adapts
+             * per-frame and push_av_info already re-announced the timing.
+             * Restarting it tears down the gm session (CMD_CLOSE/CMD_INIT),
+             * which stalls the frame stream for several hundred ms — the
+             * visible interruption on the CRT. Keep the session alive. */
+            if (rec_st->data && !gm_groovy_live)
             {
                const char *_msg = msg_hash_to_str(MSG_RESTARTING_RECORDING_DUE_TO_DRIVER_REINIT);
                runloop_msg_queue_push(_msg, strlen(_msg), 2, 180, false, NULL,
@@ -2711,6 +2756,9 @@ bool runloop_environment_cb(unsigned cmd, void *data)
                   command_event(CMD_EVENT_RECORD_DEINIT, NULL);
                   command_event(CMD_EVENT_RECORD_INIT, NULL);
                }
+            }
+            else if (gm_groovy_live)
+               RARCH_LOG("[groovy] SET_SYSTEM_AV_INFO: recording session kept alive across av_info change (seamless).\n");
             }
 
             /* Hide mouse cursor in fullscreen after
@@ -2898,6 +2946,7 @@ bool runloop_environment_cb(unsigned cmd, void *data)
          struct retro_system_av_info *av_info     = &video_st->av_info;
          struct retro_game_geometry  *geom        = (struct retro_game_geometry*)&av_info->geometry;
          const struct retro_game_geometry *in_geom= (const struct retro_game_geometry*)data;
+         recording_state_t *rec_st                = recording_state_get_ptr();
 
          if (!geom)
             return false;
@@ -2916,6 +2965,10 @@ bool runloop_environment_cb(unsigned cmd, void *data)
 
             RARCH_LOG("[Environ] SET_GEOMETRY: %ux%u, Aspect: %.3f.\n",
                   geom->base_width, geom->base_height, geom->aspect_ratio);
+
+            /* + crt-bridge: notify record driver of geometry change. */
+            if (rec_st && rec_st->driver && rec_st->driver->push_av_info)
+               rec_st->driver->push_av_info(rec_st->data, av_info);
 
             /* Forces recomputation of aspect ratios if
              * using core-dependent aspect ratios. */

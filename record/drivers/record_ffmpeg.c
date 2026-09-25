@@ -1828,4 +1828,5 @@ const record_driver_t record_ffmpeg = {
    ffmpeg_push_audio,
    ffmpeg_finalize,
    "ffmpeg",
+   NULL, /* push_av_info — crt-bridge geometry hook */
 };

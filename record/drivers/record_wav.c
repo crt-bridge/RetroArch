@@ -197,4 +197,5 @@ const record_driver_t record_wav = {
    record_wav_push_audio,
    record_wav_finalize,
    "wav",
+   NULL, /* push_av_info — crt-bridge geometry hook */
 };

@@ -3,6 +3,7 @@
 
 #include <boolean.h>
 #include <retro_miscellaneous.h>
+#include <libretro.h>  /* + crt-bridge: needed for struct retro_system_av_info in push_av_info vtable hook */
 
 enum ffemu_pix_format
 {
@@ -108,6 +109,12 @@ typedef struct record_driver
          const struct record_audio_data *audio_data);
    bool  (*finalize)(void *data);
    const char *ident;
+   /* + crt-bridge: optional geometry hook.
+    * Called at SET_SYSTEM_AV_INFO and SET_GEOMETRY by runloop.c.
+    * NULL-default: existing drivers using designated initializers or
+    * positional NULL entries skip cleanly. */
+   bool  (*push_av_info)(void *data,
+         const struct retro_system_av_info *av);
 } record_driver_t;
 
 
