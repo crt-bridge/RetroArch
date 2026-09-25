@@ -658,7 +658,7 @@ MSG_HASH(
    )
 MSG_HASH(
    MENU_ENUM_LABEL_VALUE_SYSTEM_INFO_RETROARCH_VERSION,
-   "RetroArch Version"
+   "crt-bridge emitter version"
    )
 MSG_HASH(
    MENU_ENUM_LABEL_VALUE_SYSTEM_INFO_GIT_VERSION,
@@ -15031,7 +15031,7 @@ MSG_HASH(
    )
 MSG_HASH(
    MSG_PROGRAM,
-   "RetroArch"
+   "crt-bridge emitter"
    )
 MSG_HASH(
    MSG_READING_FIRST_DATA_TRACK,
