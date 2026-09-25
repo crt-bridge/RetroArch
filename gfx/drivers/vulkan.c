@@ -16,6 +16,7 @@
 
 #include <stdint.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <retro_assert.h>
@@ -268,6 +269,33 @@ typedef struct vk
       struct scaler_ctx scaler_rgb;
       struct vk_texture staging[VULKAN_MAX_SWAPCHAIN_IMAGES];
    } readback;
+
+   /* crt-bridge: native-resolution capture path — the
+    * Vulkan counterpart of gl3.c's native-FBO readback.
+    *
+    * Its own staging ring and scaler, aimed at the core's HW image rather
+    * than the backbuffer. Kept separate from `readback` above for the same
+    * reason the GL port keeps its ring separate: a screenshot re-arms the
+    * viewport ring at window dims, and sharing it hands the recorder a
+    * buffer whose dims contradict what it declares on the wire. */
+   struct
+   {
+      struct scaler_ctx scaler;
+      struct vk_texture staging[VULKAN_MAX_SWAPCHAIN_IMAGES];
+      /* Compositing target: a surface WE own, at native dims, into which the
+       * core's frame is copied and the menu is then drawn. Never draw into
+       * the core's own image — it belongs to the core, which may read it
+       * back. Allocated lazily on the first frame that needs it. */
+      struct vk_image compose;
+      VkRenderPass compose_render_pass;
+      unsigned width;
+      unsigned height;
+      unsigned compose_w;
+      unsigned compose_h;
+      unsigned index;
+      bool valid[VULKAN_MAX_SWAPCHAIN_IMAGES];
+      bool ready;
+   } native;
 
    struct
    {
@@ -957,6 +985,11 @@ static void vulkan_draw_triangles(vk_t *vk, const struct vk_draw_triangles *call
    vkCmdDraw(vk->cmd, call->vertices, 1, 0, 0);
 }
 
+
+/* crt-bridge: defined further down, needed by the
+ * teardown path above it. */
+static void vulkan_deinit_native_readback(vk_t *vk);
+static void vulkan_deinit_native_compose(vk_t *vk);
 
 static void vulkan_destroy_texture(
       VkDevice device,
@@ -4588,6 +4621,11 @@ static void vulkan_deinit_static_resources(vk_t *vk)
          vulkan_destroy_texture(
                vk->context->device,
                &vk->readback.staging[i]);
+
+   /* crt-bridge: the native capture ring is its own
+    * allocation and must be released here too. */
+   vulkan_deinit_native_readback(vk);
+   vulkan_deinit_native_compose(vk);
 }
 
 static void vulkan_deinit_menu(vk_t *vk)
@@ -5774,6 +5812,272 @@ static void vulkan_readback(vk_t *vk, struct vk_image *readback_image)
          1, &barrier, 0, NULL, 0, NULL);
 }
 
+/* crt-bridge: native-resolution capture path for Vulkan.
+ *
+ * Port of the GL path in gfx/drivers/gl3.c. Same contract, same guarantees:
+ * deliver the core's post-downsample NATIVE surface as TOP-DOWN BGR24, refuse
+ * delivery whenever the pipeline holds frames whose dims contradict what the
+ * caller is about to declare on the wire.
+ *
+ * What differs from GL, and why:
+ *  - the core's surface is a VkImage (vk->hw.image), not an FBO. It is handed
+ *    to us in whatever layout the core left it in, so every read needs a
+ *    transition to TRANSFER_SRC_OPTIMAL and back.
+ *  - there is no PBO. The staging ring is made of VULKAN_TEXTURE_READBACK
+ *    textures — host-visible buffers — filled by vkCmdCopyImageToBuffer,
+ *    exactly as vulkan_readback() already does for the window path.
+ *  - GL FBOs read back bottom-up; Vulkan images are top-down. The row flip
+ *    the GL port needs is therefore expected to be absent here. "Expected" is
+ *    not "verified": GROOVY_VK_FLIP=1 forces the other direction so the sense
+ *    can be settled at the bench without a rebuild.
+ */
+
+static bool vulkan_native_capture_active(vk_t *vk)
+{
+   recording_state_t *rec_st = recording_state_get_ptr();
+   return vk
+       && vk->hw.image
+       && vk->hw.image->create_info.image != VK_NULL_HANDLE
+       && vk->hw.last_width
+       && vk->hw.last_height
+       && rec_st
+       && rec_st->enable
+       && video_driver_is_hw_context();
+}
+
+/* Pick the scaler input format matching the core's image. Read, never
+ * guessed — a wrong guess here shows up as swapped red and blue on the CRT,
+ * which is exactly the kind of thing that gets rationalised away instead of
+ * measured. */
+static enum scaler_pix_fmt vulkan_native_scaler_fmt(VkFormat format)
+{
+   switch (format)
+   {
+      case VK_FORMAT_R8G8B8A8_UNORM:
+      case VK_FORMAT_A8B8G8R8_UNORM_PACK32:
+         return SCALER_FMT_ABGR8888;
+      case VK_FORMAT_B8G8R8A8_UNORM:
+         return SCALER_FMT_ARGB8888;
+      default:
+         break;
+   }
+   return SCALER_FMT_ARGB8888;
+}
+
+static void vulkan_deinit_native_readback(vk_t *vk)
+{
+   int i;
+   for (i = 0; i < VULKAN_MAX_SWAPCHAIN_IMAGES; i++)
+   {
+      if (vk->native.staging[i].memory != VK_NULL_HANDLE)
+         vulkan_destroy_texture(vk->context->device, &vk->native.staging[i]);
+      vk->native.valid[i] = false;
+   }
+   vk->native.index  = 0;
+   vk->native.ready  = false;
+   vk->native.width  = 0;
+   vk->native.height = 0;
+   scaler_ctx_gen_reset(&vk->native.scaler);
+}
+
+static bool vulkan_init_native_readback(vk_t *vk,
+      unsigned width, unsigned height, VkFormat src_format)
+{
+   /* Tear the previous ring down and invalidate every in-flight readback:
+    * their content carries the previous dims. */
+   vulkan_deinit_native_readback(vk);
+
+   if (!width || !height)
+      return false;
+
+   vk->native.scaler.in_width    = width;
+   vk->native.scaler.in_height   = height;
+   vk->native.scaler.out_width   = width;
+   vk->native.scaler.out_height  = height;
+   vk->native.scaler.in_fmt      = vulkan_native_scaler_fmt(src_format);
+   vk->native.scaler.out_fmt     = SCALER_FMT_BGR24;
+   vk->native.scaler.scaler_type = SCALER_TYPE_POINT;
+
+   if (!scaler_ctx_gen_filter(&vk->native.scaler))
+   {
+      RARCH_ERR("[Vulkan] Failed to initialize native capture scaler.\n");
+      return false;
+   }
+
+   vk->native.width  = width;
+   vk->native.height = height;
+   vk->native.ready  = true;
+   RARCH_LOG("[Vulkan] Native capture readback (re)sized to %ux%u"
+         " (source format %d).\n", width, height, (int)src_format);
+   return true;
+}
+
+/* Record one native readback into the frame's command buffer. src is the
+ * image to read — the core's own image when the menu is closed, our
+ * compositing target when it is open. */
+static void vulkan_native_readback(vk_t *vk, VkImage src,
+      VkImageLayout src_layout, VkFormat src_format,
+      unsigned width, unsigned height)
+{
+   VkBufferImageCopy region;
+   VkMemoryBarrier barrier;
+   struct vk_texture *staging = NULL;
+   unsigned slot              = 0;
+
+   if (!width || !height || src == VK_NULL_HANDLE)
+      return;
+
+   /* Native dims change at runtime (240p gameplay <-> 480i menus of the
+    * game): rebuild the ring and the scaler before issuing the copy. */
+   if (   !vk->native.ready
+       || vk->native.width  != width
+       || vk->native.height != height
+       || (unsigned)vk->native.scaler.in_fmt
+             != (unsigned)vulkan_native_scaler_fmt(src_format))
+   {
+      if (!vulkan_init_native_readback(vk, width, height, src_format))
+         return;
+   }
+
+   slot                     = vk->native.index;
+   staging                  = &vk->native.staging[slot];
+   *staging                 = vulkan_create_texture(vk,
+         staging->memory != VK_NULL_HANDLE ? staging : NULL,
+         width, height,
+         VK_FORMAT_B8G8R8A8_UNORM, /* raw copy — the format is a formality */
+         NULL, NULL, VULKAN_TEXTURE_READBACK);
+
+   region.bufferOffset                    = 0;
+   region.bufferRowLength                 = 0;
+   region.bufferImageHeight               = 0;
+   region.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+   region.imageSubresource.mipLevel       = 0;
+   region.imageSubresource.baseArrayLayer = 0;
+   region.imageSubresource.layerCount     = 1;
+   region.imageOffset.x                   = 0;
+   region.imageOffset.y                   = 0;
+   region.imageOffset.z                   = 0;
+   region.imageExtent.width               = width;
+   region.imageExtent.height              = height;
+   region.imageExtent.depth               = 1;
+
+   /* The core hands its image over in whatever layout it left it in. Take it
+    * to TRANSFER_SRC_OPTIMAL for the copy, then hand it back untouched —
+    * the core may well read it again. */
+   if (src_layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+      VULKAN_IMAGE_LAYOUT_TRANSITION(vk->cmd, src,
+            src_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+   vkCmdCopyImageToBuffer(vk->cmd, src,
+         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+         staging->buffer, 1, &region);
+
+   if (src_layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+      VULKAN_IMAGE_LAYOUT_TRANSITION(vk->cmd, src,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, src_layout,
+            VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+
+   /* Make the copy visible to the host before the next frame maps it. */
+   barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+   barrier.pNext         = NULL;
+   barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+   barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+   vkCmdPipelineBarrier(vk->cmd,
+         VK_PIPELINE_STAGE_TRANSFER_BIT,
+         VK_PIPELINE_STAGE_HOST_BIT, 0,
+         1, &barrier, 0, NULL, 0, NULL);
+
+   vk->native.valid[slot] = true;
+   vk->native.index       = (slot + 1) % VULKAN_MAX_SWAPCHAIN_IMAGES;
+}
+
+/* Deliver one native frame as TOP-DOWN BGR24 (positive pitch = width*3).
+ * Returns false while the pipeline refills — recording just started, or the
+ * native dims changed and the ring has not been re-filled at the new dims.
+ * The caller drops the frame and retries on the next one. */
+static bool vulkan_read_native(void *data, uint8_t *buffer,
+      unsigned width, unsigned height)
+{
+   vk_t *vk                   = (vk_t*)data;
+   struct vk_texture *staging = NULL;
+   const uint8_t *src         = NULL;
+   /* scaler_ctx_scale_direct() is a macro that does not parenthesise its
+    * first argument, so it must be handed a plain variable -- passing
+    * &vk->native.scaler expands to &vk->native.scaler->unscaled. */
+   struct scaler_ctx *ctx     = NULL;
+   unsigned slot              = 0;
+   int out_stride             = 0;
+   static int flip            = -1;
+
+   if (!vk || !buffer || !width || !height)
+      return false;
+
+   if (!vk->native.ready)
+      return false;
+
+   /* Dim change in flight: the ring still holds frames at the previous
+    * native dims. Refuse — never ship content whose dims contradict what
+    * the caller will declare downstream. */
+   if (vk->native.width != width || vk->native.height != height)
+      return false;
+
+   /* Read the oldest entry in the ring: index points at the slot the next
+    * readback will overwrite, so the one before it is the freshest complete
+    * frame. */
+   slot    = (vk->native.index + VULKAN_MAX_SWAPCHAIN_IMAGES - 1)
+             % VULKAN_MAX_SWAPCHAIN_IMAGES;
+   if (!vk->native.valid[slot])
+      return false;
+
+   staging = &vk->native.staging[slot];
+   if (staging->memory == VK_NULL_HANDLE)
+      return false;
+
+   vk->native.valid[slot] = false;
+
+   vkMapMemory(vk->context->device, staging->memory,
+         staging->offset, staging->size, 0, (void**)&src);
+   if (!src)
+      return false;
+
+   if (staging->flags & VK_TEX_FLAG_NEED_MANUAL_CACHE_MANAGEMENT)
+   {
+      VkMappedMemoryRange range;
+      range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+      range.pNext  = NULL;
+      range.memory = staging->memory;
+      range.offset = 0;
+      range.size   = VK_WHOLE_SIZE;
+      vkInvalidateMappedMemoryRanges(vk->context->device, 1, &range);
+   }
+
+   /* Vulkan images are top-down, unlike GL FBOs, so no row flip is expected
+    * here. Settled at the bench, not by reasoning: GROOVY_VK_FLIP=1 forces
+    * the other direction without a rebuild. */
+   if (flip < 0)
+   {
+      const char *env = getenv("GROOVY_VK_FLIP");
+      flip = (env && *env == '1') ? 1 : 0;
+   }
+
+   ctx             = &vk->native.scaler;
+   out_stride      = (int)(width * 3);
+   ctx->in_stride  = (int)staging->stride;
+   ctx->out_stride = flip ? -out_stride : out_stride;
+   scaler_ctx_scale_direct(ctx,
+         flip ? buffer + (size_t)(height - 1) * (size_t)out_stride : buffer,
+         src);
+   ctx->out_stride = out_stride;
+
+   vkUnmapMemory(vk->context->device, staging->memory);
+   return true;
+}
+
 static void vulkan_inject_black_frame(vk_t *vk, video_frame_info_t *video_info)
 {
    VkSubmitInfo submit_info;
@@ -6227,6 +6531,229 @@ static void vulkan_run_hdr_pipeline(VkPipeline pipeline, VkRenderPass render_pas
    vk->hdr.ubo_values.hdr10               = prev_hdr10;
    vk->hdr.ubo_values.hdr_mode            = prev_hdr_mode;
    vk->hdr.ubo_values.paper_white_nits    = prev_paper_white_nits;
+}
+
+/* crt-bridge: compositing target for the native capture.
+ *
+ * A surface WE own, at the core's native dims, into which the core's frame is
+ * copied and the menu is then drawn. Never draw into the core's own image —
+ * it belongs to the core, which may read it back. Allocated lazily on the
+ * first frame that needs it (menu open), kept across frames, resized on a dim
+ * change. Costs nothing while the menu is closed: the readback then reads the
+ * core's image directly, exactly as before.
+ *
+ * The surface is created at the SWAPCHAIN format, not the core's. That is not
+ * cosmetic: vk->keep_render_pass and the alpha_blend pipeline were built for
+ * that format, and a Vulkan pipeline may only be used inside a render pass
+ * whose attachment format matches. Copying from the core's R8G8B8A8 into a
+ * B8G8R8A8 surface therefore has to be a vkCmdBlitImage, which converts, and
+ * not a vkCmdCopyImage, which would reinterpret the bytes and swap red with
+ * blue. */
+static void vulkan_deinit_native_compose(vk_t *vk)
+{
+   if (vk->native.compose.image != VK_NULL_HANDLE)
+   {
+      vkDestroyImageView(vk->context->device, vk->native.compose.view, NULL);
+      vkDestroyImage(vk->context->device, vk->native.compose.image, NULL);
+      vkDestroyFramebuffer(vk->context->device,
+            vk->native.compose.framebuffer, NULL);
+      vkFreeMemory(vk->context->device, vk->native.compose.memory, NULL);
+   }
+   memset(&vk->native.compose, 0, sizeof(vk->native.compose));
+   vk->native.compose_w = 0;
+   vk->native.compose_h = 0;
+}
+
+static bool vulkan_native_compose_target(vk_t *vk,
+      unsigned width, unsigned height)
+{
+   if (   vk->native.compose.image != VK_NULL_HANDLE
+       && vk->native.compose_w     == width
+       && vk->native.compose_h     == height)
+      return true;
+
+   vulkan_deinit_native_compose(vk);
+
+   if (!width || !height)
+      return false;
+
+   vulkan_init_render_target(&vk->native.compose, width, height,
+         vk->context->swapchain_format, vk->keep_render_pass, vk->context);
+
+   if (vk->native.compose.image == VK_NULL_HANDLE)
+   {
+      RARCH_ERR("[Vulkan] Native compositing target %ux%u failed —"
+            " menu will not reach the bridge.\n", width, height);
+      return false;
+   }
+
+   vk->native.compose_w = width;
+   vk->native.compose_h = height;
+   RARCH_LOG("[Vulkan] Native compositing target (re)sized to %ux%u.\n",
+         width, height);
+   return true;
+}
+
+/* One native capture pass.
+ *
+ * Menu closed — all of gameplay — the readback aims straight at the core's
+ * image, with no intermediate surface and no draw pass: exactly the cost of
+ * the path before the menu existed.
+ *
+ * Menu open, we compose: blit the core's frame into OUR surface, draw the
+ * menu over it, read that surface back. The core's image is never written. */
+static void vulkan_native_capture_step(vk_t *vk)
+{
+   unsigned width            = vk->hw.last_width;
+   unsigned height           = vk->hw.last_height;
+   VkImage core_image        = vk->hw.image->create_info.image;
+   VkImageLayout core_layout = vk->hw.image->image_layout;
+   VkFormat core_format      = vk->hw.image->create_info.format;
+
+#if defined(HAVE_MENU)
+   if (   (vk->flags & VK_FLAG_MENU_ENABLE)
+       && (   vk->menu.textures[vk->menu.last_index].image  != VK_NULL_HANDLE
+           || vk->menu.textures[vk->menu.last_index].buffer != VK_NULL_HANDLE)
+       && width && height
+       && vulkan_native_compose_target(vk, width, height))
+   {
+      struct vk_draw_quad quad;
+      VkRenderPassBeginInfo rp_info;
+      VkClearValue clear_value;
+      struct vk_texture *optimal  = &vk->menu.textures_optimal[vk->menu.last_index];
+      struct video_viewport saved_vp = vk->vp;
+      VkViewport saved_vk_vp      = vk->vk_vp;
+      VkImageBlit blit;
+
+      /* 1. Core image -> our surface. Blit, not copy: it converts between
+       *    the core's format and the swapchain format. */
+      blit.srcSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+      blit.srcSubresource.mipLevel       = 0;
+      blit.srcSubresource.baseArrayLayer = 0;
+      blit.srcSubresource.layerCount     = 1;
+      blit.srcOffsets[0].x               = 0;
+      blit.srcOffsets[0].y               = 0;
+      blit.srcOffsets[0].z               = 0;
+      blit.srcOffsets[1].x               = (int32_t)width;
+      blit.srcOffsets[1].y               = (int32_t)height;
+      blit.srcOffsets[1].z               = 1;
+      blit.dstSubresource                = blit.srcSubresource;
+      blit.dstOffsets[0]                 = blit.srcOffsets[0];
+      blit.dstOffsets[1]                 = blit.srcOffsets[1];
+
+      VULKAN_IMAGE_LAYOUT_TRANSITION(vk->cmd, vk->native.compose.image,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            0, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+      if (core_layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+         VULKAN_IMAGE_LAYOUT_TRANSITION(vk->cmd, core_image,
+               core_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+               VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+               VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+               VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+      vkCmdBlitImage(vk->cmd,
+            core_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            vk->native.compose.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, &blit, VK_FILTER_NEAREST);
+
+      if (core_layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+         VULKAN_IMAGE_LAYOUT_TRANSITION(vk->cmd, core_image,
+               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, core_layout,
+               VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_READ_BIT,
+               VK_PIPELINE_STAGE_TRANSFER_BIT,
+               VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+
+      VULKAN_IMAGE_LAYOUT_TRANSITION(vk->cmd, vk->native.compose.image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+
+      /* 2. The menu texture has to be transitioned OUTSIDE a render pass —
+       *    image barriers are illegal inside one. vulkan_draw_quad calls this
+       *    too, where it then becomes a no-op. */
+      if (optimal->memory != VK_NULL_HANDLE && optimal->image)
+         vulkan_transition_texture(vk, vk->cmd, optimal);
+      else if (vk->menu.textures[vk->menu.last_index].image)
+         vulkan_transition_texture(vk, vk->cmd,
+               &vk->menu.textures[vk->menu.last_index]);
+
+      /* 3. Draw the menu over our surface. The viewport is the whole native
+       *    surface: on the CRT the native frame IS the screen, there is no
+       *    window viewport to fit into. */
+      vk->vp.x            = 0;
+      vk->vp.y            = 0;
+      vk->vp.width        = width;
+      vk->vp.height       = height;
+      vk->vp.full_width   = width;
+      vk->vp.full_height  = height;
+      vk->vk_vp.x         = 0.0f;
+      vk->vk_vp.y         = 0.0f;
+      vk->vk_vp.width     = (float)width;
+      vk->vk_vp.height    = (float)height;
+      vk->vk_vp.minDepth  = 0.0f;
+      vk->vk_vp.maxDepth  = 1.0f;
+
+      clear_value.color.float32[0]     = 0.0f;
+      clear_value.color.float32[1]     = 0.0f;
+      clear_value.color.float32[2]     = 0.0f;
+      clear_value.color.float32[3]     = 0.0f;
+
+      rp_info.sType                    = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+      rp_info.pNext                    = NULL;
+      rp_info.renderPass               = vk->keep_render_pass;
+      rp_info.framebuffer              = vk->native.compose.framebuffer;
+      rp_info.renderArea.offset.x      = 0;
+      rp_info.renderArea.offset.y      = 0;
+      rp_info.renderArea.extent.width  = width;
+      rp_info.renderArea.extent.height = height;
+      rp_info.clearValueCount          = 1;
+      rp_info.pClearValues             = &clear_value;
+
+      vkCmdBeginRenderPass(vk->cmd, &rp_info, VK_SUBPASS_CONTENTS_INLINE);
+
+      quad.pipeline = vk->pipelines.alpha_blend;
+      quad.texture  = &vk->menu.textures[vk->menu.last_index];
+      if (optimal->memory != VK_NULL_HANDLE)
+         quad.texture = optimal;
+      quad.sampler  = (optimal->flags & VK_TEX_FLAG_MIPMAP)
+         ? vk->samplers.mipmap_nearest : vk->samplers.nearest;
+      quad.mvp      = &vk->mvp_no_rot;
+      quad.color.r  = 1.0f;
+      quad.color.g  = 1.0f;
+      quad.color.b  = 1.0f;
+      quad.color.a  = vk->menu.alpha;
+
+      /* Force a pipeline rebind: the tracker still holds whatever the
+       * backbuffer pass left behind, and its cached viewport is the window's,
+       * not ours. */
+      vk->tracker.pipeline = VK_NULL_HANDLE;
+      vk->tracker.dirty   |= VULKAN_DIRTY_DYNAMIC_BIT;
+
+      vulkan_draw_quad(vk, &quad);
+
+      vkCmdEndRenderPass(vk->cmd);
+
+      vk->vp               = saved_vp;
+      vk->vk_vp            = saved_vk_vp;
+      vk->tracker.pipeline = VK_NULL_HANDLE;
+      vk->tracker.dirty   |= VULKAN_DIRTY_DYNAMIC_BIT;
+
+      /* 4. Read OUR surface, not the core's. */
+      vulkan_native_readback(vk, vk->native.compose.image,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            vk->context->swapchain_format, width, height);
+      return;
+   }
+#endif
+
+   vulkan_native_readback(vk, core_image, core_layout, core_format,
+         width, height);
 }
 
 static bool vulkan_frame(void *data, const void *frame,
@@ -7007,6 +7534,15 @@ static bool vulkan_frame(void *data, const void *frame,
                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
       }
    }
+
+   /* crt-bridge: the native capture reads the core's
+    * own image, so it has to happen while we still own it -- before the
+    * queue-family release just below. Independent of the window readback
+    * above: the bridge needs the native surface whether or not the window
+    * path is recording, and it must keep feeding the CRT even when the
+    * window path is idle. */
+   if (vulkan_native_capture_active(vk))
+      vulkan_native_capture_step(vk);
 
    if (    waits_for_semaphores
        && (vk->hw.src_queue_family != VK_QUEUE_FAMILY_IGNORED)
@@ -8359,6 +8895,7 @@ video_driver_t video_vulkan = {
    vulkan_shader_load_begin,
    vulkan_shader_load_step,
 #ifdef HAVE_GFX_WIDGETS
-   vulkan_gfx_widgets_enabled
+   vulkan_gfx_widgets_enabled,
 #endif
+   vulkan_read_native /* crt-bridge native-FBO capture */
 };
