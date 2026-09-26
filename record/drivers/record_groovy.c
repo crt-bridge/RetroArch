@@ -51,16 +51,23 @@
  * emitter's frame rate — see the comment above the drain loop in
  * groovy_push_video for the full story.
  *
- * Geometry: CMD_SWITCHRES is emitted from groovy_push_av_info
- * (registered in the record_driver_t vtable; the hook site lives in
- * runloop.c). Modeline computation is shared with the unit-test bridge via
- * #include "groovy_modeline.h". Dedupe (same geometry → no second
- * CMD_SWITCHRES) and defensive checks (width=0 → reject) are implemented
- * here per STRIDE T-3-12 (bad av_info) and T-3-13 (spam).
+ * Geometry: CMD_SWITCHRES is emitted from
+ * groovy_push_video, on every rendered frame that groovy_mode_on_frame
+ * (groovy_mode.h) decides should announce -- never from groovy_push_av_info,
+ * which only records the core's declared size as a HINT (registered in the
+ * record_driver_t vtable; the hook site lives in runloop.c). Modeline
+ * computation is shared with the unit-test bridge via
+ * #include "groovy_modeline.h". Defensive checks (width=0 → reject) are
+ * implemented in groovy_push_av_info per STRIDE T-3-12 (bad av_info); the
+ * regime decision itself (dedupe, oscillation guard) lives in groovy_mode.h,
+ * shared by both this driver and the test bridge.
  *
  * Option G: the daemon forges modelines from wire data at runtime and does NOT
- * require CMD_SWITCHRES before the first CMD_BLIT_VSYNC. Frames render
- * correctly even if push_av_info fires after the first blit.
+ * strictly require a prior CMD_SWITCHRES before the first CMD_BLIT_VSYNC.
+ * This driver no longer relies on that tolerance for its own correctness,
+ * though: the BLIT-vs-SWITCHRES dims guard in groovy_push_video refuses any
+ * frame sent before the session's first announce, so an announce
+ * always precedes this driver's own first blit in practice.
  *
  * Build:
  *   This file lives in record/drivers/ alongside RetroArch's other
@@ -73,7 +80,8 @@
  *   T-3-10 — parse_receiver_config uses snprintf(out_ip, ip_cap, ...) — safe
  *   T-3-11 — vid->is_dupe honored (skip duplicate frames)
  *   T-3-12 — groovy_push_av_info rejects width=0, height=0, fps≤0
- *   T-3-13 — groovy_push_av_info dedupes identical successive callbacks
+ *   T-3-13 — retired: groovy_push_av_info sends nothing to dedupe
+ *     any more; groovy_mode_on_frame (groovy_mode.h) is the sole gate
  */
 
 #include <stdint.h>
@@ -137,6 +145,7 @@ static inline void groovy_pacing_log_mute(const char *ev) { (void)ev; }
 /* Generic CPU supersampling box: reads GROOVY_DOWNSAMPLE and averages
  * n*n blocks. Same pattern as groovy_compression.h above. */
 #include "groovy_downsample.h"
+#include "groovy_convert.h"
 
 /* Input-channel setting and latency histogram: reads GROOVY_INPUT,
  * measures k. Header-only, shared with the test bridge. */
@@ -205,18 +214,12 @@ static inline void groovy_pacing_log_mute(const char *ev) { (void)ev; }
  * a core without restarting the process (e.g., content switch). Use
  * instance-local allocation instead.
  * ------------------------------------------------------------------------- */
-/* groovy_av_cache_t — per-instance geometry dedupe state.
- *
- * Promoted from function-static in groovy_push_av_info to instance field
- * of groovy_state_t (Phase 3.1, HIL-3-08 fix) so that lifetime is explicit
- * and tied to the driver session. The test bridge mirrors this with its own
- * file-scope g_av_cache (groovy_test_bridge.c). */
-typedef struct {
-    unsigned width;
-    unsigned height;
-    double   fps;     /* effective fps used for the last emit (may be cached) */
-    bool     valid;
-} groovy_av_cache_t;
+/* groovy_av_cache_t — per-instance geometry dedupe state. Moved to
+ * groovy_mode.h: the same type the test bridge's g_av_cache
+ * uses, one definition instead of two. Promoted from function-static in
+ * groovy_push_av_info to instance field of groovy_state_t (Phase 3.1,
+ * HIL-3-08 fix) so that lifetime is explicit and tied to the driver
+ * session. */
 
 /* ---------------------------------------------------------------------------
  * Per-receiver latency window. Moved here (ahead of struct
@@ -366,20 +369,20 @@ typedef struct {
     unsigned            height;         /* cached from last push_video */
     groovy_av_cache_t   av_cache;       /* geometry dedupe state — Phase 3.1 */
     enum ffemu_pix_format pix_fmt;      /* input pixel format — Phase 3.1 Bug D fix */
-    /* Per-frame dim hysteresis (Phase 3.1 v3 native-resolution path):
-     * tracks a candidate new (w,h) and how many consecutive frames it has
-     * persisted. We only emit CMD_SWITCHRES when the candidate has been stable
-     * for HYSTERESIS_FRAMES — prevents the daemon's rate-limiter from coalescing
-     * away genuine mode changes when Beetle PSX oscillates between fields. */
-    unsigned            pending_w;
-    unsigned            pending_h;
-    unsigned            pending_streak;
     bool                inited;         /* true after groovy_new succeeded */
 
-    /* Phase 3.2 regime state. */
-    enum groovy_mode current_mode;
-    enum groovy_mode pending_mode;
-    unsigned           mode_streak;
+    /* Regime decision: the
+     * ONLY authority for the current regime is groovy_mode_of(&av_cache) --
+     * the last ANNOUNCED cache, never a separate field here. mode_state
+     * carries everything groovy_mode_on_frame needs across calls: the
+     * same-regime size hysteresis (formerly pending_w/pending_h/pending_streak,
+     * moved into groovy_mode_state), the core's declared-size hint (an
+     * indice only, never touches av_cache), the oscillation
+     * guard and its counters -- all defined in groovy_mode.h,
+     * shared with the unit-test bridge. A calloc'd (zeroed) mode_state is
+     * the valid initial state, same convention as the rest of this
+     * struct. */
+    struct groovy_mode_state mode_state;
 
     /* --- Audio to the receiver. Set at session opening, never touched
      * afterwards; push_audio only reads it. --- */
@@ -489,12 +492,10 @@ typedef struct {
     char followers_src[513];
 } groovy_state_t;
 
-/* Stable-frame threshold before committing a dim change to the daemon.
- * 15 frames @ 60Hz = 250ms — comfortably longer than the daemon's 100ms
- * MIN_MODESET_INTERVAL_NS rate-limit window, so once we emit, the daemon
- * will fire it. Beetle PSX's field-by-field oscillation bursts shorter
- * than this and gets filtered. */
-#define GROOVY_DIM_HYSTERESIS_FRAMES 15u
+/* GROOVY_DIM_HYSTERESIS_FRAMES moved to groovy_mode.h: same
+ * threshold (15 frames @ 60Hz = 250ms — comfortably longer than the
+ * daemon's 100ms MIN_MODESET_INTERVAL_NS rate-limit window), one
+ * definition instead of two. */
 
 /* Bug A fix (Phase 3.1, 2026-05-10 PM HIL re-run): the last-known-good fps
  * from SET_SYSTEM_AV_INFO is a *session-global* scalar that must survive the
@@ -771,21 +772,6 @@ static void lat_hist_percentiles(const uint16_t *hist, unsigned n,
  * colon). No default IP is ever substituted; the
  * caller (groovy_new) must refuse to start on false.
  * ------------------------------------------------------------------------- */
-/* Regime classification.
- * Reuses an earlier formula verbatim — already tested on Chrono Cross
- * intro/menu transitions. No new heuristic.
- *
- * Trade-off accepted: PSX fake-interlaced sources
- * (256×448, 320×448) classify as 480i and render at half vertical resolution
- * per field. They were line-doubled in the core anyway, so the visual
- * result on a 480i CRT is correct.
- */
-static inline enum groovy_mode classify_mode(unsigned w, unsigned h)
-{
-    return (h > 280u || w > 400u) ? GROOVY_MODE_480I
-                                   : GROOVY_MODE_240P_SUPER_RES;
-}
-
 static bool parse_receiver_config(const struct record_params *params,
                                   char *out_ip, size_t ip_cap,
                                   uint16_t *out_port)
@@ -814,199 +800,6 @@ static bool parse_receiver_config(const struct record_params *params,
     }
 
     return out_ip[0] != '\0';
-}
-
-/* ---------------------------------------------------------------------------
- * bgr24_to_rgb888 — in-place B↔R byte swap (Pitfall 2 mitigation).
- *
- * glcore PBO readback produces BGR24; daemon expects RGB888. Swap is
- * mandatory for correct color on the CRT (STRIDE T-3-02).
- *
- * Handles pitch != width*3 (e.g., GL row alignment padding): reads from
- * pitch-strided source rows, writes to tightly-packed destination rows.
- * dst and src MAY alias only if dst == src AND pitch == width*3 (caller
- * MUST use swap_buf, not vid->data, to avoid aliasing in the non-trivial
- * pitch case).
- *
- * dst: contiguous output buffer, at least width*height*3 bytes.
- * src: source buffer, pitch bytes per row, height rows.
- * ------------------------------------------------------------------------- */
-static void bgr24_to_rgb888(uint8_t       *dst,
-                             const uint8_t *src,
-                             unsigned       dst_w,
-                             unsigned       dst_h,
-                             unsigned       src_w,
-                             unsigned       src_h,
-                             unsigned       src_pitch)
-{
-    /* Box-filter downscale + BGR → RGB (Bug E v2: text legibility fix).
-     * Same algorithm as xrgb8888_to_rgb888 but reads 3-byte BGR pixels.
-     * When src == dst dims, box is 1×1 and this is a 1:1 copy with swap. */
-    for (unsigned dy = 0; dy < dst_h; ++dy) {
-        unsigned sy0 = (unsigned)((size_t)dy * src_h / dst_h);
-        unsigned sy1 = (unsigned)((size_t)(dy + 1u) * src_h / dst_h);
-        if (sy1 <= sy0) sy1 = sy0 + 1u;
-        if (sy1 > src_h) sy1 = src_h;
-
-        uint8_t *dst_row = dst + (size_t)dy * dst_w * 3u;
-        for (unsigned dx = 0; dx < dst_w; ++dx) {
-            unsigned sx0 = (unsigned)((size_t)dx * src_w / dst_w);
-            unsigned sx1 = (unsigned)((size_t)(dx + 1u) * src_w / dst_w);
-            if (sx1 <= sx0) sx1 = sx0 + 1u;
-            if (sx1 > src_w) sx1 = src_w;
-
-            uint32_t r_acc = 0u, g_acc = 0u, b_acc = 0u;
-            uint32_t n = 0u;
-            for (unsigned sy = sy0; sy < sy1; ++sy) {
-                const uint8_t *src_row = src + (size_t)sy * src_pitch;
-                for (unsigned sx = sx0; sx < sx1; ++sx) {
-                    /* BGR24: B=src[0], G=src[1], R=src[2] */
-                    b_acc += src_row[3u * sx + 0u];
-                    g_acc += src_row[3u * sx + 1u];
-                    r_acc += src_row[3u * sx + 2u];
-                    ++n;
-                }
-            }
-            dst_row[3u * dx + 0u] = (uint8_t)(r_acc / n);
-            dst_row[3u * dx + 1u] = (uint8_t)(g_acc / n);
-            dst_row[3u * dx + 2u] = (uint8_t)(b_acc / n);
-        }
-    }
-}
-
-/* ---------------------------------------------------------------------------
- * xrgb8888_to_rgb888 — convert 32-bit XRGB8888 (RetroArch FFEMU_PIX_ARGB8888,
- * 4 bytes/pixel little-endian) to packed RGB888 (3 bytes/pixel) — Bug D fix.
- *
- * RetroArch's RETRO_PIXEL_FORMAT_XRGB8888 stores each pixel as a 32-bit value
- * 0x00RRGGBB in native byte order. On x86 (little-endian), the byte layout is:
- *   src[0]=B, src[1]=G, src[2]=R, src[3]=X (alpha/padding, ignored)
- * Daemon expects packed RGB888: dst[0]=R, dst[1]=G, dst[2]=B.
- *
- * Same dst/src layout assumptions as bgr24_to_rgb888: dst contiguous
- * width*height*3, src pitch-strided height rows.
- * ------------------------------------------------------------------------- */
-static void xrgb8888_to_rgb888(uint8_t       *dst,
-                                const uint8_t *src,
-                                unsigned       dst_w,
-                                unsigned       dst_h,
-                                unsigned       src_w,
-                                unsigned       src_h,
-                                unsigned       src_pitch)
-{
-    /* Box-filter downscale + XRGB8888 → RGB888 (Bug E v2: quality fix).
-     *
-     * For each dst pixel, average all source pixels in the box it covers.
-     * For 700→320 horizontal (ratio 2.19) and 576→240 vertical (ratio 2.4),
-     * each dst pixel averages ~2x2 to ~3x3 src pixels. This eliminates the
-     * "missing lines" / illegible text artifact of nearest-neighbor.
-     *
-     * Cost: ~5x nearest-neighbor (76800 dst px × ~6 src reads + accumulate
-     * + divide). Trivial at 60 Hz on any modern CPU.
-     *
-     * If src dims == dst dims, the box is 1×1 and this is a 1:1 copy with
-     * format swap — same path serves the no-scale case. */
-    for (unsigned dy = 0; dy < dst_h; ++dy) {
-        /* Compute the source row range covered by this dst row. */
-        unsigned sy0 = (unsigned)((size_t)dy * src_h / dst_h);
-        unsigned sy1 = (unsigned)((size_t)(dy + 1u) * src_h / dst_h);
-        if (sy1 <= sy0) sy1 = sy0 + 1u;
-        if (sy1 > src_h) sy1 = src_h;
-
-        uint8_t *dst_row = dst + (size_t)dy * dst_w * 3u;
-        for (unsigned dx = 0; dx < dst_w; ++dx) {
-            unsigned sx0 = (unsigned)((size_t)dx * src_w / dst_w);
-            unsigned sx1 = (unsigned)((size_t)(dx + 1u) * src_w / dst_w);
-            if (sx1 <= sx0) sx1 = sx0 + 1u;
-            if (sx1 > src_w) sx1 = src_w;
-
-            uint32_t r_acc = 0u, g_acc = 0u, b_acc = 0u;
-            uint32_t n = 0u;
-            for (unsigned sy = sy0; sy < sy1; ++sy) {
-                const uint8_t *src_row = src + (size_t)sy * src_pitch;
-                for (unsigned sx = sx0; sx < sx1; ++sx) {
-                    /* XRGB8888 little-endian: B=src[0], G=src[1], R=src[2] */
-                    b_acc += src_row[4u * sx + 0u];
-                    g_acc += src_row[4u * sx + 1u];
-                    r_acc += src_row[4u * sx + 2u];
-                    ++n;
-                }
-            }
-            /* n is at least 1 by clamp above */
-            dst_row[3u * dx + 0u] = (uint8_t)(r_acc / n);  /* R */
-            dst_row[3u * dx + 1u] = (uint8_t)(g_acc / n);  /* G */
-            dst_row[3u * dx + 2u] = (uint8_t)(b_acc / n);  /* B */
-        }
-    }
-}
-
-/* ---------------------------------------------------------------------------
- * rgb565_to_rgb888 — convert 16-bit RGB565 (RetroArch RETRO_PIXEL_FORMAT_RGB565
- * / FFEMU_PIX_RGB565, 2 bytes/pixel, native little-endian uint16) to packed
- * RGB888 (3 bytes/pixel).
- *
- * Bit layout: bits 15..11 = R (5 bits), bits 10..5 = G (6 bits), bits 4..0 =
- * B (5 bits). Normative source for the 5/6/5 -> 8/8/8 expansion:
- * libretro-common/gfx/scaler/pixconv.c::conv_rgb565_argb8888 (same fork,
- * same pin) — bit replication of the high bits, so 0x1f -> 255 and
- * 0x00 -> 0 (full-scale expansion, not a left-shift-only truncation).
- *
- * src_pitch is in bytes and is typically larger than src_w*2 — RetroArch
- * cores commonly allocate a wider framebuffer than the active area (e.g.
- * Genesis Plus GX: pitch=1440 for 320 active px = 720px-wide bitmap).
- *
- * Same dst/src layout assumptions as bgr24_to_rgb888 / xrgb8888_to_rgb888:
- * dst contiguous width*height*3, src pitch-strided height rows.
- * ------------------------------------------------------------------------- */
-static void rgb565_to_rgb888(uint8_t       *dst,
-                              const uint8_t *src,
-                              unsigned       dst_w,
-                              unsigned       dst_h,
-                              unsigned       src_w,
-                              unsigned       src_h,
-                              unsigned       src_pitch)
-{
-    /* Box-filter downscale + RGB565 → RGB888 (same algorithm as
-     * bgr24_to_rgb888 / xrgb8888_to_rgb888). When src == dst dims, the box
-     * is 1×1 and this is a 1:1 copy with format expansion. */
-    for (unsigned dy = 0; dy < dst_h; ++dy) {
-        unsigned sy0 = (unsigned)((size_t)dy * src_h / dst_h);
-        unsigned sy1 = (unsigned)((size_t)(dy + 1u) * src_h / dst_h);
-        if (sy1 <= sy0) sy1 = sy0 + 1u;
-        if (sy1 > src_h) sy1 = src_h;
-
-        uint8_t *dst_row = dst + (size_t)dy * dst_w * 3u;
-        for (unsigned dx = 0; dx < dst_w; ++dx) {
-            unsigned sx0 = (unsigned)((size_t)dx * src_w / dst_w);
-            unsigned sx1 = (unsigned)((size_t)(dx + 1u) * src_w / dst_w);
-            if (sx1 <= sx0) sx1 = sx0 + 1u;
-            if (sx1 > src_w) sx1 = src_w;
-
-            uint32_t r_acc = 0u, g_acc = 0u, b_acc = 0u;
-            uint32_t n = 0u;
-            for (unsigned sy = sy0; sy < sy1; ++sy) {
-                const uint8_t *src_row = src + (size_t)sy * src_pitch;
-                for (unsigned sx = sx0; sx < sx1; ++sx) {
-                    /* Native LE uint16 RGB565: recomposed byte-by-byte so it
-                     * never depends on any alignment of the source pitch. */
-                    const uint8_t *px = src_row + 2u * sx;
-                    uint32_t col = (uint32_t)px[0] | ((uint32_t)px[1] << 8);
-                    uint32_t r5 = (col >> 11) & 0x1fu;
-                    uint32_t g6 = (col >>  5) & 0x3fu;
-                    uint32_t b5 = (col >>  0) & 0x1fu;
-                    /* 5/6/5 -> 8/8/8 expansion by high-bit replication
-                     * (identical to conv_rgb565_argb8888): 0x1f -> 255. */
-                    r_acc += (r5 << 3) | (r5 >> 2);
-                    g_acc += (g6 << 2) | (g6 >> 4);
-                    b_acc += (b5 << 3) | (b5 >> 2);
-                    ++n;
-                }
-            }
-            dst_row[3u * dx + 0u] = (uint8_t)(r_acc / n);
-            dst_row[3u * dx + 1u] = (uint8_t)(g_acc / n);
-            dst_row[3u * dx + 2u] = (uint8_t)(b_acc / n);
-        }
-    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -1161,6 +954,44 @@ static void groovy_log_error(const char *msg)
     runloop_msg_queue_push(msg, len, 2, 600, false, NULL,
           MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
     RARCH_ERR("[groovy] %s\n", msg);
+}
+
+/* Send path of one receiver handle.
+ * libgm prints its own [gm-send] lines on stderr, which neither the bench
+ * launcher nor the human shortcut captures: this line is the only trace, in
+ * the RetroArch log, of the path libgm actually OBTAINED -- not the one
+ * GROOVY_USO asked for. Called once per handle at session opening (after
+ * gm_set_mtu, which may move or drop the segment), and again at close with
+ * the counters, so an A/B run can tell whether the segmented path served the
+ * whole session or was cut along the way. */
+static void groovy_log_send_path(gm_handle *gm, const char *who, unsigned mtu,
+                                 bool at_close)
+{
+    unsigned sndbuf    = 0u;
+    unsigned seg       = 0u;
+    uint32_t supers    = 0u;
+    uint32_t transient = 0u;
+    int      cut       = 0;
+    char     queue[48];
+    int      on;
+
+    if (!gm)
+        return;
+    on = gm_send_offload_state(gm, &sndbuf);
+    (void)gm_send_offload_stats(gm, &seg, &supers, &transient, &cut);
+    if (sndbuf > 0u)
+        snprintf(queue, sizeof(queue), "%u bytes", sndbuf);
+    else
+        snprintf(queue, sizeof(queue), "system default (SO_SNDBUF refused)");
+
+    if (!at_close)
+        RARCH_LOG("[groovy] send path %s: queue=%s, segmented=%s, segment=%u, mtu=%u\n",
+                  who, queue, (on == 1) ? "on" : "off", seg, mtu);
+    else
+        RARCH_LOG("[groovy] send path %s at close: segmented=%s, super_sends=%u, "
+                  "transient_errors=%u, cut=%s%d, segment=%u\n",
+                  who, (on == 1) ? "on" : "off", (unsigned)supers, (unsigned)transient,
+                  cut ? "code " : "", cut, seg);
 }
 
 static void *groovy_new(const struct record_params *params)
@@ -1599,9 +1430,11 @@ static void *groovy_new(const struct record_params *params)
      * through the SAME parser as the variable, a single clamping
      * authority. */
     if (gm_set_mtu(st->gm, st->mtu) != 0) {
-        /* Cannot trigger today: groovy_mtu_parse and gm_set_mtu read the
-         * SAME constants from gm.h. The guard is here so that a future
-         * widening on only one side would be LOUD rather than silent. */
+        /* The bounds cannot differ: groovy_mtu_parse and gm_set_mtu read the
+         * SAME constants from gm.h. libgm also refuses an MTU larger than a
+         * send segment it could not remove from the socket -- Windows would
+         * re-cut every datagram. Either way the handle keeps the default it
+         * was opened with. */
         RARCH_WARN("[groovy] mtu=%u refused by libgm; the session keeps %u\n",
                    st->mtu, (unsigned)GM_MTU_DEFAULT);
         st->mtu = (unsigned)GM_MTU_DEFAULT;
@@ -1609,6 +1442,7 @@ static void *groovy_new(const struct record_params *params)
     RARCH_LOG("[groovy] mtu: %u bytes per payload datagram%s\n",
               st->mtu,
               (st->mtu == (unsigned)GM_MTU_DEFAULT) ? " (default)" : " (GROOVY_MTU)");
+    groovy_log_send_path(st->gm, "master", st->mtu, false);
 
     /* Padded-session mode: the MASTER stays classic, and that must be
      * VISIBLE in the code. calloc() would already give 0; this line is
@@ -1775,6 +1609,7 @@ static void *groovy_new(const struct record_params *params)
                       (rx->inputs == GROOVY_INPUTS_P1) ? "p1" :
                       (rx->inputs == GROOVY_INPUTS_P2) ? "p2" : "off",
                       rx->pad ? "on" : "off");
+            groovy_log_send_path(rx->gm, rx->target, rx->mtu, false);
             if (rx->pad) {
                 /* Forbidden on MiSTer: the protocol has no way to detect
                  * what's at the other end of the wire -- the warning is
@@ -1847,10 +1682,11 @@ static void *groovy_new(const struct record_params *params)
     if (params && params->fps > 0.0)
         s_last_valid_fps = params->fps;
 
-    /* Regime state init — matches daemon's boot default. */
-    st->current_mode = GROOVY_MODE_240P_SUPER_RES;
-    st->pending_mode = GROOVY_MODE_240P_SUPER_RES;
-    st->mode_streak  = 0u;
+    /* Regime state: calloc above already zeroed st->mode_state -- the valid
+     * initial state (groovy_mode.h). Nothing has been announced yet:
+     * groovy_mode_of(&st->av_cache) reads 240p (av_cache.valid == false)
+     * until the first frame's groovy_mode_on_frame call announces (reason
+     * FIRST) -- matches the daemon's own boot default. */
     groovy_servo_apply_ff(st, 0);   /* initial feed-forward, 240p */
 
     /* Diagnostic: log all record_params dims to understand the FB pipeline.
@@ -2384,9 +2220,11 @@ static void groovy_reannounce_emit(groovy_state_t *st, struct groovy_receiver *r
         return;
     }
 
-    compute_modeline_from_dims(st->av_cache.width, st->av_cache.height,
-                               st->av_cache.fps, &mode);
-    mode.interlace = (st->current_mode == GROOVY_MODE_480I) ? 1u : 0u;
+    /* interlace is no longer set here: compute_modeline_
+     * from_dims derives it from the SAME groovy_mode_classify(h) that
+     * groovy_mode_of(&st->av_cache) reads -- a re-announce always reapplies
+     * the regime already in the cache, never a separately-tracked one. */
+    compute_modeline_from_dims(st->av_cache.width, st->av_cache.height, st->av_cache.fps, &mode);
     {
         const int      rc_sw  = gm_send_switchres(rx->gm, &mode);
         const int      wsa_sw = gm_last_announce_error(rx->gm);
@@ -2458,9 +2296,9 @@ static void groovy_reannounce_flush_deferred(groovy_state_t *st, struct groovy_r
                             GROOVY_ANNOUNCE_NOT_READY, 0, groovy_pacing_mono_ns());
         return;
     }
-    compute_modeline_from_dims(st->av_cache.width, st->av_cache.height,
-                               st->av_cache.fps, &mode);
-    mode.interlace = (st->current_mode == GROOVY_MODE_480I) ? 1u : 0u;
+    /* interlace: same rationale as groovy_reannounce_emit above -- derived
+     * inside compute_modeline_from_dims, never set separately here. */
+    compute_modeline_from_dims(st->av_cache.width, st->av_cache.height, st->av_cache.fps, &mode);
     {
         const int      rc_sw  = gm_send_switchres(rx->gm, &mode);
         const int      wsa_sw = gm_last_announce_error(rx->gm);
@@ -2484,9 +2322,9 @@ static void groovy_reannounce_flush_deferred(groovy_state_t *st, struct groovy_r
  * A deferred CMD_SWITCHRES not yet sent is cancelled HERE, before the
  * immediate send below -- otherwise the receiver would get two
  * CMD_SWITCHRES in a row (this one, then the old deferral going out anyway
- * later), and the report (client/bilan-999-33.py) wrongly attributed that
- * second send to the "reannounce" site instead of the "switchres_all" site
- * that actually made it moot.
+ * later), and a log reader would wrongly attribute that second send to the
+ * "reannounce" site instead of the "switchres_all" site that actually made
+ * it moot.
  * ------------------------------------------------------------------------- */
 static bool groovy_switchres_all(groovy_state_t *st, const gm_modeline *m)
 {
@@ -2755,7 +2593,8 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
                       vid->width, vid->height, vid->pitch,
                       st->av_cache.width, st->av_cache.height,
                       (int)st->av_cache.valid,
-                      st->pending_w, st->pending_h, st->pending_streak);
+                      st->mode_state.pending_w, st->mode_state.pending_h,
+                      st->mode_state.pending_streak);
         }
     }
 
@@ -2848,64 +2687,60 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         send_h = cap_h / st->downsample_n;
     }
 
-    /* Per-frame dim-change → emit CMD_SWITCHRES, gated by hysteresis.
-     * Daemon's parser updates expected_frame_bytes immediately on receipt
-     * (net.c:425), so the BLIT we send right after a switchres will match
-     * the new size — no framing loss. The daemon's actual drmModeSetCrtc may
-     * rate-limit (100ms window), and its last-write-wins coalescing can drop
-     * a real geometry change if the emitter spams switchres on every Beetle
-     * PSX field flip. We filter that spam at the source: only commit a new
-     * (send_w, send_h) after it has persisted for HYSTERESIS_FRAMES. */
-    /* Mode selector. */
-    enum groovy_mode new_mode = classify_mode(send_w, send_h);
-    if (st->pending_mode == new_mode) {
-        if (st->mode_streak < GROOVY_MODE_SETTLE_FRAMES) ++st->mode_streak;
-    } else {
-        st->pending_mode = new_mode;
-        st->mode_streak  = 0u;
+    /* Regime decision and announce. groovy_mode_on_frame (groovy_mode.h)
+     * is the ONLY place that may decide to announce: it classifies this
+     * frame (height alone), compares it against the last announced cache
+     * and the core's declared-size hint, and against the oscillation
+     * guard. was_mode/was_frozen are read BEFORE the call so the freeze/
+     * resume transition traces below can name what changed. The announce
+     * itself -- compute_modeline_from_dims + groovy_switchres_all -- happens
+     * HERE, in the same call, BEFORE the BLIT-vs-SWITCHRES dims guard and
+     * this frame's own blit further down: this is what keeps the wire fed
+     * at session opening and at every regime switch, without a settle
+     * wait. A DROP_FROZEN frame is not refused here -- the dims guard
+     * below refuses it (and counts it), because its size no longer
+     * matches the frozen cache. */
+    const enum groovy_mode was_mode   = groovy_mode_of(&st->av_cache);
+    const bool             was_frozen = st->mode_state.frozen;
+    const enum groovy_mode_action mode_action = groovy_mode_on_frame(&st->mode_state, &st->av_cache, send_w, send_h,
+            s_last_valid_fps, groovy_pacing_mono_ns());
+
+    if (!was_frozen && st->mode_state.frozen) {
+        RARCH_LOG("[groovy-mode] freeze: more than %u regime switches within 1 s -- held at %s, contrary frames dropped\n",
+                  GROOVY_MODE_GUARD_MAX_SWITCHES, groovy_mode_name(was_mode));
+    } else if (was_frozen && !st->mode_state.frozen) {
+        RARCH_LOG("[groovy-mode] resume: 1 s without a regime request -- %llu frames dropped while frozen (session total)\n",
+                  (unsigned long long)st->mode_state.frozen_drops);
     }
 
-    /* Dim hysteresis (preserved) — guards within-mode dim oscillation. */
-    if (st->pending_w == send_w && st->pending_h == send_h) {
-        if (st->pending_streak < GROOVY_DIM_HYSTERESIS_FRAMES)
-            ++st->pending_streak;
-    } else {
-        st->pending_w      = send_w;
-        st->pending_h      = send_h;
-        st->pending_streak = 0u;
-    }
-
-    /* Emit CMD_SWITCHRES on mode change (rare). */
-    if (st->mode_streak >= GROOVY_MODE_SETTLE_FRAMES
-        && st->current_mode != new_mode) {
+    if (mode_action == GROOVY_MODE_ANNOUNCE) {
         gm_modeline mode;
-        compute_modeline_from_dims(send_w, send_h, s_last_valid_fps, &mode);
-        mode.interlace = (new_mode == GROOVY_MODE_480I) ? 1u : 0u;
+        compute_modeline_from_dims(st->av_cache.width, st->av_cache.height, st->av_cache.fps, &mode);
         (void)groovy_switchres_all(st, &mode);
-        st->current_mode  = new_mode;
-        st->av_cache.width  = send_w;
-        st->av_cache.height = send_h;
-        st->av_cache.fps    = s_last_valid_fps;
-        st->av_cache.valid  = true;
-        /* Telemetry: a structured emitter-side mode_change log entry could go
-         * here, but record_groovy already logs CMD_SWITCHRES sends; the daemon
-         * emits the mode_change JSON event when it processes the packet. */
-    } else if (st->pending_streak >= GROOVY_DIM_HYSTERESIS_FRAMES
-               && (!st->av_cache.valid
-                   || st->av_cache.width != send_w
-                   || st->av_cache.height != send_h)) {
-        /* Within-mode dim change — emit CMD_SWITCHRES so the daemon updates
-         * h_active_announced for the crop/center/pad math. The daemon's
-         * mode resolver treats this as a "no modeset" event since the mode
-         * is unchanged. */
-        gm_modeline mode;
-        compute_modeline_from_dims(send_w, send_h, s_last_valid_fps, &mode);
-        mode.interlace = (st->current_mode == GROOVY_MODE_480I) ? 1u : 0u;
-        (void)groovy_switchres_all(st, &mode);
-        st->av_cache.width  = send_w;
-        st->av_cache.height = send_h;
-        st->av_cache.fps    = s_last_valid_fps;
-        st->av_cache.valid  = true;
+        switch (st->mode_state.last_reason) {
+        case GROOVY_MODE_REASON_FIRST:
+            RARCH_LOG("[groovy-mode] first announce %s at %ux%u\n",
+                      groovy_mode_name(groovy_mode_of(&st->av_cache)),
+                      st->av_cache.width, st->av_cache.height);
+            break;
+        case GROOVY_MODE_REASON_SWITCH:
+            RARCH_LOG("[groovy-mode] switch %s -> %s at %ux%u\n",
+                      groovy_mode_name(was_mode), groovy_mode_name(groovy_mode_of(&st->av_cache)),
+                      st->av_cache.width, st->av_cache.height);
+            break;
+        case GROOVY_MODE_REASON_DECLARED:
+            RARCH_LOG("[groovy-mode] resize %s at %ux%u (declared size, no wait)\n",
+                      groovy_mode_name(groovy_mode_of(&st->av_cache)),
+                      st->av_cache.width, st->av_cache.height);
+            break;
+        case GROOVY_MODE_REASON_SETTLED:
+            RARCH_LOG("[groovy-mode] resize %s at %ux%u (settled)\n",
+                      groovy_mode_name(groovy_mode_of(&st->av_cache)),
+                      st->av_cache.width, st->av_cache.height);
+            break;
+        default:
+            break;
+        }
     }
 
     /* Two sizes (quick 260901-po3): need_cap is what the converters write (captured dims,
@@ -2944,10 +2779,38 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
      * (N^2 instead of N). At `off`, cap == send and these three calls are
      * identical to before, argument for argument. */
     if (st->pix_fmt == FFEMU_PIX_BGR24) {
+        /* [groovy-conv]: the input conversion alone, one line per 600
+         * frames. Silent unless GROOVY_FRAMETIME=1 (read once), the same
+         * switch as the main-loop [groovy-frametime] timing: when off, no
+         * clock is read here. */
+        static int      conv_on = -1;
+        static uint64_t conv_ns_total, conv_ns_max;
+        static unsigned conv_samples;
+        uint64_t conv_t0 = 0u;
+        if (conv_on < 0) {
+            const char *env = getenv("GROOVY_FRAMETIME");
+            conv_on = (env && env[0] == '1') ? 1 : 0;
+        }
+        if (conv_on)
+            conv_t0 = groovy_pacing_mono_ns();
         bgr24_to_rgb888(st->swap_buf, vid->data,
                         cap_w, cap_h,             /* dst dims (declare, 1:1) */
                         vid->width, vid->height,  /* src dims (RA FB) */
                         (unsigned)vid->pitch);
+        if (conv_on) {
+            uint64_t conv_ns = groovy_pacing_mono_ns() - conv_t0;
+            conv_ns_total += conv_ns;
+            if (conv_ns > conv_ns_max) conv_ns_max = conv_ns;
+        }
+        if (conv_on && ++conv_samples >= 600u) {
+            RARCH_LOG("[groovy-conv] bgr24 %ux%u -> %ux%u n=%u average=%.1f us worst=%.1f us\n",
+                      vid->width, vid->height, cap_w, cap_h, conv_samples,
+                      (double)conv_ns_total / (double)conv_samples / 1000.0,
+                      (double)conv_ns_max / 1000.0);
+            conv_ns_total = 0u;
+            conv_ns_max   = 0u;
+            conv_samples  = 0u;
+        }
     } else if (st->pix_fmt == FFEMU_PIX_ARGB8888) {
         xrgb8888_to_rgb888(st->swap_buf, vid->data,
                            cap_w, cap_h,
@@ -3261,19 +3124,21 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         groovy_reannounce_flush_deferred(st, &st->rx[i], groovy_pacing_mono_ns());
 
     /* BLIT-vs-SWITCHRES dims guard (quick-260712-2b5 — defense in depth,
-     * blueprint requirement #3, spike 006 desync). NEVER ship a BLIT whose
-     * dims contradict the last announced CMD_SWITCHRES: while hysteresis has
-     * not yet let a new dim through, av_cache still holds the OLD announced
-     * dims and a mismatched BLIT would desync the daemon's
-     * expected_frame_bytes (unknown_opcode spam). Soft-skip keeps the session
-     * alive; the hysteresis blocks above emit the switchres within
-     * GROOVY_DIM_HYSTERESIS_FRAMES and frames flow again. Applies to BOTH
-     * the software (Beetle) and HW-native (SwanStation) capture paths.
-     * Warn log is throttled to dim changes (singleton driver — file-scope
-     * static is safe, same rationale as s_last_valid_fps). */
-    if (   !st->av_cache.valid
-        || st->av_cache.width  != send_w
-        || st->av_cache.height != send_h) {
+     * blueprint requirement #3, spike 006 desync) -- now a
+     * COUNTED refusal, not a silent one. NEVER ship a BLIT whose dims
+     * contradict the last announced CMD_SWITCHRES: groovy_mode_frame_matches
+     * (groovy_mode.h) is the single source of truth for "does this frame
+     * match what was just announced" -- a mismatched BLIT would desync the
+     * daemon's expected_frame_bytes (unknown_opcode spam). Soft-skip keeps
+     * the session alive; mode_action tells the helper whether this mismatch
+     * is an ordinary same-regime dim wait (dims_drops) or a frame refused by
+     * the oscillation guard (frozen_drops) -- both counted, read
+     * back in the [groovy-emit] and [groovy-mode] session lines below.
+     * Applies to BOTH the software (Beetle) and HW-native (SwanStation)
+     * capture paths. Warn log is throttled to dim changes (singleton
+     * driver — file-scope static is safe, same rationale as
+     * s_last_valid_fps). */
+    if (!groovy_mode_frame_matches(&st->mode_state, &st->av_cache, send_w, send_h, mode_action)) {
         static unsigned s_guard_warn_w = 0u, s_guard_warn_h = 0u;
         if (s_guard_warn_w != send_w || s_guard_warn_h != send_h) {
             RARCH_WARN("[groovy] BLIT dims %ux%u != announced %ux%u — skipping frame\n",
@@ -3284,6 +3149,11 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         }
         return true;   /* soft-skip, session alive */
     }
+
+    /* The field-splitter below reads the regime of the announce this
+     * guard just verified matches this exact frame -- never a separately
+     * tracked "current mode". */
+    const enum groovy_mode split_mode = groovy_mode_of(&st->av_cache);
 
     /* Witness of what actually goes out on the wire — after every guard, so
      * only frames really emitted get sampled. No effect when
@@ -3316,8 +3186,10 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
      * gap), NOT a rise in anomalies. */
     if (groovy_skip_should_skip(st->skip_every, st->frame_id)) {
         st->skipped_frames++;
-    /* Phase 3.2 regime-aware emit. */
-    } else if (st->current_mode == GROOVY_MODE_480I
+    /* Phase 3.2 regime-aware emit: split_mode is the
+     * regime of the announce the dims guard above just verified matches
+     * THIS frame -- never a separately tracked state. */
+    } else if (split_mode == GROOVY_MODE_480I
                && st->field_mode == GROOVY_FIELD_PER_FRAME) {
         /* GroovyMAME path: ONE half-frame per rendered frame, as a
          * half-height CMD_BLIT_VSYNC (0x06), under consecutive frame_ids.
@@ -3354,7 +3226,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         if (ok)
             st->fields_sent[field]++;
         emit_ok = ok;
-    } else if (st->current_mode == GROOVY_MODE_480I) {
+    } else if (split_mode == GROOVY_MODE_480I) {
         /* Split swap_buf (send_w × send_h × 3 RGB888) into two field buffers.
          * Field 0 = rows 0, 2, 4, ... (h/2 rows). Field 1 = rows 1, 3, 5, ...
          * Per-row size = send_w * 3 bytes. Total per field = send_w * (send_h/2) * 3.
@@ -3439,7 +3311,8 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
              * that increments them is never taken). */
             RARCH_LOG("[groovy-emit] compression=%s frame_dup=%s n=%u average=%.1f us "
                       "worst=%.1f us skipped=%u dups=%u fields=%u/%u "
-                      "reannounces=%u/%u reannounces_failed=%u hooked=%u input_resets=%u before_master=%u\n",
+                      "reannounces=%u/%u reannounces_failed=%u hooked=%u input_resets=%u before_master=%u"
+                      " mode_switches=%llu freezes=%u frozen_drops=%llu dims_drops=%llu\n",
                       groovy_compression_mode_name(st->compression_mode),
                       groovy_frame_dup_mode_name(st->frame_dup_mode),
                       st->emit_samples,
@@ -3450,7 +3323,11 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
                       s_reannounce_sent, s_reannounce_init_only,
                       s_reannounce_failure,
                       s_reannounce_hello, s_reannounce_input_reset,
-                      st->before_master);
+                      st->before_master,
+                      (unsigned long long)st->mode_state.switches,
+                      (unsigned)st->mode_state.freezes,
+                      (unsigned long long)st->mode_state.frozen_drops,
+                      (unsigned long long)st->mode_state.dims_drops);
             st->emit_ns_total = 0u;
             st->emit_ns_max   = 0u;
             st->emit_samples  = 0u;
@@ -3706,6 +3583,15 @@ static bool groovy_finalize(void *data)
                   (unsigned long long)st->downsample_dims_mismatch,
                   st->downsample_n);
 
+    /* Regime session summary -- ALWAYS emitted,
+     * unlike the downsample report above: a session with zero switches is
+     * exactly the informative case for a title that never left 240p. */
+    RARCH_LOG("[groovy-mode] session: switches=%llu freezes=%u frozen_drops=%llu dims_drops=%llu\n",
+              (unsigned long long)st->mode_state.switches,
+              (unsigned)st->mode_state.freezes,
+              (unsigned long long)st->mode_state.frozen_drops,
+              (unsigned long long)st->mode_state.dims_drops);
+
     /* Lever b6: closing report, BEFORE any gm_send_close -- it must
      * describe the queue's state at the moment the session ends.
      * at_close: the lever's SECOND named cost -- what remains in the queue
@@ -3729,6 +3615,13 @@ static bool groovy_finalize(void *data)
                           (unsigned long long)st->rx[i].audio_hold_not_played);
     }
 
+    /* Send path at close: did the segmented
+     * path serve the whole session, or was it cut? rx[0].gm == st->gm. */
+    for (unsigned i = 0u; i < st->n_rx; i++)
+        if (st->rx[i].gm)
+            groovy_log_send_path(st->rx[i].gm, (i == 0u) ? "master" : st->rx[i].target,
+                                 st->rx[i].mtu, true);
+
     gm_send_close(st->gm);
 
     /* Followers: CMD_CLOSE to each, plus an audio-failure report per
@@ -3751,9 +3644,26 @@ static bool groovy_finalize(void *data)
  * vtable function: groovy_push_av_info  (Plan 03-06, EMT-03)
  *
  * Called by runloop.c at SET_SYSTEM_AV_INFO and SET_GEOMETRY dispatch sites
- * (hook added by 0001-record-driver-geometry-hook.patch). Computes a
- * gm_modeline from the incoming retro_system_av_info and emits CMD_SWITCHRES
- * via gm_send_switchres.
+ * (hook added by 0001-record-driver-geometry-hook.patch).
+ *
+ * This function no longer computes a
+ * modeline or emits CMD_SWITCHRES. The core's declared geometry is only a
+ * HINT (groovy_mode_on_declare, groovy_mode.h) -- it never touches
+ * st->av_cache and never picks the regime. The image is the sole authority:
+ * groovy_push_video's groovy_mode_on_frame decides and announces, on every
+ * rendered frame, using this hint only to skip the same-size hysteresis
+ * wait when a frame's size exactly matches the last declaration
+ * ("declared size, no wait"). Rationale: this callback used to announce
+ * blind, always progressive (never setting interlace), racing with
+ * push_video's own regime tracking -- exactly the two-authorities bug
+ * behind separate reports for DMC, N64, and Sonic 2. Consequence
+ * for log readers: "[groovy] push_av_info: %ux%u @" (once read as the
+ * geometry really announced) no longer exists -- the av_cache line traced
+ * by push_video ("[groovy] push_video vid:") is now the only truthful
+ * source.
+ *
+ * The fps cache below is retained AS-IS -- it still matters for
+ * groovy_push_video, which has no timing of its own (vid carries no fps).
  *
  * HIL-3-08 root cause (Phase 3.1): libretro convention is that SET_GEOMETRY
  * only updates `geometry`, not `timing`. The runloop.c SET_GEOMETRY hook
@@ -3766,32 +3676,29 @@ static bool groovy_finalize(void *data)
  *
  * Fix (Phase 3.1 v1, cache approach): maintain a `last_valid_fps` cache.
  * When fps > 0, update the cache and use it. When fps <= 0 (SET_GEOMETRY-only
- * callback), reuse last_valid_fps if available; otherwise skip emission
- * (return true — do NOT return false, which would signal a broken session
- * to RetroArch).
+ * callback), reuse last_valid_fps if available; otherwise skip the
+ * declaration silently (return true — do NOT return false, which would
+ * signal a broken session to RetroArch).
  *
  * Bug A fix (Phase 3.1 v2, HIL re-run): cache lives in file-scope
  * `s_last_valid_fps`, NOT a groovy_state_t field. That HIL run showed
  * RetroArch fires CMD_EVENT_REINIT (e.g. on disc load) → groovy_free +
  * groovy_new wipes per-instance fields → next SET_GEOMETRY-only callback
- * sees cached=0 and emits malformed CMD_SWITCHRES. File-scope static survives
- * the cycle. RetroArch's record driver is singleton, so this is safe.
- *
- * Option G: daemon forges drm_mode_modeinfo source-exact from wire data —
- *   INCLUDING porches (h_begin → hsync_start, h_end → hsync_end, ...).
- *   Porches are derived from blanking in groovy_modeline.h (Bug B fix); the
- *   prior assumption "daemon tolerates zero porches" was wrong.
+ * would see cached=0. File-scope static survives the cycle. RetroArch's
+ * record driver is singleton, so this is safe.
  *
  * STRIDE mitigations:
  *   T-3.1-01 (zero-fps from libretro core): fps-cache + skip guard — zero
- *     or negative fps callbacks never produce a CMD_SWITCHRES on the wire
+ *     or negative fps callbacks never update the declared-size hint either
  *   T-3-12 (bad av_info): rejects base_width==0, base_height==0
- *   T-3-13 (spam): dedupe — identical successive callbacks do not emit
+ *   T-3-13 (spam): retired — this function sends nothing to dedupe
+ *     any more; groovy_mode_on_frame (groovy_mode.h) is the sole gate that
+ *     decides whether a frame's geometry produces a new CMD_SWITCHRES
  *
  * Thread safety: called from the RetroArch runloop thread only (video_threaded
- *   must be false per EMT-05). av_cache lives in groovy_state_t (instance
- *   scope); s_last_valid_fps is file-scope static — singleton driver, so no
- *   concurrent access.
+ *   must be false per EMT-05). mode_state.hint_w/hint_h live in groovy_state_t
+ *   (instance scope); s_last_valid_fps is file-scope static — singleton
+ *   driver, so no concurrent access.
  * ------------------------------------------------------------------------- */
 static bool groovy_push_av_info(void *data, const struct retro_system_av_info *av)
 {
@@ -3804,13 +3711,11 @@ static bool groovy_push_av_info(void *data, const struct retro_system_av_info *a
      * T-3.1-02: logs only geometry/fps tuples; no PII, no auth tokens.
      *
      * Deliberately DIFFERENT prefix from "[groovy] push_av_info" -- that
-     * other prefix is what R_AVINFO (client/bilan-999-33.py's
-     * first-announced-geometry check) takes for a geometry REALLY
-     * announced. This line traces EVERY call, including the ones the
-     * guards further down reject (zero dims, fps=0 with no cache,
-     * non-divisible box, duplicate) -- so it must never be able to match
-     * R_AVINFO. The line that matches R_AVINFO is further down, right
-     * before the real call to groovy_switchres_all. */
+     * exact prefix no longer exists in this file at all: this function
+     * never announces any more, so there is no
+     * "real" geometry line left to protect this diagnostic prefix from.
+     * Kept different regardless, for continuity with old logs from before
+     * this phase. */
     RARCH_LOG("[groovy-diag] push_av_info: %ux%u @ %.6f fps (cached=%.6f)\n",
               av->geometry.base_width, av->geometry.base_height,
               av->timing.fps, s_last_valid_fps);
@@ -3837,75 +3742,34 @@ static bool groovy_push_av_info(void *data, const struct retro_system_av_info *a
         gh /= st->downsample_n;
     }
 
-    /* Determine effective fps using per-instance last-known-fps cache.
-     *
-     * Case 1: fps_in > 0 — SET_SYSTEM_AV_INFO or equivalent. Update cache. */
+    /* Update the per-instance last-known-fps cache (still needed:
+     * groovy_push_video has no timing of its own, vid carries no fps). */
     double fps_in = av->timing.fps;
-    double effective_fps;
-
     if (fps_in > 0.0) {
         /* Valid fps from this callback — update the cache. */
         s_last_valid_fps = fps_in;
-        effective_fps = fps_in;
-    } else if (s_last_valid_fps > 0.0) {
-        /* fps_in == 0: SET_GEOMETRY-only callback, but we have a cached fps.
-         * Build synthetic av_info reusing last-known-good fps. */
-        effective_fps = s_last_valid_fps;
-    } else {
-        /* fps_in == 0 AND no cached fps yet: cannot compute a valid modeline.
-         * Skip emission silently. Return true (not false) — this is not a
-         * broken session, just a premature callback before any
-         * SET_SYSTEM_AV_INFO has established fps. */
+    } else if (s_last_valid_fps <= 0.0) {
+        /* fps_in == 0 AND no cached fps yet: nothing usable to declare with.
+         * Skip silently. Return true (not false) — this is not a broken
+         * session, just a premature callback before any SET_SYSTEM_AV_INFO
+         * has established fps. */
         RARCH_LOG("[groovy] push_av_info: skipping — fps=0 and no cached fps yet "
                   "(geometry=%ux%u)\n",
                   av->geometry.base_width, av->geometry.base_height);
         return true;
     }
+    /* else: fps_in == 0 but a cached fps already exists from an earlier
+     * callback — nothing to update, the hint below still applies. */
 
-    /* T-3-13: dedupe — skip CMD_SWITCHRES if (w, h, effective_fps) unchanged.
-     * Keyed on effective_fps (what was actually used), not raw fps_in, so a
-     * SET_GEOMETRY callback reusing the cached fps doesn't re-emit when the
-     * geometry itself is unchanged. Compared on gw/gh (DIVIDED dims, quick
-     * 260901-po3) — consistent with what is actually announced and cached
-     * below. */
-    if (st->av_cache.valid
-        && st->av_cache.width  == gw
-        && st->av_cache.height == gh
-        && st->av_cache.fps    == effective_fps)
-        return true;   /* identical — no-op, report success */
-
-    st->av_cache.width  = gw;
-    st->av_cache.height = gh;
-    st->av_cache.fps    = effective_fps;
-    st->av_cache.valid  = true;
-
-    /* Unconditional synthetic copy (quick 260901-po3): carries the DIVIDED
-     * dims (gw/gh) and the effective fps. At `off`, gw/gh equal the
-     * original dims and effective_fps equals fps_in when fps_in > 0 — the
-     * resulting modeline is then identical to before this feature. */
-    struct retro_system_av_info av_use;
-    memcpy(&av_use, av, sizeof(av_use));
-    av_use.geometry.base_width  = gw;
-    av_use.geometry.base_height = gh;
-    av_use.timing.fps           = effective_fps;
-
-    gm_modeline mode;
-    compute_modeline_from_av_info(&av_use, &mode);
-
-    /* THE line that R_AVINFO really reads, moved here -- after the two
-     * guards above (zero dims, fps=0 with no cache), after the box
-     * division check, and after the dedupe (T-3-13) -- so that it can
-     * never match a call that led to no send attempt at all. Not
-     * re-emitting on a duplicate doesn't violate the invariant: the
-     * first-announced-geometry check only reads the FIRST line, and a
-     * duplicate's geometry has already been announced by an earlier call.
-     * RAW dims (av->geometry.*), not the divided gw/gh -- drift under
-     * supersampling stays out of this fix's scope. */
-    RARCH_LOG("[groovy] push_av_info: %ux%u @ %.6f fps (cached=%.6f)\n",
-              av->geometry.base_width, av->geometry.base_height,
-              av->timing.fps, s_last_valid_fps);
-
-    return groovy_switchres_all(st, &mode);
+    /* The declaration is only a HINT, never an
+     * authority -- it never announces, never touches st->av_cache, never
+     * requests a regime switch. A late frame still arriving at the OLD
+     * size must be able to leave in the old regime, unannounced, unrefused
+     * (groovy_mode.h's own contract). */
+    groovy_mode_on_declare(&st->mode_state, gw, gh);
+    RARCH_LOG("[groovy-mode] declared %ux%u -- hint only, nothing announced\n",
+              gw, gh);
+    return true;
 }
 
 /* ---------------------------------------------------------------------------

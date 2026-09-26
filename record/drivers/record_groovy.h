@@ -16,16 +16,13 @@
  * without necessarily including gm.h themselves. */
 #include <gm.h>
 
-/* Regime classification for the dual-mode super-res pivot. Used by
- * record_groovy.c::classify_mode + push_video regime-aware emit. */
-enum groovy_mode {
-    GROOVY_MODE_240P_SUPER_RES = 0,
-    GROOVY_MODE_480I = 1
-};
-
-/* 1-frame settle gate (additive to the existing 15-frame within-regime
- * dim hysteresis). */
-#define GROOVY_MODE_SETTLE_FRAMES 1u
+/* Regime decision for the dual-mode super-res pivot -- the single decision
+ * shared by record_groovy.c::groovy_push_video/groovy_push_av_info and the
+ * test bridge. groovy_push_video is the sole authority: it calls
+ * groovy_mode_on_frame on every rendered frame, which owns
+ * its own same-regime size hysteresis and oscillation guard internally --
+ * no additional settle gate lives here any more. */
+#include "groovy_mode.h"
 
 extern const record_driver_t record_groovy;
 
