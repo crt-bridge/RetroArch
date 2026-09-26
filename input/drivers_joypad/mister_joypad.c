@@ -232,10 +232,31 @@ static int16_t mister_joypad_axis_state(
       mister_joypad_t *pad,
       unsigned port, uint32_t joyaxis)
 {
+   /* crt-bridge : (axis sign filter) upstream returned the scaled value
+    * for a NEG bind and a POS bind alike, so RetroArch's
+    * abs(plus) - abs(minus) reconstruction (input_joypad_analog_axis,
+    * input/input_driver.c) always cancelled to zero -- the stick read as
+    * permanently centred no matter how it was held. Filtered on the model
+    * of sdl_joypad_axis_state (sdl_joypad.c): a NEG bind only returns a
+    * negative value, clamped to -0x7fff (never -0x8000, unsafe once
+    * mister_joypad_state's abs() sees it); a POS bind only returns a
+    * positive value; anything else falls through to 0. */
    if (AXIS_NEG_GET(joyaxis) < pad->num_axes)
-      return mister_scale_axis_i8(pad->axis[AXIS_NEG_GET(joyaxis)]);
+   {
+      int16_t val = mister_scale_axis_i8(pad->axis[AXIS_NEG_GET(joyaxis)]);
+      if (val < 0)
+      {
+         if (val < -0x7fff)
+            return -0x7fff;
+         return val;
+      }
+   }
    else if (AXIS_POS_GET(joyaxis) < pad->num_axes)
-      return mister_scale_axis_i8(pad->axis[AXIS_POS_GET(joyaxis)]);
+   {
+      int16_t val = mister_scale_axis_i8(pad->axis[AXIS_POS_GET(joyaxis)]);
+      if (val > 0)
+         return val;
+   }
 
    return 0;
 }
