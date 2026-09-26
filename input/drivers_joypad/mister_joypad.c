@@ -8,10 +8,10 @@
  * time). Original copyright below, preserved per its license (GPL v3).
  *
  * Every departure from the upstream source is marked in place with a
- * "crt-bridge :" comment that says why it exists. There are exactly
- * four (the driver must stay a pure translator, the PC keyboard must
- * keep working, and one honest bug-fix in the axis rescale — see the
- * comment at mister_scale_axis_i8):
+ * "crt-bridge :" comment that says why it exists. Do not trust a count of
+ * them here — trust the in-place comments instead, and keep this list in
+ * sync when a departure is added or removed. As of this writing there are
+ * eight:
  *
  *   a. Data source (mister_joypad_poll): upstream calls gmw_pollInputs() +
  *      gmw_getJoyInputs() against its own `groovymister` library socket.
@@ -30,6 +30,19 @@
  *   d. Axis rescale (mister_scale_axis_i8): see the comment at its
  *      definition — an explicit multiplication replaces upstream's
  *      approximate bit-shift trick.
+ *   e. Bound check (mister_joypad_button): port checked before forming
+ *      and dereferencing the pointer — upstream read pad->map out of
+ *      bounds for any port >= MAX_USERS_MISTER.
+ *   f. Bound check (mister_joypad_axis): upstream had no bound check
+ *      here at all (the !pad test was always false: the address of a
+ *      static array element is never NULL) — out-of-bounds read for any
+ *      port >= MAX_USERS_MISTER.
+ *   g. Bound check (mister_joypad_state): same out-of-bounds defect as
+ *      (e), checked before forming the pointer and reading pad->map.
+ *   h. Axis sign filter (mister_joypad_axis_state): upstream returned the
+ *      scaled value for a NEG bind and a POS bind alike, so RetroArch's
+ *      abs(plus) - abs(minus) reconstruction always cancelled to zero —
+ *      the stick read as permanently centred no matter how it was held.
  *
  * RETRO_DEVICE_ID_JOYPAD_* -> GM_JOY_* table, copied from mister_joypad.c
  * (upstream) line 52-86:
