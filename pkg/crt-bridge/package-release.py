@@ -37,6 +37,7 @@ already exists).
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -429,6 +430,27 @@ def _iter_members(root: Path) -> list[Path]:
     return [p for p in root.rglob("*") if p.is_file()]
 
 
+def _relative_to(member: Path, root: Path) -> Path:
+    """Like `member.relative_to(root)`, tolerant of mixed path separators.
+
+    On MSYS2's mingw-w64 CPython (the interpreter the release CI's Windows
+    job builds and packages with), `Path.iterdir()`/`Path.rglob()` return
+    children whose cached string form has a literal backslash at the join
+    point even though every other `str(Path(...))` in the same process
+    uses forward slashes (that build swaps `os.sep`/`os.altsep`, but the
+    scandir-based child-path construction still hardcodes `\\`). Plain
+    `relative_to()` compares those cached strings and raises `ValueError`
+    -- "not in the subpath" -- even though `member` is a genuine
+    descendant of `root`. `os.path.relpath` normalizes separators via
+    `os.path.normpath` before comparing, so it is not fooled by the same
+    mismatch, and agrees with `relative_to()` everywhere it does not
+    encounter the bug (only descendants are ever passed in here, so there
+    is no risk of silently producing a `..`-relative path for an
+    unrelated pair).
+    """
+    return Path(os.path.relpath(member, root))
+
+
 def _rule_cfg_target(root: Path) -> list[tuple[str, str]]:
     cfg = root / "crt-bridge.cfg"
     if not cfg.is_file():
@@ -506,7 +528,7 @@ def _rule_core(root: Path, platform: str) -> list[tuple[str, str]]:
     cores_dir = root / "cores"
     if cores_dir.is_dir():
         extra = sorted(
-            str(p.relative_to(cores_dir)) for p in cores_dir.rglob("*")
+            str(_relative_to(p, cores_dir)) for p in cores_dir.rglob("*")
             if p.is_file() and p.name != "PUT-CORES-HERE.txt"
         )
         for rel in extra:
@@ -517,7 +539,7 @@ def _rule_core(root: Path, platform: str) -> list[tuple[str, str]]:
 def _rule_name(root: Path, platform: str) -> list[tuple[str, str]]:
     findings: list[tuple[str, str]] = []
     for member in _iter_members(root):
-        rel = str(member.relative_to(root))
+        rel = str(_relative_to(member, root))
         if "retroarch" in rel.lower():
             findings.append(("name", f"{member}: path contains 'retroarch'"))
     expected = "crt-bridge-emitter.exe" if platform == "windows" else "crt-bridge-emitter"
@@ -662,7 +684,7 @@ def cmd_archive(args: argparse.Namespace) -> int:
     if args.platform == "windows":
         with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in files:
-                arcname = f"{root_name}/{f.relative_to(src_dir).as_posix()}"
+                arcname = f"{root_name}/{_relative_to(f, src_dir).as_posix()}"
                 zf.write(f, arcname)
     else:
         executables = {"crt-bridge-emitter", "start-emitter.sh"}
@@ -678,7 +700,7 @@ def cmd_archive(args: argparse.Namespace) -> int:
 
         with tarfile.open(out_path, "w:gz") as tf:
             for f in files:
-                arcname = f"{root_name}/{f.relative_to(src_dir).as_posix()}"
+                arcname = f"{root_name}/{_relative_to(f, src_dir).as_posix()}"
                 tf.add(f, arcname=arcname, filter=_filter)
 
     print(f"archived: {out_path}")
