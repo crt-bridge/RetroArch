@@ -7296,6 +7296,7 @@ end:
  **/
 int runloop_iterate(void)
 {
+   retro_time_t          groovy_ft_start = 0; /* crt-bridge */
    input_driver_state_t         *input_st = input_state_get_ptr();
    audio_driver_state_t         *audio_st = audio_state_get_ptr();
    video_driver_state_t         *video_st = video_state_get_ptr();
@@ -7514,6 +7515,9 @@ int runloop_iterate(void)
 
    /* Measure the time between core_run() and video_driver_frame() */
    runloop_st->core_run_time = cpu_features_get_time_usec();
+   /* crt-bridge: our own copy -- video_driver_frame turns
+    * core_run_time into a difference (or 0) while core_run() is running. */
+   groovy_ft_start           = runloop_st->core_run_time;
 
    {
 #ifdef HAVE_RUNAHEAD
@@ -7541,6 +7545,11 @@ int runloop_iterate(void)
 #endif
          core_run();
    }
+
+   /* crt-bridge: GROOVY_FRAMETIME, see video_driver.h.
+    * groovy_ft_start was read just before core_run(). */
+   if (groovy_frametime_on())
+      groovy_frametime_iter(groovy_ft_start, cpu_features_get_time_usec());
 
    /* Increment runtime tick counter after each call to
     * core_run() or run_ahead() */

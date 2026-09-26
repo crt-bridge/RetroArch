@@ -1193,6 +1193,83 @@ static bool video_driver_bridge_menu_live(void)
 #endif
 }
 
+/* crt-bridge: see groovy_frametime_slot in video_driver.h. */
+#define GROOVY_FT_WINDOW 600
+static int          s_gft_on = -1;
+static retro_time_t s_gft_cur[GROOVY_FT_COUNT];
+static retro_time_t s_gft_win[GROOVY_FT_COUNT][GROOVY_FT_WINDOW];
+static unsigned     s_gft_n;
+static retro_time_t s_gft_last_start;
+
+bool groovy_frametime_on(void)
+{
+   if (s_gft_on < 0)
+   {
+      const char *env = getenv("GROOVY_FRAMETIME");
+      s_gft_on        = (env && env[0] == '1') ? 1 : 0;
+   }
+   return s_gft_on == 1;
+}
+
+void groovy_frametime_add(unsigned slot, retro_time_t us)
+{
+   if (slot < GROOVY_FT_COUNT)
+      s_gft_cur[slot] += us;
+}
+
+static int groovy_frametime_cmp(const void *a, const void *b)
+{
+   retro_time_t x = *(const retro_time_t*)a;
+   retro_time_t y = *(const retro_time_t*)b;
+   return (x > y) - (x < y);
+}
+
+void groovy_frametime_iter(retro_time_t start, retro_time_t end)
+{
+   static const char *names[GROOVY_FT_COUNT] =
+      { "iter", "core", "read", "push", "drv", "audio", "paud" };
+   unsigned slot, i;
+
+   s_gft_cur[GROOVY_FT_ITER] = s_gft_last_start ? start - s_gft_last_start : 0;
+   s_gft_cur[GROOVY_FT_CORE] = end - start;
+   s_gft_last_start          = start;
+   for (slot = 0; slot < GROOVY_FT_COUNT; slot++)
+   {
+      s_gft_win[slot][s_gft_n] = s_gft_cur[slot];
+      s_gft_cur[slot]          = 0;
+   }
+   if (++s_gft_n < GROOVY_FT_WINDOW)
+      return;
+
+   {
+      char line[1024];
+      size_t len      = 0;
+      unsigned over16 = 0, over20 = 0, over33 = 0;
+      for (i = 0; i < GROOVY_FT_WINDOW; i++)
+      {
+         retro_time_t it = s_gft_win[GROOVY_FT_ITER][i];
+         over16 += it > 16700;
+         over20 += it > 20000;
+         over33 += it > 33400;
+      }
+      /* p50 / p99 / max in microseconds, per slot (sorted in place: the
+       * window is reset right after). */
+      for (slot = 0; slot < GROOVY_FT_COUNT && len < sizeof(line); slot++)
+      {
+         retro_time_t *w = s_gft_win[slot];
+         qsort(w, GROOVY_FT_WINDOW, sizeof(*w), groovy_frametime_cmp);
+         len += snprintf(line + len, sizeof(line) - len, " %s=%lld/%lld/%lld",
+               names[slot],
+               (long long)w[GROOVY_FT_WINDOW / 2],
+               (long long)w[(GROOVY_FT_WINDOW * 99) / 100],
+               (long long)w[GROOVY_FT_WINDOW - 1]);
+      }
+      RARCH_LOG("[groovy-frametime] n=%u us(p50/p99/max)%s over16=%u over20=%u over33=%u\n",
+            GROOVY_FT_WINDOW, line, over16, over20, over33);
+   }
+   s_gft_n = 0;
+}
+
 static void recording_dump_frame(
       const void *data, unsigned width,
       unsigned height, size_t pitch, bool is_idle)
@@ -1247,9 +1324,18 @@ static void recording_dump_frame(
 
             /* Async pipeline refilling (recording start / dim change):
              * drop the frame instead of pushing stale-dim content. */
-            if (!vid->read_native(video_st->data,
-                     video_st->record_gpu_buffer, width, height))
-               return;
+            {
+               bool read_ok;
+               retro_time_t ft0 = groovy_frametime_on()
+                  ? cpu_features_get_time_usec() : 0;
+               read_ok = vid->read_native(video_st->data,
+                     video_st->record_gpu_buffer, width, height);
+               if (ft0)
+                  groovy_frametime_add(GROOVY_FT_READ,
+                        cpu_features_get_time_usec() - ft0);
+               if (!read_ok)
+                  return;
+            }
 
             ffemu_data.width  = width;
             ffemu_data.height = height;
@@ -1257,7 +1343,14 @@ static void recording_dump_frame(
             ffemu_data.data   = video_st->record_gpu_buffer;
          }
 
-         record_st->driver->push_video(record_st->data, &ffemu_data);
+         {
+            retro_time_t ft0 = groovy_frametime_on()
+               ? cpu_features_get_time_usec() : 0;
+            record_st->driver->push_video(record_st->data, &ffemu_data);
+            if (ft0)
+               groovy_frametime_add(GROOVY_FT_PUSH,
+                     cpu_features_get_time_usec() - ft0);
+         }
          return;
       }
 
@@ -4832,8 +4925,11 @@ void video_driver_frame(const void *data, unsigned width,
 
    if (render_frame && vid && vid->frame)
    {
+      bool frame_ok;
+      retro_time_t ft0 = groovy_frametime_on()
+         ? cpu_features_get_time_usec() : 0;
       video_info.current_subframe = 0;
-      if (vid->frame(
+      frame_ok = vid->frame(
                video_st->data, data, width, height,
                video_st->frame_count, (unsigned)pitch,
 #if HAVE_MENU
@@ -4844,7 +4940,11 @@ void video_driver_frame(const void *data, unsigned width,
 #endif
                ? ""
                : video_driver_msg,
-               &video_info))
+               &video_info);
+      if (ft0)
+         groovy_frametime_add(GROOVY_FT_DRV,
+               cpu_features_get_time_usec() - ft0);
+      if (frame_ok)
          video_st->flags |=  VIDEO_FLAG_ACTIVE;
       else
          video_st->flags &= ~VIDEO_FLAG_ACTIVE;

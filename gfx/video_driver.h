@@ -1302,6 +1302,24 @@ bool video_driver_init_internal(bool *video_is_threaded, bool verbosity_enabled)
 void video_driver_frame(const void *data, unsigned width,
       unsigned height, size_t pitch);
 
+/* crt-bridge: per-iteration timing of the main loop, measured
+ * inside the fork. Off unless GROOVY_FRAMETIME=1 (read once): when off, no
+ * clock is read anywhere. One [groovy-frametime] line per 600 iterations. */
+enum groovy_frametime_slot
+{
+   GROOVY_FT_ITER = 0, /* start of one iteration to start of the next */
+   GROOVY_FT_CORE,     /* core_run(), everything below included */
+   GROOVY_FT_READ,     /* vid->read_native (bridge capture readback) */
+   GROOVY_FT_PUSH,     /* record driver push_video (the bridge) */
+   GROOVY_FT_DRV,      /* vid->frame (GPU waits and present included) */
+   GROOVY_FT_AUDIO,    /* audio_driver_flush (may block on audio sync) */
+   GROOVY_FT_PAUD,     /* record driver push_audio (the bridge) */
+   GROOVY_FT_COUNT
+};
+bool groovy_frametime_on(void);
+void groovy_frametime_add(unsigned slot, retro_time_t us);
+void groovy_frametime_iter(retro_time_t start, retro_time_t end);
+
 void video_driver_update_title(void *data);
 
 bool video_coord_array_append(video_coord_array_t *ca,

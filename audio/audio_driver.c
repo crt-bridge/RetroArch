@@ -74,6 +74,7 @@
 #include "../list_special.h"
 #include "../file_path_special.h"
 #include "../record/record_driver.h"
+#include "../gfx/video_driver.h" /* crt-bridge: groovy_frametime_* */
 #include "../tasks/task_content.h"
 #include "../runloop.h"
 #include "../verbosity.h"
@@ -1168,6 +1169,9 @@ size_t audio_driver_sample_batch(const int16_t *data, size_t frames)
                   ? (AUDIO_CHUNK_SIZE_NONBLOCKING >> 1)
                   : frames_remaining;
 
+      /* crt-bridge: GROOVY_FRAMETIME, see video_driver.h. */
+      retro_time_t ft0 = 0;
+
       if (recording_push_audio)
       {
          struct record_audio_data ffemu_data;
@@ -1175,14 +1179,26 @@ size_t audio_driver_sample_batch(const int16_t *data, size_t frames)
          ffemu_data.data   = data;
          ffemu_data.frames = frames_to_write;
 
+         if (groovy_frametime_on())
+            ft0 = cpu_features_get_time_usec();
          record_st->driver->push_audio(record_st->data, &ffemu_data);
+         if (ft0)
+            groovy_frametime_add(GROOVY_FT_PAUD,
+                  cpu_features_get_time_usec() - ft0);
       }
 
       if (flush_audio)
+      {
+         if (groovy_frametime_on())
+            ft0 = cpu_features_get_time_usec();
          audio_driver_flush(audio_st, slowmotion_ratio, data,
                frames_to_write << 1,
                (runloop_flags & RUNLOOP_FLAG_SLOWMOTION) ? true : false,
                (runloop_flags & RUNLOOP_FLAG_FASTMOTION) ? true : false);
+         if (ft0)
+            groovy_frametime_add(GROOVY_FT_AUDIO,
+                  cpu_features_get_time_usec() - ft0);
+      }
 
       frames_remaining -= frames_to_write;
       data             += frames_to_write << 1;
