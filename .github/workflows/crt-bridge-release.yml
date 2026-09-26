@@ -122,7 +122,13 @@ jobs:
 
       - name: Check libgm import
         run: |
-          objdump -p retroarch.exe | grep -q 'DLL Name: libgm.dll'
+          # No -q: grep -q exits the moment it sees a match, closing its
+          # end of the pipe while objdump may still be writing -- under
+          # the shell's default pipefail this becomes a SIGPIPE (exit
+          # 141) from objdump, not a real check failure. Redirecting
+          # instead keeps grep reading to EOF; the exit status (0 found,
+          # 1 not found) is unchanged.
+          objdump -p retroarch.exe | grep 'DLL Name: libgm.dll' >/dev/null
 
       - name: Package
         run: |
@@ -198,7 +204,11 @@ jobs:
         run: make -j"$(nproc)" HAVE_GROOVY=1 LIBGM_DIR="$PWD/libgm"
 
       - name: Check libgm link
-        run: nm retroarch | grep -qw gm_init
+        # No -q, same reason as the Windows "Check libgm import" step:
+        # grep -q closes the pipe on first match, and nm writing into a
+        # closed pipe under pipefail turns into a SIGPIPE (exit 141)
+        # instead of the intended pass/fail signal.
+        run: nm retroarch | grep -w gm_init >/dev/null
 
       - name: Package
         run: |
