@@ -287,3 +287,10 @@ gfx/drivers/rsx_shaders/modern_opaque.fpo
 gfx/drivers/rsx_shaders/modern_opaque.vpo
 pkg/psl1ght/pkg/USRDIR/shaders_cg/
 !pkg/psl1ght/pkg/USRDIR/system/
+
+# crt-bridge : the release kit ships one autoconfig profile so a release
+# user's controller works without hand-editing a config file -- carve this
+# one path out of the blanket `autoconfig` ignore above.
+!pkg/crt-bridge/autoconfig/
+!pkg/crt-bridge/autoconfig/mister/
+!pkg/crt-bridge/autoconfig/mister/MiSTer.cfg

@@ -9,8 +9,11 @@ Three subcommands, all stdlib-only (no RetroArch launched, nothing built):
         [--mingw-bin DIR] [--msys-root DIR] [--objdump PATH]
         Stages an archive folder from an explicit allowlist: the renamed
         binary, the platform crt-bridge.cfg template (target left empty),
-        a launcher, a substituted README, LICENSES/ (measured, never a
-        recopied list), and an empty cores/ marker. Nothing else goes in.
+        a launcher, a substituted README, the "mister" autoconfig profile
+        (autoconfig/mister/MiSTer.cfg, so a release user's controller
+        works without hand-editing a config file), LICENSES/ (measured,
+        never a recopied list), and an empty cores/ marker. Nothing else
+        goes in.
 
     package-release.py check --platform {windows,linux} \\
         (--dir DIR | --archive FILE) [--mingw-bin DIR] [--objdump PATH] \\
@@ -18,8 +21,9 @@ Three subcommands, all stdlib-only (no RetroArch launched, nothing built):
         Verifies a staged directory or a built archive against the same
         rules a public CI run must pass before Sir ever tags a release:
         empty bridge target, no private address/host path, no core, no
-        official branding in file names, every license present, and (on
-        Windows, with --mingw-bin) a closed DLL import set.
+        official branding in file names, every license present, the
+        autoconfig profile with its axis binds, and (on Windows, with
+        --mingw-bin) a closed DLL import set.
 
     package-release.py archive --platform {windows,linux} --dir DIR --out FILE
         Compresses a staged directory: .zip on Windows, .tar.gz on Linux
@@ -285,6 +289,16 @@ def cmd_stage(args: argparse.Namespace) -> int:
         return 2
     _stage_file(cfg_src, "crt-bridge.cfg")
 
+    # -- Autoconfig profile: the "mister" driver's autoconfig cfg, so a
+    # release user's controller works without hand-editing a config file.
+    # Shipped for both platforms -- the driver's joypad half is built on
+    # both (crt-bridge-linux.cfg keeps input_joypad_driver = "mister"). --
+    autoconfig_src = fork_dir / "pkg" / "crt-bridge" / "autoconfig" / "mister" / "MiSTer.cfg"
+    if not autoconfig_src.is_file():
+        print(f"ERROR: autoconfig profile not found: {autoconfig_src}", file=sys.stderr)
+        return 2
+    _stage_file(autoconfig_src, "autoconfig/mister/MiSTer.cfg")
+
     # -- Launcher --
     if args.platform == "windows":
         launcher_src = fork_dir / "pkg" / "crt-bridge" / "start-emitter.cmd"
@@ -450,6 +464,37 @@ def _rule_private_address(root: Path) -> list[tuple[str, str]]:
     return findings
 
 
+_AUTOCONFIG_AXIS_KEYS = (
+    "input_l_x_plus_axis",
+    "input_l_x_minus_axis",
+    "input_l_y_plus_axis",
+    "input_l_y_minus_axis",
+    "input_r_x_plus_axis",
+    "input_r_x_minus_axis",
+    "input_r_y_plus_axis",
+    "input_r_y_minus_axis",
+)
+
+
+def _rule_autoconfig_profile(root: Path) -> list[tuple[str, str]]:
+    profile = root / "autoconfig" / "mister" / "MiSTer.cfg"
+    if not profile.is_file():
+        return [("autoconfig-profile", f"{profile}: missing")]
+    parsed = parse_cfg(profile)
+    findings: list[tuple[str, str]] = []
+    if parsed.get("input_driver") != "mister":
+        findings.append(
+            (
+                "autoconfig-profile",
+                f"{profile}: input_driver = {parsed.get('input_driver')!r}, expected 'mister'",
+            )
+        )
+    for key in _AUTOCONFIG_AXIS_KEYS:
+        if key not in parsed:
+            findings.append(("autoconfig-profile", f"{profile}: missing {key}"))
+    return findings
+
+
 def _rule_core(root: Path, platform: str) -> list[tuple[str, str]]:
     findings: list[tuple[str, str]] = []
     core_name_re = re.compile(r"(?i)_libretro\.(dll|so|dylib)$")
@@ -573,6 +618,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     findings: list[tuple[str, str]] = []
     findings.extend(_rule_cfg_target(root))
     findings.extend(_rule_private_address(root))
+    findings.extend(_rule_autoconfig_profile(root))
     findings.extend(_rule_core(root, args.platform))
     findings.extend(_rule_name(root, args.platform))
     if args.require_branding:
