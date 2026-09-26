@@ -1,0 +1,3 @@
+[submodule "libgm"]
+	path = libgm
+	url = https://github.com/crt-bridge/libgm.git
