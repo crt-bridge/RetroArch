@@ -266,6 +266,8 @@ jobs:
 
           No libretro core is included.
 
+          Software receiver (a libretro core for a second computer): https://github.com/crt-bridge/libretro-crt-bridge
+
           Windows binaries are not code-signed.
 
           ## Known limitations

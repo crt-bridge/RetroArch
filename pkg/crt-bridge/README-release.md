@@ -40,6 +40,12 @@ expected for an unsigned hobby build, not a sign of tampering.
 included. RetroArch loads it on demand only if present; if you need NVDA narration, drop a
 copy next to the executable yourself.
 
+## Software receiver
+
+No CRT receiver? The crt-bridge client is a libretro core that shows this emitter's stream
+on a second computer, plays its sound and sends that computer's gamepad back:
+https://github.com/crt-bridge/libretro-crt-bridge
+
 ## Source code
 
 Fork: https://github.com/crt-bridge/RetroArch/tree/@FORK_COMMIT@

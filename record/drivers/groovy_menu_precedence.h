@@ -20,7 +20,9 @@
  * NO UPSTREAM PRECEDENT. The antonioginer/RetroArch "mister" branch reads
  * no environment variable at all (zero getenv in gfx/gfx_mister.c):
  * everything there comes from config_get_ptr(). The only model is our
- * own client, already delivered and proven: client/core/groovy_libretro.c.
+ * own client, already delivered and proven: crt_bridge_libretro.c, the
+ * crt-bridge client core
+ * (https://github.com/crt-bridge/libretro-crt-bridge).
  */
 
 #ifndef GROOVY_MENU_PRECEDENCE_H
