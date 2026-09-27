@@ -267,6 +267,13 @@ jobs:
           No libretro core is included.
 
           Windows binaries are not code-signed.
+
+          ## Known limitations
+
+          - L3 and R3 (the stick clicks) do not reach the game: the Groovy input protocol carries ten buttons only.
+          - Changing the gamepad on the receiver while it runs breaks input until the receiver service is restarted.
+          - An Xbox One / Series X|S controller does not finish its USB initialisation on the receiver: its logo keeps blinking and no input arrives.
+          - The Y/X swap in the bundled MiSTer.cfg gamepad profile has only been verified with an Xbox 360 controller.
           EOF
 
       - name: Create draft release
