@@ -7641,7 +7641,7 @@ end:
          {
             gm_brake_warned = true;
             RARCH_WARN("[groovy] no audio driver is running and vsync is off: "
-                        "pacing the loop at core rate (%.2f fps)\n",
+                        "pacing the loop at the core rate (%.2f fps)\n",
                         video_st->av_info.timing.fps);
          }
       }
