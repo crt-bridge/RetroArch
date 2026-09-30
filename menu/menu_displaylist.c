@@ -9631,10 +9631,10 @@ unsigned menu_displaylist_build_list(
                 * 0 to 11 and their existing .checked lines below do not
                 * shift by a single slot. Inserting in the middle would
                 * force renumbering twelve lines for nothing. The master
-                * receiver address is added HERE, AHEAD of the seven groovy
-                * entries (indices 12 to 18) -- without a receiver, none of
-                * the other six settings is any use. This renumbers the six
-                * groovy .checked lines, never the twelve before them. */
+                * receiver address is added HERE, AHEAD of the six other
+                * groovy entries (indices 13 to 18) -- without a receiver,
+                * none of them is any use. This renumbers the seven groovy
+                * .checked lines (12 to 18), never the twelve before them. */
                {MENU_ENUM_LABEL_GROOVY_MASTER_ADDRESS,                                 PARSE_ONLY_STRING,         false},
                {MENU_ENUM_LABEL_GROOVY_BRIDGE_ENABLE,                                  PARSE_ONLY_BOOL,           false},
                {MENU_ENUM_LABEL_GROOVY_COMPRESSION,                                    PARSE_ONLY_BOOL,           false},
