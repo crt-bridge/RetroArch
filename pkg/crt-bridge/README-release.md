@@ -51,11 +51,12 @@ instead of running as fast as it can.
 ## Padded session
 
 Never turn this on towards a MiSTer FPGA: a MiSTer only understands the classic session, and a
-padded one leaves it without picture or sound.
+MiSTer does not understand a padded one.
 
-Over Wi-Fi, very small packets are the first to be dropped, and the sound travels in them. A
-padded session makes every packet large enough to survive. It works towards the crt-bridge client
-(https://github.com/crt-bridge/libretro-crt-bridge) and towards a crt-bridge receiver.
+Over Wi-Fi, small command packets are the first to be dropped, and the sound travels in them. A
+padded session makes those small command packets large enough to survive. It works towards the
+crt-bridge client (https://github.com/crt-bridge/libretro-crt-bridge) and towards a crt-bridge
+receiver.
 
 - The main receiver: Settings > Recording > Padded Session = On, or the environment variable
   GROOVY_PAD=on (a variable that is set always wins over the menu, and the emitter says so on

@@ -272,7 +272,7 @@ jobs:
 
           ## What's new in this release
 
-          - When the receiver is the crt-bridge client over Wi-Fi, set Settings > Recording > Padded Session to On: the sound no longer drops out. Keep it Off towards a MiSTer FPGA.
+          - When the receiver is the crt-bridge client over Wi-Fi, set Settings > Recording > Padded Session to On: it pads small command packets, including the ones that carry sound, past the size Wi-Fi drops first. Keep it Off towards a MiSTer FPGA.
           - The emitter no longer runs hundreds of frames per second when its audio device cannot be opened.
           - Both kits keep every RetroArch folder, and the settings saved by the menu, inside the kit folder.
 
