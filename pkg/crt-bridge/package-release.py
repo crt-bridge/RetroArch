@@ -410,6 +410,23 @@ def cmd_stage(args: argparse.Namespace) -> int:
     readme_dst.write_text(readme_text, encoding="utf-8")
     staged.append("README.md")
 
+    # -- custom.ini, empty: RetroArch's dir_check_defaults() (retroarch.c)
+    # skips its whole mkdir loop when a file named "custom.ini" exists
+    # relative to the process's own current directory -- checked BEFORE
+    # crt-bridge.cfg is even read, so the ':'-prefixed folders below (already
+    # scoped to the kit) never get a chance to matter. On Linux this loop
+    # would otherwise create about twenty empty folders under
+    # $XDG_CONFIG_HOME/retroarch or ~/.config/retroarch
+    # (frontend_unix_get_env, platform_unix.c) in a release user's own home
+    # directory. Both launchers `cd` into the kit before exec'ing the binary
+    # (start-emitter.sh/.cmd), so a relative "custom.ini" always resolves
+    # here. Windows already scopes those same pre-config defaults inside the
+    # kit (the ':' prefix expands to the executable's own directory there),
+    # so shipping this file on both platforms keeps one rule instead of a
+    # per-platform one.
+    (stage_dir / "custom.ini").write_text("", encoding="utf-8")
+    staged.append("custom.ini")
+
     # -- cores/ marker, no core shipped --
     cores_dir = stage_dir / "cores"
     cores_dir.mkdir()
@@ -619,6 +636,18 @@ def _rule_autoconfig_profile(root: Path) -> list[tuple[str, str]]:
     return findings
 
 
+def _rule_custom_ini(root: Path) -> list[tuple[str, str]]:
+    """Without this empty file at the kit root, RetroArch's
+    dir_check_defaults() (retroarch.c) creates about twenty empty folders in
+    a release user's own home directory before it ever reads
+    crt-bridge.cfg -- measured on this branch's retroarch.c, not assumed.
+    See the long comment beside where stage() writes it."""
+    custom_ini = root / "custom.ini"
+    if not custom_ini.is_file():
+        return [("custom-ini", f"{custom_ini}: missing")]
+    return []
+
+
 def _rule_kit_dirs(root: Path, platform: str) -> list[tuple[str, str]]:
     """Every KIT_DIR_KEYS entry is present in crt-bridge.cfg, prefixed `:`
     + the platform separator, and its folder is physically in the staged
@@ -775,6 +804,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     findings.extend(_rule_cfg_target(root))
     findings.extend(_rule_private_address(root))
     findings.extend(_rule_autoconfig_profile(root))
+    findings.extend(_rule_custom_ini(root))
     findings.extend(_rule_kit_dirs(root, args.platform))
     findings.extend(_rule_core(root, args.platform))
     findings.extend(_rule_name(root, args.platform))

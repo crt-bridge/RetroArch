@@ -16,7 +16,9 @@ unchanged.
    from wherever you already get RetroArch cores.
 3. Open `crt-bridge.cfg` in a text editor and set `video_record_config` to your receiver's
    address and port (for example `192.0.2.20:32100`).
-4. Launch it: `start-emitter.cmd` on Windows, `./start-emitter.sh` on Linux.
+4. Launch it: `start-emitter.cmd` on Windows, `./start-emitter.sh` on Linux. Always use one
+   of these two, not the binary directly from another folder -- they switch into this folder
+   first, which is what keeps everything below inside it.
 5. Open the in-game menu from a gamepad by holding Down + Y + L + R together.
 
 Everything RetroArch writes (saves, states, screenshots, logs, playlists, the settings saved
