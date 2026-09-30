@@ -7624,8 +7624,33 @@ end:
    /* if there's a fast forward limit, inject sleeps to keep from going too fast. */
    {
       retro_time_t frame_limit_min = runloop_st->frame_limit_minimum_time;
+#ifdef HAVE_GROOVY
+      /* crt-bridge last-resort brake: without this, vsync off and no audio
+       * driver active let the loop flood the network with hundreds of fps. */
+      bool gm_brake = (   !(runloop_st->flags & (RUNLOOP_FLAG_FASTMOTION | RUNLOOP_FLAG_PAUSED))
+                       && !vrr_runloop_enable && !settings->bools.video_vsync
+                       && !(audio_st->flags & AUDIO_FLAG_ACTIVE)
+                       && rec_st && rec_st->data && rec_st->driver && rec_st->driver->ident
+                       && string_is_equal(rec_st->driver->ident, "groovy")
+                       && video_st->av_info.timing.fps > 0.0);
+      if (gm_brake)
+      {
+         static bool gm_brake_warned = false;
+         frame_limit_min = (retro_time_t)((1.0 / video_st->av_info.timing.fps) * 1000000.0);
+         if (!gm_brake_warned)
+         {
+            gm_brake_warned = true;
+            RARCH_WARN("[groovy] no audio driver is running and vsync is off: "
+                        "pacing the loop at core rate (%.2f fps)\n",
+                        video_st->av_info.timing.fps);
+         }
+      }
+#endif
       if (   (frame_limit_min)
           && (   (vrr_runloop_enable)
+#ifdef HAVE_GROOVY
+              || gm_brake
+#endif
               || (runloop_st->flags & RUNLOOP_FLAG_FASTMOTION)
 #ifdef HAVE_MENU
               || (menu_state_get_ptr()->flags & MENU_ST_FLAG_ALIVE
