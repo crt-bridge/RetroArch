@@ -3405,6 +3405,7 @@ enum msg_hash_enums
    MENU_LABEL(GROOVY_INPUT),
    MENU_LABEL(GROOVY_AUDIO),
    MENU_LABEL(GROOVY_MTU),
+   MENU_LABEL(GROOVY_PAD),
    MENU_LABEL(GROOVY_FOLLOWERS),
    /* Four "Additional Follower N" switches plus their addresses, which
     * replace, IN THE MENU, the text field above (removed from the menu, see

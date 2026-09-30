@@ -1086,6 +1086,7 @@
 #define MENU_ENUM_LABEL_GROOVY_INPUT_STR "groovy_input"
 #define MENU_ENUM_LABEL_GROOVY_AUDIO_STR "groovy_audio"
 #define MENU_ENUM_LABEL_GROOVY_MTU_STR "groovy_mtu"
+#define MENU_ENUM_LABEL_GROOVY_PAD_STR "groovy_pad"
 #define MENU_ENUM_LABEL_GROOVY_FOLLOWERS_STR "groovy_followers"
 /* Four "Additional Follower N" switches (menu), which replace the text
  * field above IN THE MENU only -- the key stays the expert path. Each

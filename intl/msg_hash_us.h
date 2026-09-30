@@ -5311,6 +5311,14 @@ MSG_HASH(
    "Payload bytes per datagram, 548 to 3800. Lower it when the receiver is reached through a VPN. Overridden by the GROOVY_MTU environment variable."
    )
 MSG_HASH(
+   MENU_ENUM_LABEL_VALUE_GROOVY_PAD,
+   "Padded Session"
+   )
+MSG_HASH(
+   MENU_ENUM_SUBLABEL_GROOVY_PAD,
+   "On only towards a crt-bridge client or a crt-bridge receiver, never towards a MiSTer. Pads small packets so that a Wi-Fi link stops dropping the sound. Applies when recording starts."
+   )
+MSG_HASH(
    MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWERS,
    "Groovy Followers"
    )

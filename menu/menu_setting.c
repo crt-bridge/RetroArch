@@ -17047,7 +17047,7 @@ static bool setting_append_list(
              * Found during a user validation session. */
 
             /* --- CRT bridge settings --------------------------------------
-             * Six settings, existing Recording category. The GROOVY_*
+             * Seven settings, existing Recording category. The GROOVY_*
              * environment variables always win over these values; the
              * driver says so on screen when it is forced. */
             CONFIG_BOOL(
@@ -17131,6 +17131,26 @@ static bool setting_append_list(
                   general_read_handler);
             (*list)[list_info->index - 1].action_ok = &setting_action_ok_uint;
             menu_settings_list_current_add_range(list, list_info, 548, 3800, 1, true, true);
+            /* This mode exists ONLY for a crt-bridge receiver or a
+             * gmclient client, NEVER for a MiSTer FPGA -- it changes the
+             * wire form of CMD_INIT (record_groovy.c, gm_set_padding). The
+             * default is off on purpose: a MiSTer would break on the
+             * padded form. */
+            CONFIG_BOOL(
+                  list, list_info,
+                  &settings->bools.groovy_pad,
+                  MENU_ENUM_LABEL_GROOVY_PAD,
+                  MENU_ENUM_LABEL_VALUE_GROOVY_PAD,
+                  DEFAULT_GROOVY_PAD,
+                  MENU_ENUM_LABEL_VALUE_OFF,
+                  MENU_ENUM_LABEL_VALUE_ON,
+                  &group_info,
+                  &subgroup_info,
+                  parent_group,
+                  general_write_handler,
+                  general_read_handler,
+                  SD_FLAG_NONE
+                  );
             /* groovy_followers (the retroarch.cfg key itself) NO LONGER HAS
              * A MENU WIDGET. The single text field could not be cleared
              * from the menu (menu_input_st_string_cb refuses an empty

@@ -766,6 +766,7 @@ DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_groovy_compression,           MENU_E
 DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_groovy_input,                 MENU_ENUM_SUBLABEL_GROOVY_INPUT)
 DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_groovy_audio,                 MENU_ENUM_SUBLABEL_GROOVY_AUDIO)
 DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_groovy_mtu,                   MENU_ENUM_SUBLABEL_GROOVY_MTU)
+DEFAULT_SUBLABEL_MACRO(action_bind_sublabel_groovy_pad,                   MENU_ENUM_SUBLABEL_GROOVY_PAD)
 /* groovy_followers (the text field) no longer has a sublabel bound here --
  * its menu widget is gone (see menu_setting.c), replaced by the four
  * switches below. The MENU_ENUM_SUBLABEL_GROOVY_FOLLOWERS string stays
@@ -4345,6 +4346,9 @@ int menu_cbs_init_bind_sublabel(menu_file_list_cbs_t *cbs,
             break;
          case MENU_ENUM_LABEL_GROOVY_MTU:
             BIND_ACTION_SUBLABEL(cbs, action_bind_sublabel_groovy_mtu);
+            break;
+         case MENU_ENUM_LABEL_GROOVY_PAD:
+            BIND_ACTION_SUBLABEL(cbs, action_bind_sublabel_groovy_pad);
             break;
          case MENU_ENUM_LABEL_GROOVY_FOLLOWER_1_ENABLE:
             BIND_ACTION_SUBLABEL(cbs, action_bind_sublabel_groovy_follower_1_enable);
