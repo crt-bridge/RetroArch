@@ -85,6 +85,90 @@ MACHINE_PATH_RE = re.compile(r"(?i)\b[a-z]:\\users\\|/home/[^/\s]+|/Users/[^/\s]
 
 TOKEN_RE = re.compile(r"@[A-Z_]+@")
 
+# Every RetroArch directory-config key, relative to the kit. Read off
+# configuration.c's SETTING_PATH/SETTING_ARRAY calls on this branch. Left
+# out, with the reason:
+#   - rgui_browser_directory: the file browser's start folder, never
+#     written to -- fixing it would hide the user's own folders.
+#   - any key gated behind a platform #if this kit does not target (e.g.
+#     bottom_assets_directory, 3DS-only).
+#   - file keys (core_options_path, content_*_path, video_font_path,
+#     audio_dsp_plugin, video_filter, menu_wallpaper, ...): their default
+#     derives from the directories below, or from the config file's own
+#     folder.
+KIT_DIR_KEYS = {
+    "libretro_directory": "cores",
+    "libretro_info_path": "info",
+    "joypad_autoconfig_dir": "autoconfig",
+    "system_directory": "system",
+    "savefile_directory": "saves",
+    "savestate_directory": "states",
+    "screenshot_directory": "screenshots",
+    "playlist_directory": "playlists",
+    "content_favorites_directory": "playlists",
+    "content_history_directory": "playlists",
+    "content_image_history_directory": "playlists",
+    "content_music_history_directory": "playlists",
+    "content_video_directory": "playlists",
+    "cache_directory": "cache",
+    "log_dir": "logs",
+    "runtime_log_directory": "logs/runtime",
+    "rgui_config_directory": "config",
+    "input_remapping_directory": "config/remaps",
+    "recording_output_directory": "recordings",
+    "recording_config_directory": "config/record",
+    "core_assets_directory": "downloads",
+    "assets_directory": "assets",
+    "dynamic_wallpapers_directory": "assets/wallpapers",
+    "thumbnails_directory": "thumbnails",
+    "video_shader_dir": "shaders",
+    "video_filter_dir": "filters/video",
+    "audio_filter_dir": "filters/audio",
+    "overlay_directory": "overlays",
+    "osk_overlay_directory": "overlays/keyboards",
+    "cheat_database_path": "cheats",
+    "content_database_path": "database/rdb",
+}
+
+# Folders KIT_DIR_KEYS names that stage does not already create through
+# another step (cores/ gets PUT-CORES-HERE.txt, autoconfig/ gets the
+# "mister" profile) -- each of these gets its own ABOUT-THIS-FOLDER.txt so
+# that `archive` (files only, see cmd_archive) does not prune it.
+KIT_DIRS = {
+    "info": "core information files",
+    "system": "BIOS and system files cores need",
+    "saves": "save files",
+    "states": "save states",
+    "screenshots": "screenshots",
+    "playlists": "playlists and content history",
+    "cache": "temporary extracted archive content",
+    "logs": "RetroArch's own log files",
+    "logs/runtime": "per-content runtime play-time logs",
+    "config": "menu configuration files",
+    "config/remaps": "input remap files",
+    "recordings": "video recordings",
+    "config/record": "recording configuration presets",
+    "downloads": "core updater downloads",
+    "assets": "menu assets",
+    "assets/wallpapers": "dynamic menu wallpapers",
+    "thumbnails": "playlist thumbnails",
+    "shaders": "shader presets and passes",
+    "filters/video": "video filters",
+    "filters/audio": "audio DSP filters",
+    "overlays": "on-screen overlays",
+    "overlays/keyboards": "on-screen keyboard overlays",
+    "cheats": "cheat files",
+    "database/rdb": "content database files",
+}
+
+
+def _kit_path(subfolder: str, platform: str) -> str:
+    """The `:` prefix (fill_pathname_expand_special) plus the platform's
+    own separator -- Windows keeps '\\', Linux '/', exactly as the two
+    gabarits already do for `joypad_autoconfig_dir`."""
+    sep = "\\" if platform == "windows" else "/"
+    return ":" + sep + subfolder.replace("/", sep)
+
 
 def _is_doc_mac(matched: str) -> bool:
     return matched.replace("-", ":").lower().startswith(_MAC_DOC_PREFIX)
@@ -335,6 +419,20 @@ def cmd_stage(args: argparse.Namespace) -> int:
     )
     staged.append("cores/PUT-CORES-HERE.txt")
 
+    # -- Every other kit-relative folder KIT_DIR_KEYS names: each gets an
+    # ABOUT-THIS-FOLDER.txt witness, or `archive` (files only) would prune
+    # the folder silently even after `stage` created it. --
+    for subfolder, purpose in sorted(KIT_DIRS.items()):
+        folder_dir = stage_dir / Path(subfolder)
+        folder_dir.mkdir(parents=True, exist_ok=True)
+        marker = folder_dir / "ABOUT-THIS-FOLDER.txt"
+        marker.write_text(
+            f"RetroArch keeps {purpose} here, inside this kit, so that "
+            "nothing is written anywhere else.\n",
+            encoding="utf-8",
+        )
+        staged.append((Path(subfolder) / "ABOUT-THIS-FOLDER.txt").as_posix())
+
     # -- LICENSES/ --
     licenses_dir = stage_dir / "LICENSES"
     licenses_dir.mkdir()
@@ -479,6 +577,10 @@ def _rule_private_address(root: Path) -> list[tuple[str, str]]:
     cores = root / "cores"
     if cores.is_dir():
         candidates.extend(sorted(cores.glob("*.txt")))
+    for subfolder in sorted(KIT_DIRS):
+        marker = root / Path(subfolder) / "ABOUT-THIS-FOLDER.txt"
+        if marker.is_file():
+            candidates.append(marker)
     for path in candidates:
         text = path.read_text(encoding="utf-8", errors="replace")
         for leak in _scan_leak(text):
@@ -514,6 +616,38 @@ def _rule_autoconfig_profile(root: Path) -> list[tuple[str, str]]:
     for key in _AUTOCONFIG_AXIS_KEYS:
         if key not in parsed:
             findings.append(("autoconfig-profile", f"{profile}: missing {key}"))
+    return findings
+
+
+def _rule_kit_dirs(root: Path, platform: str) -> list[tuple[str, str]]:
+    """Every KIT_DIR_KEYS entry is present in crt-bridge.cfg, prefixed `:`
+    + the platform separator, and its folder is physically in the staged
+    directory/archive -- with a witness file, except cores/ and
+    autoconfig/ (already checked by _rule_core/_rule_autoconfig_profile)."""
+    findings: list[tuple[str, str]] = []
+    cfg = root / "crt-bridge.cfg"
+    if not cfg.is_file():
+        return [("kit-dirs", f"{cfg}: missing crt-bridge.cfg")]
+    parsed = parse_cfg(cfg)
+    checked: set[str] = set()
+    for key, subfolder in sorted(KIT_DIR_KEYS.items()):
+        expected = _kit_path(subfolder, platform)
+        if parsed.get(key) != expected:
+            findings.append(
+                ("kit-dirs", f"{cfg}: {key} = {parsed.get(key)!r}, expected {expected!r}")
+            )
+        if subfolder in checked:
+            continue
+        checked.add(subfolder)
+        folder = root / Path(subfolder)
+        if not folder.is_dir():
+            findings.append(("kit-dirs", f"{folder}: missing"))
+            continue
+        if subfolder in ("cores", "autoconfig"):
+            continue
+        marker = folder / "ABOUT-THIS-FOLDER.txt"
+        if not marker.is_file():
+            findings.append(("kit-dirs", f"{marker}: missing"))
     return findings
 
 
@@ -641,6 +775,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     findings.extend(_rule_cfg_target(root))
     findings.extend(_rule_private_address(root))
     findings.extend(_rule_autoconfig_profile(root))
+    findings.extend(_rule_kit_dirs(root, args.platform))
     findings.extend(_rule_core(root, args.platform))
     findings.extend(_rule_name(root, args.platform))
     if args.require_branding:
