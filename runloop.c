@@ -7630,6 +7630,14 @@ end:
       bool gm_brake = (   !(runloop_st->flags & (RUNLOOP_FLAG_FASTMOTION | RUNLOOP_FLAG_PAUSED))
                        && !vrr_runloop_enable && !settings->bools.video_vsync
                        && !(audio_st->flags & AUDIO_FLAG_ACTIVE)
+#ifdef HAVE_MENU
+                       /* menu open, vsync off: the branch below already
+                        * paces the menu at its own rate (screen refresh) --
+                        * gm_brake must not override that with the core's
+                        * rate, or the menu itself would run at ~60/s on a
+                        * 144 Hz screen instead of the upstream behaviour. */
+                       && !(menu_state_get_ptr()->flags & MENU_ST_FLAG_ALIVE)
+#endif
                        && rec_st && rec_st->data && rec_st->driver && rec_st->driver->ident
                        && string_is_equal(rec_st->driver->ident, "groovy")
                        && video_st->av_info.timing.fps > 0.0);
