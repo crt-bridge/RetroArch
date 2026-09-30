@@ -1051,6 +1051,11 @@
 #define DEFAULT_GROOVY_COMPRESSION true
 #define DEFAULT_GROOVY_INPUT true
 
+/* Off by default, unlike the three bools above: a MiSTer master only reads
+ * a 4- or 5-byte CMD_INIT, and padding it to 8 bytes would break it. See
+ * record/drivers/groovy_pad.h. */
+#define DEFAULT_GROOVY_PAD false
+
 /* 1 == GROOVY_AUDIO_RECEIVER (record/drivers/groovy_audio.h). The integer is
  * written here rather than the enum: config.def.h must not depend on any
  * driver header. A test refuses to let the two diverge

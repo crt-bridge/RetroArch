@@ -1811,6 +1811,9 @@ static struct config_bool_setting *populate_settings_bool(
    SETTING_BOOL("groovy_bridge_enable",          &settings->bools.groovy_bridge_enable, true, DEFAULT_GROOVY_BRIDGE_ENABLE, false);
    SETTING_BOOL("groovy_compression",            &settings->bools.groovy_compression, true, DEFAULT_GROOVY_COMPRESSION, false);
    SETTING_BOOL("groovy_input",                  &settings->bools.groovy_input, true, DEFAULT_GROOVY_INPUT, false);
+   /* Padded session towards the MASTER, off by default (a MiSTer master
+    * would break) -- see record/drivers/groovy_pad.h. */
+   SETTING_BOOL("groovy_pad",                    &settings->bools.groovy_pad, true, DEFAULT_GROOVY_PAD, false);
    /* Four "Additional Follower N" switches, default off -- all off means no
     * follower, no string manipulation needed (replaces, IN THE MENU, the
     * groovy_followers text field below, which stays available). */

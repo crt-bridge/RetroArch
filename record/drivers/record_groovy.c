@@ -138,6 +138,12 @@ static inline void groovy_pacing_log_mute(const char *ev) { (void)ev; }
  * pattern as groovy_audio.h. Header-only, shared with the test bridge. */
 #include "groovy_compression.h"
 
+/* Padded-session setting for the MASTER only: reads GROOVY_PAD, handed to
+ * libgm via gm_set_padding. Header-only, same pattern as
+ * groovy_compression.h above. A follower's own padding is a GROOVY_FOLLOWERS
+ * pad= key (groovy_followers.h), unrelated to this header. */
+#include "groovy_pad.h"
+
 /* Per-session send MTU: reads GROOVY_MTU, handed to libgm via
  * gm_set_mtu. Header-only, same pattern as groovy_compression.h. */
 #include "groovy_mtu.h"
@@ -404,6 +410,13 @@ typedef struct {
 
     /* --- Compression. Set at session opening, never touched afterwards. --- */
     enum groovy_compression_mode compression_mode;   /* off by default */
+
+    /* --- Padded session towards the MASTER. 0 or 1, resolved once in the
+     * precedence block below, then handed to gm_set_padding(st->gm, ...).
+     * A follower's own padding lives in struct groovy_receiver::pad, set
+     * from its GROOVY_FOLLOWERS pad= key -- this field never touches
+     * that. --- */
+    int pad_master;   /* off by default */
 
     /* --- Lever 1 switch. Set at session opening, never touched
      * afterwards; handed to libgm via the frame-skip setter. dup_count_base
@@ -1075,6 +1088,25 @@ static void *groovy_new(const struct record_params *params)
                                  ? GROOVY_COMPRESSION_LZ4 : GROOVY_COMPRESSION_OFF;
         }
 
+        /* pad (master only) -- a follower's own padding is resolved later,
+         * per entry, from its GROOVY_FOLLOWERS pad= key. */
+        env = getenv("GROOVY_PAD");
+        if (groovy_precedence_env_wins(env)) {
+            int p = groovy_pad_parse(env);
+            if (p < 0) {
+                RARCH_WARN("[groovy] GROOVY_PAD=\"%s\" not understood "
+                           "(expected off or on): the padded session "
+                           "stays off\n", env);
+                p = 0;
+            }
+            st->pad_master = p;
+            groovy_precedence_msg(msg, sizeof msg, "groovy_pad",
+                                  groovy_pad_name(p), "GROOVY_PAD");
+            groovy_log_forced(msg);
+        } else {
+            st->pad_master = (cfg && cfg->bools.groovy_pad) ? 1 : 0;
+        }
+
         /* son */
         env = getenv("GROOVY_AUDIO");
         if (groovy_precedence_env_wins(env)) {
@@ -1444,18 +1476,23 @@ static void *groovy_new(const struct record_params *params)
               (st->mtu == (unsigned)GM_MTU_DEFAULT) ? " (default)" : " (GROOVY_MTU)");
     groovy_log_send_path(st->gm, "master", st->mtu, false);
 
-    /* Padded-session mode: the MASTER stays classic, and that must be
-     * VISIBLE in the code. calloc() would already give 0; this line is
-     * here so a reader sees that the choice is a choice -- not an
-     * oversight.
-     *
-     * How a master could get it, if ever needed (the "Mac alone, as
-     * master, over Wi-Fi" case): an environment variable GROOVY_PAD
-     * (off|on, default off), parsed by a groovy_pad.h modeled on
-     * groovy_compression.h, read once here next to st->compression_mode,
-     * and passed to gm_set_padding(st->gm, ...). Three lines and a
-     * header. Not needed today: this design stops here. */
-    (void)gm_set_padding(st->gm, 0);
+    /* Padded-session mode for the MASTER: st->pad_master is resolved once,
+     * above, in the "Menu / variable precedence" block (GROOVY_PAD or the
+     * persisted groovy_pad key) -- off by default, because a MiSTer master
+     * only reads a 4- or 5-byte CMD_INIT and would break on 8. Must run
+     * BEFORE gm_send_init (libgm/include/gm.h contract). */
+    (void)gm_set_padding(st->gm, st->pad_master);
+    RARCH_LOG("[groovy] pad: master=%s\n", groovy_pad_name(st->pad_master));
+    if (st->pad_master) {
+        /* Same discipline as the follower warning further below: the
+         * protocol has no way to detect what is actually at the other end
+         * of the wire -- naming the target is the most honest thing we can
+         * do. */
+        RARCH_WARN("[groovy] padded mode active towards %s (master); this "
+                   "mode exists ONLY for a crt-bridge receiver or a "
+                   "gmclient client, NEVER for a MiSTer FPGA\n",
+                   st->rx[0].target);
+    }
 
     /* Supersampling box setting, read once here. See groovy_downsample.h
      * for why this is an environment variable. */
@@ -1503,7 +1540,7 @@ static void *groovy_new(const struct record_params *params)
      * here, right before building its CMD_INIT. */
     st->rx[0].compression = (int)st->compression_mode;
     st->rx[0].mtu         = st->mtu;
-    st->rx[0].pad         = 0;   /* the master stays classic */
+    st->rx[0].pad         = st->pad_master;
     st->rx[0].audio_on    = (st->audio_mode != GROOVY_AUDIO_OFF);
 
     /* Send CMD_INIT: compression now carries the GROOVY_COMPRESSION

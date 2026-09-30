@@ -715,6 +715,10 @@ typedef struct settings
       bool groovy_bridge_enable;
       bool groovy_compression;
       bool groovy_input;
+      /* Padded-session mode for the MASTER only (0 or 1, resolved once in
+       * groovy_new's precedence block). A follower's own padding lives in
+       * its GROOVY_FOLLOWERS pad= key, not here. */
+      bool groovy_pad;
       /* Four "Additional Follower N" switches, each with its address
        * (arrays above). Replace, IN THE MENU, the groovy_followers text
        * field, which stays the expert path (retroarch.cfg only). All off
