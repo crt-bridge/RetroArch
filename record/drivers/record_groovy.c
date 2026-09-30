@@ -1490,7 +1490,7 @@ static void *groovy_new(const struct record_params *params)
          * do. */
         RARCH_WARN("[groovy] padded mode active towards %s (master); this "
                    "mode exists ONLY for a crt-bridge receiver or a "
-                   "gmclient client, NEVER for a MiSTer FPGA\n",
+                   "crt-bridge client, NEVER for a MiSTer FPGA\n",
                    st->rx[0].target);
     }
 
@@ -1653,7 +1653,7 @@ static void *groovy_new(const struct record_params *params)
                  * the most honest thing we can do. */
                 RARCH_WARN("[groovy] padded mode active towards %s; this mode "
                            "exists ONLY for a crt-bridge receiver or a "
-                           "gmclient client, NEVER for a MiSTer FPGA\n", rx->target);
+                           "crt-bridge client, NEVER for a MiSTer FPGA\n", rx->target);
             }
 
             /* Per-receiver input channel: this follower is only a

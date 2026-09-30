@@ -17132,7 +17132,7 @@ static bool setting_append_list(
             (*list)[list_info->index - 1].action_ok = &setting_action_ok_uint;
             menu_settings_list_current_add_range(list, list_info, 548, 3800, 1, true, true);
             /* This mode exists ONLY for a crt-bridge receiver or a
-             * gmclient client, NEVER for a MiSTer FPGA -- it changes the
+             * crt-bridge client, NEVER for a MiSTer FPGA -- it changes the
              * wire form of CMD_INIT (record_groovy.c, gm_set_padding). The
              * default is off on purpose: a MiSTer would break on the
              * padded form. */
