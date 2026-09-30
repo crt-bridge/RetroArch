@@ -587,6 +587,22 @@ void rarch_log_file_init(
    }
    else if (log_dir && *log_dir)
    {
+#ifdef HAVE_GROOVY
+      /* log_dir is a SETTING_ARRAY (config_get_array/config_set_array),
+       * unlike every other directory key here, which is a SETTING_PATH
+       * round-tripped through config_get_path/config_set_path -- those two
+       * calls are what expand and re-abbreviate the ':' prefix
+       * (fill_pathname_expand_special/fill_pathname_abbreviate_special) for
+       * every other kit-relative folder. log_dir skips that machinery
+       * entirely, so a literal ":\logs" (or ":/logs") would otherwise reach
+       * here unexpanded and be an invalid path. Expand into a local buffer
+       * only -- settings->paths.log_dir itself, and what
+       * config_save_on_exit writes back, must stay ':'-prefixed so a moved
+       * kit still finds its own logs. */
+      char log_dir_expanded[DIR_MAX_LENGTH];
+      fill_pathname_expand_special(log_dir_expanded, log_dir, sizeof(log_dir_expanded));
+      log_dir = log_dir_expanded;
+#endif
       /* Get log directory */
       strlcpy(log_directory, log_dir, sizeof(log_directory));
 
