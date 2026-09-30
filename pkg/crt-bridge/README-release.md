@@ -36,6 +36,10 @@ the only Linux path tried against a receiver so far, over a software receiver. `
 `glcore` are available in the binary but have not been exercised on Linux; switching is your
 own experiment.
 
+This kit points its core-info folder at its own `info/` (empty by default), so any core
+description files already installed system-wide (`/usr/share/libretro/info` or similar) will
+not show up in the menu until you fetch your own: Online Updater > Update Core Info Files.
+
 ## Windows notes
 
 The binary is not code-signed: Windows SmartScreen may warn on first launch. This is
