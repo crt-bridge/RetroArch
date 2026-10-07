@@ -1592,6 +1592,13 @@ static void *groovy_new(const struct record_params *params)
     groovy_announce_note(st, &st->rx[0], GROOVY_ANNOUNCE_INIT, GROOVY_SITE_OPENING,
                         rc_init_m, wsa_init_m, groovy_pacing_mono_ns());
     if (rc_init_m != 0) {
+        /* Same refusal path as a master that failed to open: log AND
+         * screen, with the address and the send error code. */
+        char refusal_msg[GROOVY_FORCED_MSG_CAP];
+        groovy_open_refusal_format(refusal_msg, sizeof(refusal_msg),
+                                   GROOVY_REFUSAL_MASTER_INIT, ip, (unsigned)port,
+                                   NULL, wsa_init_m);
+        groovy_log_error(refusal_msg);
         /* s_groovy_input_h[0] may already point to st->gm (input channel
          * hookup above) -- clear it BEFORE gm_close, otherwise the next
          * gamepad poll reads a freed handle. */
@@ -1603,31 +1610,36 @@ static void *groovy_new(const struct record_params *params)
 
     /* Followers: one gm_handle per GROOVY_FOLLOWERS entry, opened AFTER
      * the master's CMD_INIT -- documented ordering. A system failure to
-     * open (gm_init returns NULL) refuses the whole startup, cleanly
-     * closing whatever was already opened; a CMD_INIT refusal towards a
-     * follower, on the other hand, is only a warning -- the re-announce
-     * will replay it. */
+     * open one (gm_init returns NULL) is logged with its cause and drops
+     * THAT follower for the whole session, with no retry; the master and
+     * the other followers start. The table stays compact: `kept` counts
+     * the followers actually opened, and is the only index into st->rx[]
+     * and the input sets -- a dropped follower leaves no hole and no
+     * handle behind. A CMD_INIT refusal towards an opened follower, on
+     * the other hand, is only a warning -- the re-announce will replay
+     * it. */
     RARCH_LOG("[groovy] master: target=%s\n", st->rx[0].target);
     if (n_f == 0u) {
         RARCH_LOG("[groovy] followers: none\n");
     } else {
+        unsigned kept = 0u;
         for (unsigned i = 0u; i < n_f; i++) {
-            struct groovy_receiver *rx = &st->rx[1u + i];
+            struct groovy_receiver *rx = &st->rx[1u + kept];
 
             rx->gm = gm_init(fcfg[i].ip_text, fcfg[i].port);
             if (!rx->gm) {
-                RARCH_ERR("[groovy] failed to open follower %s:%u\n",
-                          fcfg[i].ip_text, (unsigned)fcfg[i].port);
-                /* Index 0 (the master) and indices 1..i (followers hooked
-                 * up in previous iterations) may already point to the
-                 * handles closed below -- clear the whole set BEFORE any
-                 * gm_close. */
-                groovy_input_set_clear();
-                for (unsigned j = 1u; j < 1u + i; j++)
-                    gm_close(st->rx[j].gm);
-                gm_close(st->gm);
-                free(st);
-                return NULL;
+                /* Cause read right away (per-thread, overwritten by the
+                 * next gm_init). Log only: the master is starting, so the
+                 * screen stays free for its own messages. Nothing to close
+                 * or clear: this slot is still zeroed (calloc) and serves
+                 * the next follower. */
+                char refusal_msg[GROOVY_FORCED_MSG_CAP];
+                groovy_open_refusal_format(refusal_msg, sizeof(refusal_msg),
+                                           GROOVY_REFUSAL_FOLLOWER_OPEN,
+                                           fcfg[i].ip_text, (unsigned)fcfg[i].port,
+                                           gm_init_error_str(gm_last_init_error()), 0);
+                RARCH_ERR("[groovy] %s\n", refusal_msg);
+                continue;
             }
 
             if (gm_set_mtu(rx->gm, fcfg[i].mtu) != 0) {
@@ -1676,7 +1688,7 @@ static void *groovy_new(const struct record_params *params)
 
             RARCH_LOG("[groovy] follower %u: target=%s mtu=%u compression=%s "
                       "audio=%s inputs=%s pad=%s\n",
-                      i + 1u, rx->target, rx->mtu,
+                      kept + 1u, rx->target, rx->mtu,
                       groovy_compression_mode_name((enum groovy_compression_mode)rx->compression),
                       rx->audio_on ? "on" : "off",
                       (rx->inputs == GROOVY_INPUTS_P1) ? "p1" :
@@ -1696,15 +1708,16 @@ static void *groovy_new(const struct record_params *params)
              * candidate for hookup if GROOVY_INPUT=on AND its `inputs`
              * key isn't `off` -- inputs=off opens NO socket, not even to
              * send the hookup byte. The index into the s_groovy_input_h[]
-             * set is st->rx[]'s, 1 + i here -- never fcfg[]'s bare index
-             * i, which doesn't count the master. */
+             * set is st->rx[]'s, 1 + kept here -- never fcfg[]'s index i,
+             * which doesn't count the master and still counts a dropped
+             * follower. */
             if (st->input_mode == GROOVY_INPUT_ON && rx->inputs != GROOVY_INPUTS_OFF) {
                 int ok_bind = (gm_bind_inputs(rx->gm, 0) == 0);
                 if (ok_bind) {
-                    s_groovy_input_h[1u + i]    = rx->gm;
-                    s_groovy_input_attr[1u + i] = rx->inputs;
+                    s_groovy_input_h[1u + kept]    = rx->gm;
+                    s_groovy_input_attr[1u + kept] = rx->inputs;
                     /* Named for the transition trace. */
-                    snprintf(s_groovy_input_target[1u + i], sizeof(s_groovy_input_target[0]),
+                    snprintf(s_groovy_input_target[1u + kept], sizeof(s_groovy_input_target[0]),
                              "%s", rx->target);
                 } else {
                     RARCH_WARN("[groovy-input] hookup failed towards %s\n", rx->target);
@@ -1716,8 +1729,12 @@ static void *groovy_new(const struct record_params *params)
             } else if (st->input_mode == GROOVY_INPUT_ON) {
                 RARCH_LOG("[groovy-input] follower %s: inputs=off (not hooked)\n", rx->target);
             }
+            kept++;
         }
-        st->n_rx = 1u + n_f;
+        st->n_rx = 1u + kept;
+        if (kept < n_f)
+            RARCH_WARN("[groovy] %u of %u follower(s) opened; the master starts "
+                       "without the others for this session\n", kept, n_f);
 
         /* In "one field per frame" mode, the field sent to EVERYONE is
          * chosen from the MASTER's FLAG_VGA_F1 alone
@@ -1726,10 +1743,10 @@ static void *groovy_new(const struct record_params *params)
          * crt-bridge-rcv), whose scan parity is independent -- fields
          * would come out reversed. Known limitation, stated in the log
          * right at opening rather than discovered by eye. */
-        if (st->field_mode == GROOVY_FIELD_PER_FRAME)
+        if (st->field_mode == GROOVY_FIELD_PER_FRAME && kept > 0u)
             RARCH_WARN("[groovy] GROOVY_FIELD_PER_FRAME active with %u follower(s): the field "
                        "sent to everyone follows the MASTER's parity -- a tube follower "
-                       "(crt-bridge-rcv) would receive reversed fields; known limitation\n", n_f);
+                       "(crt-bridge-rcv) would receive reversed fields; known limitation\n", kept);
     }
 
     /* CMD_SWITCHRES is NOT sent here. Rationale:
