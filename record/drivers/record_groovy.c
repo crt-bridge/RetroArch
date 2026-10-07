@@ -168,6 +168,11 @@ static inline void groovy_pacing_log_mute(const char *ev) { (void)ev; }
  * dependency on libgm. */
 #include "groovy_open_knock.h"
 
+/* Open refusal: the exact text that says which receiver refused to open
+ * and why (cause from gm_last_init_error). Header-only, no dependency on
+ * libgm. */
+#include "groovy_open_refusal.h"
+
 /* Diagnostic frame-skip hook: reads GROOVY_SKIP_FRAME_EVERY and decides
  * whether to skip a frame. Header-only, same pattern as groovy_dump.h
  * above (no dependency on libgm). */
@@ -1072,6 +1077,16 @@ static void *groovy_new(const struct record_params *params)
      * follower must match in v1 (refused otherwise). */
     st->gm = gm_init(ip, port);
     if (!st->gm) {
+        /* Say it, on the log AND on screen: a player who started from a
+         * shortcut never reads the log, and without this line a refused
+         * master is a black CRT with no reason given. The cause is read
+         * right away -- it is per-thread, and the next gm_init would
+         * overwrite it. */
+        char refusal_msg[GROOVY_FORCED_MSG_CAP];
+        groovy_open_refusal_format(refusal_msg, sizeof(refusal_msg),
+                                   GROOVY_REFUSAL_MASTER_OPEN, ip, (unsigned)port,
+                                   gm_init_error_str(gm_last_init_error()), 0);
+        groovy_log_error(refusal_msg);
         free(st);
         return NULL;
     }
