@@ -163,6 +163,11 @@ static inline void groovy_pacing_log_mute(const char *ev) { (void)ev; }
 #include "groovy_dump.h"
 #include "groovy_reannounce.h"
 
+/* Open knock: re-sends CMD_INIT + CMD_SWITCHRES to a receiver that stays
+ * silent, on every video turn, with its own counter. Header-only, no
+ * dependency on libgm. */
+#include "groovy_open_knock.h"
+
 /* Diagnostic frame-skip hook: reads GROOVY_SKIP_FRAME_EVERY and decides
  * whether to skip a frame. Header-only, same pattern as groovy_dump.h
  * above (no dependency on libgm). */
@@ -296,6 +301,17 @@ struct groovy_receiver {
     struct groovy_reannounce_state reannounce;
     int                            reannounce_exhausted_logged; /* trace emitted once per
                                                                     episode, rearmed when armed == 0 */
+
+    /* --- Open knock (groovy_open_knock.h): CMD_INIT + CMD_SWITCHRES re-sent
+     * to a receiver that is not synchronized and sends no status, decided on
+     * every video turn (groovy_open_knock_due). Its counter is DISTINCT from
+     * the status-driven re-announce budget above, which it never reads nor
+     * drains. last_announce_ms is the shared timer: set by
+     * groovy_announce_note for every announce actually attempted (sent or
+     * failed), from any site (opening, re-announce, geometry change), so that no knock
+     * follows right after another announce. calloc zeroes both. --- */
+    struct groovy_open_knock       open_knock;
+    uint64_t                       last_announce_ms;
 
     /* --- Outcome of announce sends to THIS receiver: CMD_INIT and
      * CMD_SWITCHRES, at the three call sites (session opening, re-announce,
@@ -883,6 +899,11 @@ static void groovy_announce_note(const groovy_state_t *st, struct groovy_receive
     if (rc == GROOVY_ANNOUNCE_NOT_READY) { issue = "not_ready"; wsa = 0; }
     else if (rc == 0)                    { issue = "sent";  rx->announces_ok++; }
     else                                 { issue = "failed";   rx->announces_failed++; }
+    /* Shared open-knock timer: restarted by every announce that was really
+     * attempted, whatever the site -- never by a not_ready one, where
+     * nothing went out. Same clock as the now_ms of groovy_push_video. */
+    if (rc != GROOVY_ANNOUNCE_NOT_READY)
+        rx->last_announce_ms = t_ns / 1000000u;
     RARCH_LOG("[groovy-annonce] target=%s role=%s cmd=%s site=%s issue=%s wsa=%d "
               "frame=%u t_ns=%llu\n",
               rx->target, groovy_role_name(rx->role), cmd_name[cmd], site_name[site],
@@ -2125,6 +2146,36 @@ static void groovy_drain_statuses(groovy_state_t *st, struct groovy_receiver *rx
     if (backlog > rx->lat.ackq_max) rx->lat.ackq_max = backlog;
 }
 
+/* Open knock for THIS receiver: 1 if CMD_INIT + CMD_SWITCHRES must be
+ * re-sent now (groovy_open_knock.h). Evaluated on every video turn, right
+ * after groovy_drain_statuses, so that a receiver which never sends a
+ * status -- started after the emitter, or restarted -- is still reached:
+ * the status-driven re-announce cannot see it.
+ *
+ * The reference instant is the later of the last announce attempted to
+ * this receiver (rx->last_announce_ms, any site) and the last status
+ * accepted from it: a receiver whose statuses still flow is left to the
+ * status-driven re-announce. The caller OR-s the result into its own
+ * `want`, so a turn never sends more than one re-announce per receiver,
+ * and only under st->reannounce_enabled.
+ *
+ * The knock always targets rx->gm, the DECLARED address resolved once at
+ * opening -- never the source address of a status. It owns
+ * rx->open_knock and never touches the re-announce budget. */
+static int groovy_open_knock_due(struct groovy_receiver *rx, uint64_t now_ms)
+{
+    const uint64_t last_event_ms =
+        groovy_open_knock_last_event_ms(rx->last_announce_ms, rx->ack_state.has_any_ack,
+                                        rx->ack_state.last_ack_mono_ns / 1000000u);
+
+    if (!groovy_open_knock_should_fire(&rx->open_knock, rx->link.synced, last_event_ms, now_ms))
+        return 0;
+    RARCH_LOG("[groovy-emit] open-knock: target=%s role=%s attempt=%u next_in_ms=%u\n",
+              rx->target, groovy_role_name(rx->role), rx->open_knock.attempt,
+              groovy_open_knock_interval_ms(rx->open_knock.attempt));
+    return 1;
+}
+
 /* Re-emits CMD_INIT then CMD_SWITCHRES from the session state ALREADY in
  * hand, towards a SINGLE receiver. No new state is invented: compression,
  * audio, dimensions and mode are those the session opening and the last
@@ -2923,6 +2974,9 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         int             want_master = 0;
 
         groovy_drain_statuses(st, &st->rx[0], now_ms, &want_master);
+        /* Open knock: OR-ed into the same `want`, so one re-announce at
+         * most per turn; off with GROOVY_REANNOUNCE=off. */
+        if (st->reannounce_enabled) want_master |= groovy_open_knock_due(&st->rx[0], now_ms);
         if (want_master) groovy_reannounce_emit(st, &st->rx[0]);
 
         /* Freshness decision (groovy_pacing.h), on the state the drain
@@ -3024,6 +3078,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         for (unsigned i = 1u; i < st->n_rx; i++) {
             int want_i = 0;
             groovy_drain_statuses(st, &st->rx[i], now_ms, &want_i);
+            if (st->reannounce_enabled) want_i |= groovy_open_knock_due(&st->rx[i], now_ms);
             if (want_i) groovy_reannounce_emit(st, &st->rx[i]);
         }
 
