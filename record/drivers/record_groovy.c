@@ -2382,13 +2382,22 @@ static void groovy_reannounce_emit(groovy_state_t *st, struct groovy_receiver *r
  * of the fan-out result that follows: the "never the same turn" lock no
  * longer depends on any send, only on the number of frames rendered.
  *
- * No effect while the spacing hasn't elapsed. Cancelled if the receiver has
- * sent a resync in the meantime: a hooked peer never receives this resend
- * -- this test reads rx->ack_state.last_frame_echo exactly as THIS frame's
- * status drain (groovy_drain_statuses, called earlier in
- * groovy_push_video, before this loop) just left it: the caller must stay
- * placed AFTER that drain, never before. The geometry sent is the one in
- * effect AT SEND TIME.
+ * No effect while the spacing hasn't elapsed. Cancelled if the receiver is
+ * back in sync on a live link: a hooked peer never receives this resend --
+ * this test reads rx->link.synced exactly as THIS frame's status drain
+ * (groovy_drain_statuses, called earlier in groovy_push_video, before this
+ * loop) and its ack_lost tick just left it: the caller must stay placed
+ * AFTER that drain, never before. The geometry sent is the one in effect
+ * AT SEND TIME.
+ *
+ * Why the link flag and not the last frame echo. The two agree whenever a
+ * status arrives (groovy_ack_link_on_status sets synced from that same
+ * echo); they part only after two seconds of silence, when
+ * groovy_ack_link_on_tick drops synced while the last echo keeps its value
+ * from before the silence. That is a restarted receiver, the very one the
+ * open knock re-announces to: testing the stale echo would cancel the
+ * knock's CMD_SWITCHRES and log a resync that never came back. A receiver
+ * that does not answer CMD_INIT would then never get its geometry back.
  *
  * The two silent returns below (cancellation, av_cache guard) used to count
  * a failed CMD_INIT nowhere -- reannounces_failed undercounted in one
@@ -2404,7 +2413,7 @@ static void groovy_reannounce_flush_deferred(groovy_state_t *st, struct groovy_r
     if (!groovy_reannounce_spacing_due(rx->switchres_t_init_ns, st->reannounce_spacing_us, now_ns))
         return;
     rx->switchres_deferred = 0;
-    if (rx->ack_state.last_frame_echo != 0u) {
+    if (rx->link.synced) {
         if (rx->switchres_rc_init != 0) s_reannounce_failure++;
         RARCH_LOG("[groovy-emit] reannounce: deferred switchres cancelled for target=%s role=%s -- resync already back\n",
                   rx->target, groovy_role_name(rx->role));
@@ -3237,7 +3246,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
      * Placed HERE, outside the if/else 480i/240p chain below, so that BOTH
      * modes flush their deferrals -- and AFTER this frame's status drain
      * (groovy_drain_statuses, in the block that just closed) so that the
-     * cancellation test (rx->ack_state.last_frame_echo) reads the freshest
+     * cancellation test (rx->link.synced) reads the freshest
      * state. No effect when GROOVY_REANNOUNCE_SPACING_US is 0 (no send is
      * ever deferred); no effect on the frame that just set a deferral
      * (switchres_deferred_turn, checked in
