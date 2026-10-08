@@ -640,8 +640,8 @@ static struct groovy_input_lat s_input_lat;
  * what, and calls groovy_input_take_joy on every poll. A pointer left in
  * s_groovy_input_h[] after a gm_close therefore becomes a use-after-free
  * on the next poll. Hence the rule: this function is called BEFORE any
- * gm_close, on EVERY path that closes handles -- both failure paths of
- * groovy_new as well as groovy_free -- and right at the start of
+ * gm_close, on EVERY path that closes handles -- every failure path of
+ * groovy_new that closes one, as well as groovy_free -- and right at the start of
  * groovy_new.
  *
  * s_groovy_input_attr[] and s_groovy_input_acc[] used to survive
@@ -871,8 +871,8 @@ static void groovy_init_params_for(const groovy_state_t *st,
 /* ---------------------------------------------------------------------------
  * Announce trace. One line per CMD_INIT or CMD_SWITCHRES sent to a
  * receiver, with its EXACT outcome:
- *   envoye    -- accepted by Winsock (does NOT prove arrival);
- *   echec     -- refused; wsa = gm_last_announce_error, read by the caller
+ *   sent      -- accepted by Winsock (does NOT prove arrival);
+ *   failed    -- refused; wsa = gm_last_announce_error, read by the caller
  *                RIGHT AFTER this send (the next announce on the same
  *                handle would overwrite it; one on another handle would
  *                not);
@@ -882,9 +882,13 @@ static void groovy_init_params_for(const groovy_state_t *st,
  * the client's GMC_TRACE t_ns, so the two are comparable on the same PC.
  * VOLUME BOUNDED by construction: never called per frame. At most one
  * line per receiver at opening, one per receiver per geometry or regime
- * change, two per re-announce -- bounded by GROOVY_REANNOUNCE_BURST_MAX
- * per episode (untouched by this). The caller only logs AFTER its last
- * send: no log write ever interleaves between two datagrams.
+ * change, two per re-announce. Re-announces per receiver: the status-driven
+ * burst (GROOVY_REANNOUNCE_BURST_MAX), then at most one every
+ * GROOVY_REANNOUNCE_REPLENISH_MS while the peer stays blind, plus at most
+ * one open knock per interval (groovy_open_knock.h, 1 to 10 s) while it
+ * stays silent -- never a fixed total, never more than one per video turn.
+ * The caller only logs AFTER its last send: no log write ever interleaves
+ * between two datagrams.
  * ------------------------------------------------------------------------- */
 enum groovy_announce_cmd  { GROOVY_ANNOUNCE_INIT = 0, GROOVY_ANNOUNCE_SWITCHRES = 1 };
 enum groovy_announce_site { GROOVY_SITE_OPENING = 0, GROOVY_SITE_REANNOUNCE = 1,
