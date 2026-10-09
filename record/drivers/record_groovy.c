@@ -168,6 +168,11 @@ static inline void groovy_pacing_log_mute(const char *ev) { (void)ev; }
  * dependency on libgm. */
 #include "groovy_open_knock.h"
 
+/* Mode-change repeat: the same CMD_SWITCHRES sent twice more to each
+ * follower after a mode change, at least 100 and 200 ms later, then
+ * nothing. Header-only, no dependency on libgm. */
+#include "groovy_switchres_repeat.h"
+
 /* Open refusal: the exact text that says which receiver refused to open
  * and why (cause from gm_last_init_error). Header-only, no dependency on
  * libgm. */
@@ -318,9 +323,18 @@ struct groovy_receiver {
     struct groovy_open_knock       open_knock;
     uint64_t                       last_announce_ms;
 
+    /* --- Mode-change repeat (groovy_switchres_repeat.h). Armed by
+     * groovy_switchres_all for FOLLOWERS only (index >= 1), with a copy of
+     * the exact geometry it just sent; each repeat goes out from
+     * groovy_fan_out, in this follower's own turn, after the master's
+     * blit. Never armed nor read for the master. calloc zeroes both: an
+     * idle repeat never fires. --- */
+    struct groovy_switchres_repeat repeat;
+    gm_modeline                    repeat_mode;
+
     /* --- Outcome of announce sends to THIS receiver: CMD_INIT and
-     * CMD_SWITCHRES, at the three call sites (session opening, re-announce,
-     * groovy_switchres_all). announces_ok = sends accepted by Winsock;
+     * CMD_SWITCHRES, at every call site (session opening, re-announce,
+     * groovy_switchres_all and its repeats). announces_ok = sends accepted by Winsock;
      * announces_failed = sends refused (the code is in the [groovy-annonce]
      * trace). Cumulative over the session -- never reset by the one-second
      * [groovy-lat] window: an old failure must stay readable. calloc zeroes
@@ -882,7 +896,9 @@ static void groovy_init_params_for(const groovy_state_t *st,
  * the client's GMC_TRACE t_ns, so the two are comparable on the same PC.
  * VOLUME BOUNDED by construction: never called per frame. At most one
  * line per receiver at opening, one per receiver per geometry or regime
- * change, two per re-announce. Re-announces per receiver: the status-driven
+ * change -- three per follower, with its two repeats
+ * (groovy_switchres_repeat.h, site switchres_repeat) -- two per
+ * re-announce. Re-announces per receiver: the status-driven
  * burst (GROOVY_REANNOUNCE_BURST_MAX), then at most one every
  * GROOVY_REANNOUNCE_REPLENISH_MS while the peer stays blind, plus at most
  * one open knock per interval (groovy_open_knock.h, 1 to 10 s) while it
@@ -892,7 +908,7 @@ static void groovy_init_params_for(const groovy_state_t *st,
  * ------------------------------------------------------------------------- */
 enum groovy_announce_cmd  { GROOVY_ANNOUNCE_INIT = 0, GROOVY_ANNOUNCE_SWITCHRES = 1 };
 enum groovy_announce_site { GROOVY_SITE_OPENING = 0, GROOVY_SITE_REANNOUNCE = 1,
-                           GROOVY_SITE_SWITCHRES_ALL = 2 };
+                           GROOVY_SITE_SWITCHRES_ALL = 2, GROOVY_SITE_SWITCHRES_REPEAT = 3 };
 #define GROOVY_ANNOUNCE_NOT_READY 1   /* reserved rc: no geometry to carry */
 
 static const char *groovy_role_name(int r);   /* defined further below, with the named traces */
@@ -902,7 +918,7 @@ static void groovy_announce_note(const groovy_state_t *st, struct groovy_receive
                                 int rc, int wsa, uint64_t t_ns)
 {
     static const char *const cmd_name[]  = { "init", "switchres" };
-    static const char *const site_name[] = { "opening", "reannounce", "switchres_all" };
+    static const char *const site_name[] = { "opening", "reannounce", "switchres_all", "switchres_repeat" };
     const char *issue;
 
     if (rc == GROOVY_ANNOUNCE_NOT_READY) { issue = "not_ready"; wsa = 0; }
@@ -2447,10 +2463,12 @@ static void groovy_reannounce_flush_deferred(groovy_state_t *st, struct groovy_r
  * Fan-out.
  *
  * groovy_switchres_all -- CMD_SWITCHRES to the master FIRST, then to each
- * follower; returns the master's result. A follower's failure stays
- * WITHOUT EFFECT ON THE WIRE -- that receiver keeps its old geometry until
- * the next real change or a future re-announce -- but this failure is now
- * made VISIBLE by [groovy-annonce], instead of being silently dropped.
+ * follower; returns the master's result. A failed or lost send to a
+ * follower is covered by the two repeats armed here for every follower
+ * (groovy_switchres_repeat.h, sent from groovy_fan_out); past them, that
+ * follower keeps its old geometry until the next real change or a
+ * re-announce. Every failure is made VISIBLE by [groovy-annonce], instead
+ * of being silently dropped. The master gets the single send, as before.
  *
  * A deferred CMD_SWITCHRES not yet sent is cancelled HERE, before the
  * immediate send below -- otherwise the receiver would get two
@@ -2496,10 +2514,47 @@ static bool groovy_switchres_all(groovy_state_t *st, const gm_modeline *m)
         wsa[i]   = gm_last_announce_error(st->rx[i].gm);
         t_env[i] = groovy_pacing_mono_ns();
     }
+    /* Followers only, never the master: arm the two repeats of THIS
+     * geometry, a copy so that each repeat is byte-identical to the
+     * original, counted from the instant the original went out. Whatever
+     * the reason of the announce, the first one of a session included: a
+     * new game and a restarted emitter both open a session, and a geometry
+     * of equal size lost there is repaired by nothing else. Armed whether
+     * or not the original send succeeded. Re-arming overwrites any repeat
+     * still pending: a stale geometry is never repeated.
+     *
+     * The locked turn is the one of THIS frame's own fan-out:
+     * groovy_push_video calls this function before it advances
+     * st->turn_video, so the current value + 1 is the turn on which this
+     * frame's blit goes out -- no repeat ever travels with the frame that
+     * armed it. */
+    for (unsigned i = 1u; i < st->n_rx; i++) {
+        st->rx[i].repeat_mode = *m;
+        groovy_switchres_repeat_arm(&st->rx[i].repeat, st->turn_video + 1u,
+                                    t_env[i] / 1000000u);
+    }
     for (unsigned i = 0u; i < st->n_rx; i++)
         groovy_announce_note(st, &st->rx[i], GROOVY_ANNOUNCE_SWITCHRES,
                             GROOVY_SITE_SWITCHRES_ALL, rc[i], wsa[i], t_env[i]);
     return rc[0] == 0;
+}
+
+/* Sends one mode-change repeat to a follower: the SAME CMD_SWITCHRES as
+ * the original (rx->repeat_mode, copied by groovy_switchres_all), its
+ * outcome read right after this send, then the trace under its own site.
+ * Nothing else: no CMD_INIT, no input-guard reset, no hookup byte, no
+ * re-announce counter, no geometry recomputed. And never cancelled on a
+ * synchronized link: a follower that decodes a wrong geometry of the same
+ * size keeps echoing frames and looks synchronized -- the very case the
+ * repeat exists for. */
+static void groovy_switchres_repeat_send(groovy_state_t *st, struct groovy_receiver *rx)
+{
+    const int      rc  = gm_send_switchres(rx->gm, &rx->repeat_mode);
+    const int      wsa = gm_last_announce_error(rx->gm);
+    const uint64_t t   = groovy_pacing_mono_ns();
+
+    groovy_announce_note(st, rx, GROOVY_ANNOUNCE_SWITCHRES, GROOVY_SITE_SWITCHRES_REPEAT,
+                        rc, wsa, t);
 }
 
 /* The three ways to emit a frame, unified so the receiver table can be
@@ -2617,6 +2672,17 @@ static bool groovy_fan_out(groovy_state_t *st, enum groovy_emit_kind k,
 
     for (unsigned i = 0u; i < st->n_rx; i++) {
         struct groovy_receiver *rx = &st->rx[i];
+
+        /* Mode-change repeat (groovy_switchres_repeat.h), followers only:
+         * AFTER the master's blit -- the master is index 0 and went first,
+         * and never pays for this, not even the clock read -- and BEFORE
+         * this follower's saturation test, so that a saturated follower
+         * still gets its geometry. Its own statement, which reads no
+         * synchronization state: see groovy_switchres_repeat_send. */
+        if (i > 0u && groovy_switchres_repeat_due(&rx->repeat, st->turn_video,
+                                                  groovy_pacing_mono_ns() / 1000000u)) {
+            groovy_switchres_repeat_send(st, rx);
+        }
 
         if (i > 0u
             && groovy_sat_should_skip(&rx->sat, rx->link.synced,
