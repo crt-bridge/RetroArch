@@ -60,6 +60,28 @@
  *     announcement never arrived. The one-second threshold is worth four
  *     knocks: the emitter does not replay on a simple delay.
  *
+ * Blind wait, for a peer that had the picture. A peer whose last status
+ * carried frame_echo != 0 has the geometry. A single blind status that
+ * follows may be a datagram reordered on the way -- sent before the first
+ * frame was assembled, delivered after it -- and not a peer that lost the
+ * picture. Firing on it would send CMD_INIT to a peer that has the picture
+ * and reset its input guard: a peer that has the picture must never see
+ * that. Such a peer is therefore re-armed only once it has stayed blind
+ * for at least GROOVY_REANNOUNCE_RETRY_MS, with no synchronized status in
+ * between; any synchronized status cancels the wait. Once the wait is
+ * over, the peer fires once and becomes an ordinary blind peer again
+ * (form A below: the burst, then the replenishment).
+ *     The same wait covers branch (b) for that peer: a counter that goes
+ *     backwards right after a sync is exactly what a late datagram looks
+ *     like. A client truly relaunched keeps knocking, so it is still
+ *     caught, one second later. For a peer never synchronized, (b) stays
+ *     immediate.
+ *     Without the wait, a peer that went blind while still talking, with
+ *     a rising counter, was never caught at all: (a) and (b) do not fire,
+ *     and (c) needs a previous re-announce (`armed`), which (0) cleared.
+ *     The open knock does not catch it either: blind statuses keep its
+ *     reference instant fresh.
+ *
  * Anti-storm bound (a security requirement), REDEFINED by a later revision
  * (option 3, form A). A burst of at most GROOVY_REANNOUNCE_BURST_MAX
  * re-announces spaced at least GROOVY_REANNOUNCE_RETRY_MS apart, then at
@@ -115,10 +137,16 @@ struct groovy_reannounce_state {
     unsigned fired;        /* re-announces since the last sync            */
     uint64_t last_fire_ms; /* timestamp of the last re-announce           */
     unsigned armed;        /* 1 once a re-announce has fired since the last sync; 0 after (0) */
+    /* Blind wait, appended at the end so that existing field offsets do not
+     * move. A flag and not a sentinel such as blind_since_ms == 0: zero is
+     * a valid clock value, and a test clock starts there. */
+    int      was_synced;     /* 1 while this peer's last status had frame_echo != 0 */
+    int      blind_pending;  /* 1 once a blind status has followed that sync */
+    uint64_t blind_since_ms; /* instant of that first blind status; read only if blind_pending */
 };
 
 /* Invariant in form A: `armed == (fired > 0)` at all times -- every write
- * to `fired` (the three sites below, plus the reset in branch (0)) is
+ * to `fired` (the four sites below, plus the reset in branch (0)) is
  * accompanied by the SAME write to `armed`. Probed by the bridge (3,000
  * random sequences): no divergence found. `armed` is therefore a SECOND
  * source of truth, with no observable effect today -- it does not replace
@@ -230,6 +258,8 @@ static inline int groovy_reannounce_should_fire(struct groovy_reannounce_state *
         st->last_frame = frame;
         st->fired      = 0u;               /* re-announce budget replenished */
         st->armed      = 0u;               /* nothing left to replenish for this peer */
+        st->was_synced    = 1;             /* the peer has the picture */
+        st->blind_pending = 0;             /* a synchronized status cancels any blind wait */
         return 0;
     }
     /* === everything below only runs for frame_echo == 0 === */
@@ -241,7 +271,27 @@ static inline int groovy_reannounce_should_fire(struct groovy_reannounce_state *
         st->fired        = 1u;
         st->last_fire_ms = now_ms;
         st->armed        = 1u;
+        st->was_synced    = 0;
+        st->blind_pending = 0;
         return 1;                          /* (a) unknown address */
+    }
+
+    if (st->was_synced) {                  /* blind wait: the peer had the picture */
+        st->last_frame = frame;            /* a backwards counter, (b), waits as well */
+        if (!st->blind_pending) {
+            st->blind_pending  = 1;
+            st->blind_since_ms = now_ms;
+            return 0;                      /* maybe a reordered datagram */
+        }
+        if (now_ms < st->blind_since_ms || /* clock going backwards: keep waiting */
+            now_ms - st->blind_since_ms < (uint64_t)GROOVY_REANNOUNCE_RETRY_MS)
+            return 0;
+        st->was_synced    = 0;             /* an ordinary blind peer from now on */
+        st->blind_pending = 0;
+        st->fired         = 1u;            /* first shot of a new burst, form A */
+        st->last_fire_ms  = now_ms;
+        st->armed         = 1u;
+        return 1;
     }
 
     if (frame < st->last_frame) {          /* (b) the counter goes backwards */
