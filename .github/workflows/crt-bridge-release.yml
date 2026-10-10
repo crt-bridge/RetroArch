@@ -258,7 +258,7 @@ jobs:
 
           Based on RetroArch ${{ needs.meta.outputs.base }}. Not affiliated with, or endorsed by, the libretro project.
 
-          Pre-release: first builds, awaiting feedback from outside the test bench.
+          Pre-release: awaiting feedback from outside the test bench.
 
           libgm source for this build: https://github.com/crt-bridge/libgm/tree/${{ needs.meta.outputs.libgm_commit }}
 
@@ -272,12 +272,14 @@ jobs:
 
           ## What's new in this release
 
-          - When the receiver is the crt-bridge client over Wi-Fi, set Settings > Recording > Padded Session to On: it pads small command packets, including the ones that carry sound, past the size Wi-Fi drops first. Keep it Off towards a MiSTer FPGA.
-          - The emitter no longer runs hundreds of frames per second when its audio device cannot be opened.
-          - Both kits keep every RetroArch folder, and the settings saved by the menu, inside the kit folder.
+          - Start the emitter and the receivers in any order. A receiver that starts, or restarts, while the emitter is already sending now gets its picture and sound without restarting the emitter. The crt-bridge client started after the emitter shows its first picture in under a second.
+          - A follower that missed a mode change (a new game, a 240p/480i switch, a restarted emitter) gets the right picture back by itself, without restarting it: each mode change is sent to the followers twice more, right after the master. A follower that goes blind during a session is caught up again, and a receiver that has the picture is left alone.
+          - When libgm refuses to open a receiver, the log says which one and why (for example: receiver address failed to resolve); for the master, the reason is also shown on screen. A follower that cannot be opened is reported and left out, and the master starts anyway.
 
           ## Known limitations
 
+          - A follower that never sends a status back (the crt-bridge client run with GMC_STATUS=0) is never seen as in sync: the emitter sends it the session opening and the video mode again every 10 seconds for as long as it runs, and its gamepad channel is reset each time. This repeat is also how it recovers a lost mode change, within 10 seconds.
+          - The crt-bridge client on a Mac over Wi-Fi, run with the default RetroArch settings, can play crackling sound while its picture is right. The receiver on the CRT is not affected. Not yet explained.
           - L3 and R3 (the stick clicks) do not reach the game: the Groovy input protocol carries ten buttons only.
           - Changing the gamepad on the receiver while it runs breaks input until the receiver service is restarted.
           - An Xbox One / Series X|S controller does not finish its USB initialisation on the receiver: its logo keeps blinking and no input arrives.
