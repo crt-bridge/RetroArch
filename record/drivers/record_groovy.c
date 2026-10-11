@@ -3443,10 +3443,42 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
                 lat_hist_percentiles(rx->lat.hist_net,      rx->lat.n, &nmin, &np50, &np95, &nmax);
                 lat_hist_percentiles(rx->lat.hist_queue,    rx->lat.n, &qmin, &qp50, &qp95, &qmax);
 
+                /* Tail of the MASTER's line only (followers print nothing
+                 * more): the instant of this line on the monotonic clock and
+                 * on the wall clock, the last frame really emitted and the
+                 * two instants that bracket the emitter's work on it
+                 * (entry of groovy_push_video, start of the send chain),
+                 * and the sound-card underruns of this PC. A tool joins
+                 * these with the receiver's own clock by frame id. All
+                 * tokens are appended after the existing ones, which keep
+                 * their names and order; id/e_ns/s_ns read 0 until a frame
+                 * has gone out. pc_underruns is "na" when XAudio2 is not
+                 * the driver in use or not built in. */
+                char lat_tail[192];
+                lat_tail[0] = '\0';
+                if (i == 0u) {
+                    char pc_underruns[24] = "na";
+#ifdef HAVE_XAUDIO
+                    unsigned long pc_count = 0u;
+                    if (xaudio2_groovy_underruns(&pc_count))
+                        snprintf(pc_underruns, sizeof(pc_underruns), "%lu",
+                                 pc_count);
+#endif
+                    snprintf(lat_tail, sizeof(lat_tail),
+                             " t_ns=%llu utc_ms=%llu id=%u e_ns=%llu s_ns=%llu "
+                             "pc_underruns=%s",
+                             (unsigned long long)now_mono,
+                             (unsigned long long)groovy_wall_ms(),
+                             (unsigned)st->last_emit_id,
+                             (unsigned long long)st->last_emit_e_ns,
+                             (unsigned long long)st->last_emit_s_ns,
+                             pc_underruns);
+                }
+
                 RARCH_LOG("[groovy-lat] target=%s role=%s n=%u inflight(min/p50/p95/max)=%u/%u/%u/%u "
                           "net=%u/%u/%u/%u queue=%u/%u/%u/%u backlog_max=%u "
                           "anomalies=%u sent=%u echo=%u shown=%u rejects=%u saturations=%u "
-                          "inputs=%u announces=%u/%u\n",
+                          "inputs=%u announces=%u/%u%s\n",
                           rx->target, groovy_role_name(rx->role),
                           rx->lat.n,
                           imin, ip50, ip95, imax,
@@ -3455,7 +3487,8 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
                           rx->lat.ackq_max, rx->lat.anomalies,
                           rx->lat.last_sent, rx->lat.last_echo, rx->lat.last_shown,
                           rx->rejects, rx->saturations, s_groovy_input_acc[i],
-                          rx->announces_ok, rx->announces_failed);
+                          rx->announces_ok, rx->announces_failed,
+                          lat_tail);
 
                 memset(rx->lat.hist_inflight, 0, sizeof(rx->lat.hist_inflight));
                 memset(rx->lat.hist_net,      0, sizeof(rx->lat.hist_net));
