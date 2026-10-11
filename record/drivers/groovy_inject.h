@@ -40,7 +40,12 @@
  *               P milliseconds.
  *   delay@S:P   P <= GROOVY_INJECT_DELAY_MAX_MS. For
  *               GROOVY_INJECT_DELAY_WINDOW_S seconds every emitted frame
- *               waits P milliseconds before it is sent.
+ *               waits P milliseconds before it is sent. The wait is a busy
+ *               wait on the run-loop thread: once P plus the emulation of
+ *               a frame exceeds the frame period (16.7 ms at 60 Hz), the
+ *               loop no longer keeps its rate and the fault becomes a
+ *               slowdown (repeated frames, starved audio), not only a
+ *               delay. Keep P to a few milliseconds for a pure delay.
  *   stall@S:P   P <= GROOVY_INJECT_STALL_MAX_MS. One single busy wait of
  *               P milliseconds in the run loop.
  *
@@ -59,6 +64,14 @@
  * the very first pair of the first excursion; fired later it flips it in
  * the middle of an excursion. Both forms are deliberate and both are
  * observable on the receiver side.
+ *
+ * Each item fires once, so parity@0 flips the FIRST excursion only. And two
+ * parity items due at the same time cancel out: after the first fires, the
+ * very next half-frame carries the new opening parity and is eligible, so
+ * the second fires on it and flips the parity back (two half-frames lost,
+ * opening parity unchanged). To flip several excursions, give each item a
+ * second after the end of the previous excursion: it then fires on the
+ * first opening half-frame of the next one.
  *
  * DO NOT COMBINE with GROOVY_SKIP_FRAME_EVERY: the tracked opening parity
  * assumes that the first half-frame of an excursion is actually sent, and

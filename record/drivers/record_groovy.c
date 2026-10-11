@@ -3377,8 +3377,13 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
 
         /* ack_lost plus a sample, one receiver at a time, in rx[] order --
          * the master first. frame_id is incremented AFTER the send (see the
-         * file header): at poll time, the last identifier SENT TO THE
-         * MASTER equals frame_id-1 -- a DIFFERENT signal from a follower's,
+         * file header): at poll time, the last identifier NUMBERED FOR THE
+         * MASTER equals frame_id-1. It is the last one sent unless a hook
+         * withheld that frame (GROOVY_SKIP_FRAME_EVERY, an injected skip or
+         * parity fault): a withheld frame still consumes its number, so the
+         * sample then counts it in flight, which is the very signal the
+         * frame-skip hook is read by. The last frame really emitted is
+         * st->last_emit_id. This is a DIFFERENT signal from a follower's,
          * which may have been skipped and whose last really-sent
          * identifier is rx->last_sent_id (maintained by groovy_fan_out).
          * use_shown selects the master's model (frame_echo=reassembled,
