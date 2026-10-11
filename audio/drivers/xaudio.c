@@ -117,6 +117,22 @@ static bool xaudio_imm_start_thread(xa_t *xa)
 }
 #endif
 
+/* Diagnostic counters read by the record driver (xaudio2_groovy_underruns).
+ *
+ * s_groovy_underruns counts how many times the buffer queue of the source
+ * voice went down to zero in a buffer-end callback: the voice has nothing
+ * left to play until the next write, i.e. the sound card of this machine
+ * ran dry. The write path (which increments `buffers`) never counts, and
+ * the count is cumulative over the life of the process, never reset.
+ *
+ * s_groovy_active is 1 from a successful xaudio2_new to xaudio2_free, so a
+ * reader can tell "no underrun" from "this driver is not the one playing".
+ *
+ * The callbacks run on a thread of XAudio2: they only use Interlocked
+ * operations here, no logging, no allocation, no lock. */
+static LONG volatile s_groovy_underruns = 0;
+static LONG volatile s_groovy_active    = 0;
+
 #if defined(__cplusplus) && !defined(CINTERFACE)
 struct xaudio2 : public IXAudio2VoiceCallback
 #else
@@ -135,7 +151,8 @@ struct xaudio2
    STDMETHOD_(void, OnBufferStart) (void *) {}
    STDMETHOD_(void, OnBufferEnd) (void *)
    {
-      InterlockedDecrement((LONG volatile*)&buffers);
+      if (InterlockedDecrement((LONG volatile*)&buffers) == 0)
+         InterlockedIncrement(&s_groovy_underruns);
       SetEvent(hEvent);
    }
    STDMETHOD_(void, OnLoopEnd) (void *) {}
@@ -165,7 +182,8 @@ static void WINAPI xa_voice_on_buffer_end(IXAudio2VoiceCallback *handle_, void *
 {
    xaudio2_t *handle = (xaudio2_t*)handle_;
    (void)data;
-   InterlockedDecrement((LONG volatile*)&handle->buffers);
+   if (InterlockedDecrement((LONG volatile*)&handle->buffers) == 0)
+      InterlockedIncrement(&s_groovy_underruns);
    SetEvent(handle->hEvent);
 }
 
@@ -206,10 +224,23 @@ static void xaudio2_set_format(WAVEFORMATEX *wf,
    wf->cbSize            = 0;
 }
 
+/* Cumulative count of source-voice queue run-outs and whether this driver
+ * is currently open. Returns 1 when open, 0 otherwise; *count receives the
+ * cumulative count either way. A plain read of an aligned word: the caller
+ * only needs a recent value once a second. */
+int xaudio2_groovy_underruns(unsigned long *count)
+{
+   if (count)
+      *count = (unsigned long)s_groovy_underruns;
+   return s_groovy_active ? 1 : 0;
+}
+
 static void xaudio2_free(xaudio2_t *handle)
 {
    if (!handle)
       return;
+
+   s_groovy_active = 0;
 
    if (handle->pSourceVoice)
    {
@@ -451,6 +482,8 @@ static xaudio2_t *xaudio2_new(unsigned *rate, unsigned channels,
    if (FAILED(IXAudio2SourceVoice_Start(handle->pSourceVoice, 0,
                XAUDIO2_COMMIT_NOW)))
       goto error;
+
+   s_groovy_active = 1;
 
    if (list)
       string_list_free(list);
