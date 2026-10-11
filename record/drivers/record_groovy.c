@@ -183,6 +183,11 @@ static inline void groovy_pacing_log_mute(const char *ev) { (void)ev; }
  * above (no dependency on libgm). */
 #include "groovy_skip.h"
 
+/* Diagnostic fault injection: reads GROOVY_INJECT and decides which known
+ * fault is due at the current elapsed time. Header-only and pure, same
+ * pattern as groovy_skip.h above. */
+#include "groovy_inject.h"
+
 /* Lever 1 switch: reads GROOVY_FRAME_DUP, handed to libgm via the
  * frame-skip setter (gm.h). Header-only, same pattern as
  * groovy_compression.h above. */
@@ -479,6 +484,24 @@ typedef struct {
      * emit_samples below. --- */
     unsigned  skip_every;                   /* 0 = off, otherwise one frame in N */
     uint32_t  skipped_frames;               /* frames skipped since the last reading */
+
+    /* --- Diagnostic fault injection (GROOVY_INJECT). Items are parsed once
+     * at session opening and never added to afterwards; inject_n == 0 means
+     * the hook is off and none of the fields below is ever read on the hot
+     * path. calloc zeroes all of it. --- */
+    struct groovy_inject_item   inject_items[GROOVY_INJECT_MAX_ITEMS];
+    unsigned                    inject_n;
+    struct groovy_inject_parity inject_parity;
+    uint64_t  inject_t0_ns;                 /* session origin (QPC ns); 0 = not set yet */
+    uint64_t  inject_audio_gap_end_ns;      /* audio is withheld until this instant; 0 = no gap */
+    uint64_t  inject_delay_start_ns;        /* start of the per-frame delay window */
+    uint64_t  inject_delay_dur_ns;          /* 0 = no delay window has been opened */
+    uint32_t  inject_delay_ms;              /* P of the delay item that opened the window */
+    /* Last frame really emitted to the master, for the [groovy-lat] tail.
+     * Read by the once-a-second line, written once per emitted frame. */
+    uint32_t  last_emit_id;
+    uint64_t  last_emit_e_ns;               /* QPC at entry of groovy_push_video */
+    uint64_t  last_emit_s_ns;               /* QPC just before the send chain (emit_t0) */
 
     /* --- Supersampling CPU box. Set at session opening; 1 = off, and then
      * none of this is touched. --- */
@@ -1053,6 +1076,121 @@ static void groovy_log_send_path(gm_handle *gm, const char *who, unsigned mtu,
                   cut ? "code " : "", cut, seg);
 }
 
+/* ---------------------------------------------------------------------------
+ * Diagnostic fault injection (GROOVY_INJECT, groovy_inject.h).
+ *
+ * Everything below is inert unless the variable parsed to at least one item
+ * (st->inject_n > 0): no extra clock read, no wait, no withheld frame. The
+ * grammar and the pure decisions live in groovy_inject.h; this file only
+ * decides WHERE each fault fires and says so in the log, so that a tool
+ * reading the log can compare what was injected with what was measured.
+ * ------------------------------------------------------------------------- */
+
+/* Wall clock in milliseconds since the Unix epoch. The monotonic clock the
+ * rest of the driver uses has no meaning outside this process; a wall time
+ * written next to it lets the log of this machine be lined up with the log
+ * of another one. Read once a second at most, plus once per fired fault. */
+static uint64_t groovy_wall_ms(void)
+{
+#ifdef _WIN32
+    FILETIME       ft;
+    ULARGE_INTEGER u;
+
+    GetSystemTimePreciseAsFileTime(&ft);
+    u.LowPart  = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    /* 100 ns intervals since 1601-01-01; the Unix epoch is
+     * 116444736000000000 of them later. */
+    return (u.QuadPart - 116444736000000000ull) / 10000ull;
+#else
+    struct timespec ts;
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+#endif
+}
+
+/* Nanoseconds since the session origin; 0 until the origin is set. */
+static uint64_t groovy_inject_elapsed_ns(const groovy_state_t *st,
+        uint64_t now_ns)
+{
+    if (st->inject_t0_ns == 0u || now_ns < st->inject_t0_ns)
+        return 0u;
+    return now_ns - st->inject_t0_ns;
+}
+
+/* Marks an item fired and writes its ground-truth line. t_ns is the QPC
+ * instant of the decision, so a tool can place the fault on the same clock
+ * as every other timestamp of this log. */
+static void groovy_inject_note_fired(groovy_state_t *st,
+        struct groovy_inject_item *it, uint32_t frame_id, uint64_t t_ns)
+{
+    const uint64_t elapsed_ns = groovy_inject_elapsed_ns(st, t_ns);
+
+    groovy_inject_fire(it, frame_id, elapsed_ns);
+    RARCH_LOG("[groovy-inject] fired kind=%s at_s=%u param_ms=%u frame_id=%u "
+              "t_ns=%llu utc_ms=%llu elapsed_ms=%llu\n",
+              groovy_inject_kind_name(it->kind),
+              (unsigned)it->at_s, (unsigned)it->param_ms, (unsigned)frame_id,
+              (unsigned long long)t_ns,
+              (unsigned long long)groovy_wall_ms(),
+              (unsigned long long)(elapsed_ns / 1000000ull));
+}
+
+/* Reads GROOVY_INJECT once, at session opening, and says what it understood.
+ * An empty or absent variable is "off". A non-empty one that parses to zero
+ * items is refused WHOLE (a typo must never run half of the intended test)
+ * and nothing will ever fire. The "armed" line prints the items as the
+ * parser read them, in canonical form, not the raw text: the log then says
+ * what the driver understood. */
+static void groovy_inject_open(groovy_state_t *st)
+{
+    const char *raw = getenv("GROOVY_INJECT");
+
+    st->inject_n = groovy_inject_parse(raw, st->inject_items,
+                                       GROOVY_INJECT_MAX_ITEMS);
+    if (!raw || raw[0] == '\0') {
+        RARCH_LOG("[groovy-inject] off\n");
+        return;
+    }
+    if (st->inject_n == 0u) {
+        char shown[65];
+        unsigned i;
+
+        /* At most 64 characters, anything unprintable replaced: the value
+         * comes from the environment and goes into a log. */
+        for (i = 0u; i < 64u && raw[i] != '\0'; i++)
+            shown[i] = ((unsigned char)raw[i] >= 0x20u
+                        && (unsigned char)raw[i] < 0x7Fu) ? raw[i] : '?';
+        shown[i] = '\0';
+        RARCH_LOG("[groovy-inject] refused value=%s\n", shown);
+        return;
+    }
+    {
+        char     canon[GROOVY_INJECT_MAX_ITEMS * 20u];
+        size_t   len = 0u;
+        unsigned i;
+
+        canon[0] = '\0';
+        for (i = 0u; i < st->inject_n; i++) {
+            const struct groovy_inject_item *it = &st->inject_items[i];
+            int w = snprintf(canon + len, sizeof(canon) - len, "%s%s@%u",
+                             (i == 0u) ? "" : ",",
+                             groovy_inject_kind_name(it->kind),
+                             (unsigned)it->at_s);
+            if (w > 0 && (size_t)w < sizeof(canon) - len)
+                len += (size_t)w;
+            if (it->param_ms != 0u) {
+                w = snprintf(canon + len, sizeof(canon) - len, ":%u",
+                             (unsigned)it->param_ms);
+                if (w > 0 && (size_t)w < sizeof(canon) - len)
+                    len += (size_t)w;
+            }
+        }
+        RARCH_LOG("[groovy-inject] armed n=%u items=%s\n", st->inject_n, canon);
+    }
+}
+
 static void *groovy_new(const struct record_params *params)
 {
     /* Nothing from a previous session's inputs survives the opening of a
@@ -1562,6 +1700,10 @@ static void *groovy_new(const struct record_params *params)
     st->skip_every = groovy_skip_every_parse(getenv("GROOVY_SKIP_FRAME_EVERY"));
     RARCH_LOG("[groovy] skip: one frame in %u%s\n", st->skip_every,
               (st->skip_every == 0u) ? " (off)" : " (GROOVY_SKIP_FRAME_EVERY)");
+
+    /* Known-fault injection, read once here like the hook above. Absent or
+     * refused: inject_n stays 0 and the hot path below never looks at it. */
+    groovy_inject_open(st);
 
     /* Channels: record_driver.c always sets 2, but this doesn't assume it. */
     unsigned ch = (params && params->channels > 0u) ? params->channels : 2u;
@@ -2781,6 +2923,14 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
     if (vid->is_dupe)
         return true;
 
+    /* Instant this frame reached the driver, on the QPC clock the rest of
+     * the driver uses. Together with emit_t0 below (the instant the send
+     * chain starts) it bounds what happens inside the emitter for this
+     * frame; both go to the master's [groovy-lat] line so that a tool can
+     * join them with the receiver's own timestamps. One clock read per
+     * rendered frame, nothing else on this path when injection is off. */
+    const uint64_t e_ns = groovy_pacing_mono_ns();
+
     /* Diagnostic: log per-frame vid dims to verify whether vid->width/height
      * is the CURRENT frame size (libretro native, what we want) or the FB max
      * size (700x576). Logged once per ~2 seconds via simple counter to avoid
@@ -3380,6 +3530,42 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
      * site further down. */
     bool     fan_out_done = false;
 
+    /* Session origin: the first frame that passed the dims guard above. It
+     * is the zero of GROOVY_INJECT's seconds and of minute 0 of any
+     * measurement reading this log, so it is written whether or not
+     * injection is on. Set once per session (calloc zeroes the field). */
+    if (st->inject_t0_ns == 0u) {
+        st->inject_t0_ns = emit_t0;
+        RARCH_LOG("[groovy-clock] origin t_ns=%llu utc_ms=%llu frame_id=%u\n",
+                  (unsigned long long)emit_t0,
+                  (unsigned long long)groovy_wall_ms(),
+                  (unsigned)st->frame_id);
+    }
+
+    /* Injected fault, "frame not emitted" family. Same place as the
+     * GROOVY_SKIP_FRAME_EVERY hook below, for the same reason: after every
+     * geometry guard and after the frame witness, so the withheld frame is
+     * one that would really have gone out. frame_id is NOT touched here: it
+     * advances at the bottom of the function like for any other frame, and
+     * the hole in the sequence is exactly what the receiver must report.
+     * No REINIT path and no regime switch is involved: the announce was made
+     * above, the withheld frame simply is not sent.
+     *
+     * skip: progressive (240p) only. A frame is withheld once the item's
+     * second is reached. */
+    bool inject_hold = false;
+    if (st->inject_n > 0u) {
+        const uint64_t inj_elapsed = groovy_inject_elapsed_ns(st, emit_t0);
+        const int      skip_i = groovy_inject_pending(st->inject_items,
+                st->inject_n, GROOVY_INJECT_SKIP, inj_elapsed);
+
+        if (skip_i >= 0 && split_mode == GROOVY_MODE_240P_SUPER_RES) {
+            groovy_inject_note_fired(st, &st->inject_items[skip_i],
+                                     st->frame_id, emit_t0);
+            inject_hold = true;
+        }
+    }
+
     /* WAN-03 diagnostic hook. Placed AFTER every geometry guard and AFTER
      * the frame witness, so the skipped frame is one that would have
      * REALLY gone out. frame_id is NOT touched here: it advances at the
@@ -3387,7 +3573,9 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
      * the deliberate gap WAN-03 must prove tolerable. The expected bench
      * signal is a rise in [groovy-lat]'s net= percentile (the sent - echo
      * gap), NOT a rise in anomalies. */
-    if (groovy_skip_should_skip(st->skip_every, st->frame_id)) {
+    if (inject_hold) {
+        /* Injected fault above: nothing is sent for this frame. */
+    } else if (groovy_skip_should_skip(st->skip_every, st->frame_id)) {
         st->skipped_frames++;
     /* Phase 3.2 regime-aware emit: split_mode is the
      * regime of the announce the dims guard above just verified matches
@@ -3466,6 +3654,16 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         emit_ok = groovy_fan_out(st, GROOVY_EMIT_FULL, vsync_target, 0u,
                                  frame, NULL, need);
         fan_out_done = true;
+    }
+
+    /* Remember the last frame really emitted to the master: its identifier
+     * and the two instants that bracket the emitter's own work on it. The
+     * once-a-second [groovy-lat] line prints them. A withheld frame (the
+     * hooks above) never gets here with fan_out_done set. */
+    if (fan_out_done && emit_ok) {
+        st->last_emit_id   = st->frame_id;
+        st->last_emit_e_ns = e_ns;
+        st->last_emit_s_ns = emit_t0;
     }
 
     /* Lever b6: the queue is only flushed after a fan-out that REALLY
@@ -3777,6 +3975,15 @@ static bool groovy_finalize(void *data)
                   (unsigned long long)(st->audio_frames
                                        * st->audio_channels * 2u),
                   (unsigned long long)st->audio_errors);
+
+    /* Injected faults that never fired (their second was never reached, or
+     * the video shape they need never occurred): said at a clean close, so
+     * that a missing "fired" line is never ambiguous. */
+    for (unsigned i = 0u; i < st->inject_n; i++)
+        if (!st->inject_items[i].fired)
+            RARCH_LOG("[groovy-inject] not-fired kind=%s at_s=%u\n",
+                      groovy_inject_kind_name(st->inject_items[i].kind),
+                      (unsigned)st->inject_items[i].at_s);
 
     /* Box report (quick 260901-po3), on the same model as the audio report
      * above. */
