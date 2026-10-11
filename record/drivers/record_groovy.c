@@ -1137,6 +1137,18 @@ static void groovy_inject_note_fired(groovy_state_t *st,
               (unsigned long long)(elapsed_ns / 1000000ull));
 }
 
+/* Busy wait until a deadline on the monotonic clock. Never Sleep(): a sleep
+ * yields to the scheduler and its length is quantised to the timer tick, so a
+ * 5 ms fault would last 15 ms. The loop is bounded by the deadline, and every
+ * caller passes a parameter the parser already bounded (500 ms at most). */
+static void groovy_inject_busy_wait_ns(uint64_t wait_ns)
+{
+    const uint64_t deadline = groovy_pacing_mono_ns() + wait_ns;
+
+    while (groovy_pacing_mono_ns() < deadline)
+        ;
+}
+
 /* Reads GROOVY_INJECT once, at session opening, and says what it understood.
  * An empty or absent variable is "off". A non-empty one that parses to zero
  * items is refused WHOLE (a typo must never run half of the intended test)
@@ -2923,6 +2935,26 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
     if (vid->is_dupe)
         return true;
 
+    /* Injected fault "stall": one single busy wait of the run loop, at the
+     * very entry of the driver and BEFORE e_ns is read, so the frame arrives
+     * late to the driver as it would after a real hiccup of the run loop
+     * and the wait is not part of anything this driver measures about the
+     * frame. Needs the session origin, hence only from the second frame on.
+     * Fires once. Clock is read only when an item exists. */
+    if (st->inject_n > 0u && st->inject_t0_ns != 0u) {
+        const uint64_t stall_now = groovy_pacing_mono_ns();
+        const int      stall_i   = groovy_inject_pending(st->inject_items,
+                st->inject_n, GROOVY_INJECT_STALL,
+                groovy_inject_elapsed_ns(st, stall_now));
+
+        if (stall_i >= 0) {
+            groovy_inject_note_fired(st, &st->inject_items[stall_i],
+                                     st->frame_id, stall_now);
+            groovy_inject_busy_wait_ns(
+                (uint64_t)st->inject_items[stall_i].param_ms * 1000000ull);
+        }
+    }
+
     /* Instant this frame reached the driver, on the QPC clock the rest of
      * the driver uses. Together with emit_t0 below (the instant the send
      * chain starts) it bounds what happens inside the emitter for this
@@ -3552,17 +3584,74 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
      * above, the withheld frame simply is not sent.
      *
      * skip: progressive (240p) only. A frame is withheld once the item's
-     * second is reached. */
+     * second is reached.
+     *
+     * parity: interlaced, one field per frame, and only on an OPENING
+     * half-frame (groovy_inject_parity_eligible). Why the opening one: the
+     * receiver pairs half-frames by frame_id + 1 adjacency, so a lost
+     * opening half-frame makes the next pair open on the other parity, and
+     * it stays so; a lost closing half-frame changes nothing lasting. This
+     * is the "opposite field" use of parity@0 (header groovy_inject.h).
+     * The observation runs on every frame that reaches this block so that
+     * the tracked excursion ends when the video leaves interlaced mode. */
     bool inject_hold = false;
     if (st->inject_n > 0u) {
         const uint64_t inj_elapsed = groovy_inject_elapsed_ns(st, emit_t0);
+        const bool     is_480i_fpf = (split_mode == GROOVY_MODE_480I
+                                      && st->field_mode == GROOVY_FIELD_PER_FRAME);
         const int      skip_i = groovy_inject_pending(st->inject_items,
                 st->inject_n, GROOVY_INJECT_SKIP, inj_elapsed);
+
+        groovy_inject_parity_observe(&st->inject_parity,
+                                     is_480i_fpf ? 1 : 0, st->frame_id);
 
         if (skip_i >= 0 && split_mode == GROOVY_MODE_240P_SUPER_RES) {
             groovy_inject_note_fired(st, &st->inject_items[skip_i],
                                      st->frame_id, emit_t0);
             inject_hold = true;
+        }
+
+        if (!inject_hold) {
+            const int parity_i = groovy_inject_pending(st->inject_items,
+                    st->inject_n, GROOVY_INJECT_PARITY, inj_elapsed);
+
+            if (parity_i >= 0
+                && groovy_inject_parity_eligible(&st->inject_parity,
+                        is_480i_fpf ? 1 : 0, st->frame_id)) {
+                groovy_inject_note_fired(st, &st->inject_items[parity_i],
+                                         st->frame_id, emit_t0);
+                groovy_inject_parity_fired(&st->inject_parity);
+                inject_hold = true;
+            }
+        }
+
+        /* delay: from the instant the item fires, every frame that is about
+         * to be emitted waits P ms for GROOVY_INJECT_DELAY_WINDOW_S seconds.
+         * The wait sits AFTER emit_t0 (read above, and the s_ns of this
+         * frame) and BEFORE the send chain below: the delay falls between
+         * s_ns and the actual send, where only a join with the receiver's
+         * clock can see it, besides the mean of [groovy-emit] (whose timer
+         * starts at emit_t0). A new window is opened only once the previous
+         * one has closed. */
+        if (!inject_hold) {
+            if (!groovy_inject_window_active(st->inject_delay_start_ns,
+                        st->inject_delay_dur_ns, emit_t0)) {
+                const int delay_i = groovy_inject_pending(st->inject_items,
+                        st->inject_n, GROOVY_INJECT_DELAY, inj_elapsed);
+
+                if (delay_i >= 0) {
+                    groovy_inject_note_fired(st, &st->inject_items[delay_i],
+                                             st->frame_id, emit_t0);
+                    st->inject_delay_ms       = st->inject_items[delay_i].param_ms;
+                    st->inject_delay_start_ns = emit_t0;
+                    st->inject_delay_dur_ns   =
+                        (uint64_t)GROOVY_INJECT_DELAY_WINDOW_S * 1000000000ull;
+                }
+            }
+            if (groovy_inject_window_active(st->inject_delay_start_ns,
+                        st->inject_delay_dur_ns, emit_t0))
+                groovy_inject_busy_wait_ns(
+                    (uint64_t)st->inject_delay_ms * 1000000ull);
         }
     }
 
@@ -3800,6 +3889,33 @@ static bool groovy_push_audio(void *data, const struct record_audio_data *audio)
      * makes no sense — it has nothing to play it faster with. */
     if (runloop_get_flags() & RUNLOOP_FLAG_FASTMOTION)
         return true;
+
+    /* Injected fault "audio": no PCM goes out for P ms from the instant the
+     * item fires. The block is dropped HERE, before the resampler and before
+     * the audio-hold deposit, so neither ever sees it: the wire carries a
+     * true hole and the resampling state is untouched. The block is
+     * returned as consumed (true), like a deliberately dropped one. Needs
+     * the session origin, which the video path sets. Same thread as the
+     * video, so no lock. */
+    if (st->inject_n > 0u && st->inject_t0_ns != 0u) {
+        const uint64_t gap_now = groovy_pacing_mono_ns();
+
+        if (gap_now < st->inject_audio_gap_end_ns)
+            return true;
+        {
+            const int audio_i = groovy_inject_pending(st->inject_items,
+                    st->inject_n, GROOVY_INJECT_AUDIO,
+                    groovy_inject_elapsed_ns(st, gap_now));
+
+            if (audio_i >= 0) {
+                groovy_inject_note_fired(st, &st->inject_items[audio_i],
+                                         st->frame_id, gap_now);
+                st->inject_audio_gap_end_ns = gap_now
+                    + (uint64_t)st->inject_items[audio_i].param_ms * 1000000ull;
+                return true;
+            }
+        }
+    }
 
     const int16_t *pcm    = (const int16_t *)audio->data;
     size_t         frames = audio->frames;
