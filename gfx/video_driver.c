@@ -1227,11 +1227,13 @@ static int groovy_frametime_cmp(const void *a, const void *b)
 void groovy_frametime_iter(retro_time_t start, retro_time_t end)
 {
    static const char *names[GROOVY_FT_COUNT] =
-      { "iter", "core", "read", "push", "drv", "audio", "paud" };
+      { "iter", "core", "read", "push", "drv", "audio", "paud", "work" };
    unsigned slot, i;
 
    s_gft_cur[GROOVY_FT_ITER] = s_gft_last_start ? start - s_gft_last_start : 0;
    s_gft_cur[GROOVY_FT_CORE] = end - start;
+   /* No floor at zero: a negative value would reveal overlapping slots. */
+   s_gft_cur[GROOVY_FT_WORK] = (end - start) - s_gft_cur[GROOVY_FT_AUDIO];
    s_gft_last_start          = start;
    for (slot = 0; slot < GROOVY_FT_COUNT; slot++)
    {

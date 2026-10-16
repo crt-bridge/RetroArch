@@ -1314,6 +1314,9 @@ enum groovy_frametime_slot
    GROOVY_FT_DRV,      /* vid->frame (GPU waits and present included) */
    GROOVY_FT_AUDIO,    /* audio_driver_flush (may block on audio sync) */
    GROOVY_FT_PAUD,     /* record driver push_audio (the bridge) */
+   GROOVY_FT_WORK,     /* core time minus the audio flush of the same
+                        * iteration: the loop's own work, without the
+                        * audio sync wait */
    GROOVY_FT_COUNT
 };
 bool groovy_frametime_on(void);
