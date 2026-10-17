@@ -234,6 +234,7 @@ typedef struct gl3
     * failed once in this session and is never tried again. */
    bool native_box_requested;
    bool native_box_disabled;
+   bool native_box_tested;                /* self-test already run */
 #endif
    bool menu_texture_rgb32;
 } gl3_t;
@@ -1894,6 +1895,160 @@ static void gl3_native_box_pass(gl3_t *gl, GLuint src_tex)
          (GLsizei)prev_vp[2], (GLsizei)prev_vp[3]);
 }
 
+/* The self-test, once per session, before the first real pass: a synthetic
+ * frame of the native dims goes through the GPU box above and through the CPU
+ * box the recording would otherwise run (groovy_downsample_box_rgb888_n4),
+ * and every RGB byte is compared. Any difference, or any GL error raised
+ * meanwhile, disables the box for the session: the frames are then read back
+ * unreduced and the recording averages them on the CPU, where it shows.
+ *
+ * The frame: every RGB byte from a fixed-seed linear congruential generator
+ * (non-uniform blocks, whose averages truncate), except the first row of
+ * blocks, made of uniform 4x4 blocks that must come out unchanged (2D
+ * invariance), with 0 and 255 in every channel across that row. */
+static bool gl3_native_box_self_test(gl3_t *gl,
+      unsigned width, unsigned height)
+{
+   static const uint8_t levels[8] = { 0, 255, 1, 254, 127, 128, 64, 191 };
+   unsigned bw          = width  / 4;
+   unsigned bh          = height / 4;
+   size_t npx           = (size_t)width * (size_t)height;
+   size_t nbox          = (size_t)bw * (size_t)bh;
+   uint8_t *rgba        = (uint8_t*)malloc(npx  * 4);
+   uint8_t *rgb         = (uint8_t*)malloc(npx  * 3);
+   uint8_t *cpu         = (uint8_t*)malloc(nbox * 3);
+   uint8_t *gpu         = (uint8_t*)malloc(nbox * 4);
+   uint32_t seed        = 0x1badb002u;
+   unsigned differ      = 0;
+   unsigned compared    = (unsigned)(nbox * 3);
+   GLuint tex           = 0;
+   GLenum err           = GL_NO_ERROR;
+   bool ok              = false;
+   GLint prev_unpack_buf, prev_unpack_align, prev_unpack_row;
+   GLint prev_pack_buf, prev_pack_align, prev_pack_row;
+   GLint prev_read_fbo, prev_active, prev_tex;
+   char reason[96];
+   size_t i;
+   unsigned x, y;
+
+   gl->native_box_tested = true;
+
+   if (!rgba || !rgb || !cpu || !gpu)
+   {
+      gl3_native_box_disable(gl, "no memory for the self-test");
+      goto done;
+   }
+
+   for (i = 0; i < npx; i++)
+   {
+      seed          = seed * 1664525u + 1013904223u;
+      rgba[4*i + 0] = (uint8_t)(seed >> 24);
+      rgba[4*i + 1] = (uint8_t)(seed >> 16);
+      rgba[4*i + 2] = (uint8_t)(seed >>  8);
+      rgba[4*i + 3] = 255;
+   }
+   for (y = 0; y < 4; y++)
+      for (x = 0; x < width; x++)
+      {
+         unsigned b = x / 4;
+         uint8_t *p = rgba + ((size_t)y * width + x) * 4;
+         p[0]       = levels[b % 8];
+         p[1]       = (uint8_t)(255 - levels[b % 8]);
+         p[2]       = levels[(b + 3) % 8];
+      }
+   for (i = 0; i < npx; i++)
+   {
+      rgb[3*i + 0] = rgba[4*i + 0];
+      rgb[3*i + 1] = rgba[4*i + 1];
+      rgb[3*i + 2] = rgba[4*i + 2];
+   }
+   groovy_downsample_box_rgb888_n4(cpu, rgb, width, height);
+
+   /* Drop errors raised before us: only ours decide. */
+   for (x = 0; x < 16 && glGetError() != GL_NO_ERROR; x++)
+      ;
+
+   /* Upload, with nothing bound to the unpack target and tight rows. */
+   glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &prev_unpack_buf);
+   glGetIntegerv(GL_UNPACK_ALIGNMENT,            &prev_unpack_align);
+   glGetIntegerv(GL_UNPACK_ROW_LENGTH,           &prev_unpack_row);
+   glGetIntegerv(GL_ACTIVE_TEXTURE,              &prev_active);
+   glActiveTexture(GL_TEXTURE0);
+   glGetIntegerv(GL_TEXTURE_BINDING_2D,          &prev_tex);
+   glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+   glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+   glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+
+   glGenTextures(1, &tex);
+   glBindTexture(GL_TEXTURE_2D, tex);
+   glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, width, height);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+   glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height,
+         GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+
+   glBindTexture(GL_TEXTURE_2D, (GLuint)prev_tex);
+   glActiveTexture((GLenum)prev_active);
+   glPixelStorei(GL_UNPACK_ROW_LENGTH, prev_unpack_row);
+   glPixelStorei(GL_UNPACK_ALIGNMENT,  prev_unpack_align);
+   glBindBuffer(GL_PIXEL_UNPACK_BUFFER, (GLuint)prev_unpack_buf);
+
+   gl3_native_box_pass(gl, tex);
+
+   /* Synchronous readback, with nothing bound to the pack target. */
+   glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &prev_pack_buf);
+   glGetIntegerv(GL_PACK_ALIGNMENT,            &prev_pack_align);
+   glGetIntegerv(GL_PACK_ROW_LENGTH,           &prev_pack_row);
+   glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING,  &prev_read_fbo);
+   glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+   glPixelStorei(GL_PACK_ALIGNMENT, 4);
+   glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+   glBindFramebuffer(GL_READ_FRAMEBUFFER, gl->native_box_fbo);
+   glReadPixels(0, 0, (GLsizei)bw, (GLsizei)bh,
+         GL_RGBA, GL_UNSIGNED_BYTE, gpu);
+   glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prev_read_fbo);
+   glPixelStorei(GL_PACK_ROW_LENGTH, prev_pack_row);
+   glPixelStorei(GL_PACK_ALIGNMENT,  prev_pack_align);
+   glBindBuffer(GL_PIXEL_PACK_BUFFER, (GLuint)prev_pack_buf);
+
+   err = glGetError();
+
+   for (i = 0; i < nbox; i++)
+   {
+      differ += gpu[4*i + 0] != cpu[3*i + 0];
+      differ += gpu[4*i + 1] != cpu[3*i + 1];
+      differ += gpu[4*i + 2] != cpu[3*i + 2];
+   }
+
+   RARCH_LOG("[GLCore] Native-FBO GPU box self-test: %ux%u -> %ux%u, %u of %u bytes differ from the CPU box.\n",
+         width, height, bw, bh, differ, compared);
+
+   if (err != GL_NO_ERROR)
+   {
+      snprintf(reason, sizeof(reason),
+            "GL error 0x%04x during the self-test", (unsigned)err);
+      gl3_native_box_disable(gl, reason);
+   }
+   else if (differ != 0)
+   {
+      snprintf(reason, sizeof(reason),
+            "the self-test found %u bytes that differ from the CPU box",
+            differ);
+      gl3_native_box_disable(gl, reason);
+   }
+   else
+      ok = true;
+
+done:
+   if (tex != 0)
+      glDeleteTextures(1, &tex);
+   free(rgba);
+   free(rgb);
+   free(cpu);
+   free(gpu);
+   return ok;
+}
+
 /* Reduce the (0,0)-(width,height) region of src_tex into the reduced target.
  * false = the box is not usable (now disabled for the session): the caller
  * reads the source back unreduced. */
@@ -1904,8 +2059,26 @@ static bool gl3_native_box_reduce(gl3_t *gl, GLuint src_tex,
       return false;
    if (!gl3_native_box_target(gl, width, height))
       return false;
+   if (!gl->native_box_tested && !gl3_native_box_self_test(gl, width, height))
+      return false;
    gl3_native_box_pass(gl, src_tex);
    return true;
+}
+
+/* Gives back the target, its texture and the program. */
+static void gl3_deinit_native_box(gl3_t *gl)
+{
+   if (gl->native_box_fbo != 0)
+      glDeleteFramebuffers(1, &gl->native_box_fbo);
+   if (gl->native_box_tex != 0)
+      glDeleteTextures(1, &gl->native_box_tex);
+   if (gl->native_box_program != 0)
+      glDeleteProgram(gl->native_box_program);
+   gl->native_box_fbo     = 0;
+   gl->native_box_tex     = 0;
+   gl->native_box_program = 0;
+   gl->native_box_w       = 0;
+   gl->native_box_h       = 0;
 }
 #endif /* !HAVE_OPENGLES */
 
@@ -2262,6 +2435,9 @@ static void gl3_destroy_resources(gl3_t *gl)
    gl3_deinit_pbo_readback(gl);
    gl3_deinit_pbo_native(gl);      /* crt-bridge */
    gl3_deinit_native_compose(gl);  /* crt-bridge */
+#ifndef HAVE_OPENGLES
+   gl3_deinit_native_box(gl);      /* crt-bridge */
+#endif
    gl3_deinit_hw_render(gl);
 }
 
@@ -4487,6 +4663,19 @@ static void gl3_native_capture_step(gl3_t *gl)
       glViewport(prev_vp[0], prev_vp[1],
             (GLsizei)prev_vp[2], (GLsizei)prev_vp[3]);
 
+#ifndef HAVE_OPENGLES
+      /* gpu4: the composite goes through the same box as play. The box
+       * keeps its source's orientation and 4 divides the height, so the
+       * block grid does not depend on the drawing direction above. */
+      if (   gl3_native_box_applies(gl, width, height)
+          && gl3_native_box_reduce(gl, gl->native_compose_tex,
+               width, height))
+      {
+         gl3_pbo_async_readback_native(gl, gl->native_box_fbo,
+               gl->native_box_w, gl->native_box_h);
+         return;
+      }
+#endif
       gl3_pbo_async_readback_native(gl, gl->native_compose_fbo,
             width, height);
       return;
