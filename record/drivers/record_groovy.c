@@ -506,9 +506,11 @@ typedef struct {
     /* --- Supersampling CPU box. Set at session opening; 1 = off, and then
      * none of this is touched. --- */
     unsigned  downsample_n;                 /* 1, 2, 4 or 8 */
+    int       downsample_gpu;               /* 1 = "gpu4": the video driver is asked to do the 4x4 reduction */
     uint8_t  *down_buf;                     /* box destination, allocated as needed */
     size_t    down_cap;
     uint64_t  downsample_dims_mismatch;     /* frames rejected, never distorted */
+    uint64_t  downsample_prereduced_mismatch; /* frames already reduced by the video driver, not expected */
     uint64_t  downsample_ns_total;          /* box cost, read every 600 */
     uint64_t  downsample_ns_max;
     uint32_t  downsample_samples;
@@ -1702,9 +1704,12 @@ static void *groovy_new(const struct record_params *params)
 
     /* Supersampling box setting, read once here. See groovy_downsample.h
      * for why this is an environment variable. */
-    st->downsample_n = groovy_downsample_factor_parse(getenv("GROOVY_DOWNSAMPLE"));
+    st->downsample_gpu = groovy_downsample_on_gpu(getenv("GROOVY_DOWNSAMPLE"));
+    st->downsample_n   = st->downsample_gpu
+                       ? 4u
+                       : groovy_downsample_factor_parse(getenv("GROOVY_DOWNSAMPLE"));
     RARCH_LOG("[groovy] downsample: factor=%s\n",
-              groovy_downsample_factor_name(st->downsample_n));
+              groovy_downsample_mode_name(st->downsample_n, st->downsample_gpu));
 
     /* Diagnostic hook: deliberately skip sending one frame in N, to prove
      * on the bench that a missing blit is tolerated. No effect when
@@ -3048,8 +3053,26 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
      * the receiver into 480i. Placed AFTER the two guards above so that
      * downsample_dims_mismatch doesn't count startup frames, from before
      * the fps handshake. */
-    if (st->downsample_n > 1u) {
-        if (!groovy_downsample_dims_ok(cap_w, cap_h, st->downsample_n)) {
+    /* The factor the CPU box still applies to THIS frame. The video driver
+     * may already have reduced the capture (vid->prereduced > 1); a frame is
+     * never reduced twice, and a reduced frame nobody asked for is refused
+     * (cpu_factor 0). groovy_downsample_cpu_factor() holds the decision. */
+    const unsigned cpu_factor = groovy_downsample_cpu_factor(
+            st->downsample_n, st->downsample_gpu, vid->prereduced);
+    if (cpu_factor == 0u) {
+        static unsigned s_pre_warn_w = 0u, s_pre_warn_h = 0u;
+        st->downsample_prereduced_mismatch++;
+        if (s_pre_warn_w != cap_w || s_pre_warn_h != cap_h) {
+            RARCH_WARN("[groovy] downsample_prereduced_mismatch: %ux%u reduced by "
+                       "%u by the video driver, not expected -- frame refused\n",
+                       cap_w, cap_h, vid->prereduced);
+            s_pre_warn_w = cap_w;
+            s_pre_warn_h = cap_h;
+        }
+        return true;   /* soft-skip, session alive */
+    }
+    if (cpu_factor > 1u) {
+        if (!groovy_downsample_dims_ok(cap_w, cap_h, cpu_factor)) {
             /* Refuse the frame rather than distort it. Trace limited to
              * dim changes (singleton driver, same rationale as the BLIT
              * guard below). */
@@ -3058,14 +3081,26 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
             if (s_ds_warn_w != cap_w || s_ds_warn_h != cap_h) {
                 RARCH_WARN("[groovy] downsample_dims_mismatch: %ux%u not divisible "
                            "by %u — frame refused\n",
-                           cap_w, cap_h, st->downsample_n);
+                           cap_w, cap_h, cpu_factor);
                 s_ds_warn_w = cap_w;
                 s_ds_warn_h = cap_h;
             }
             return true;   /* soft-skip, session alive */
         }
-        send_w = cap_w / st->downsample_n;
-        send_h = cap_h / st->downsample_n;
+        if (st->downsample_gpu && vid->prereduced == 1u) {
+            /* "gpu4" was requested but the video driver handed over the full
+             * frame: the CPU box does the reduction. The image is right;
+             * the cost is the one "gpu4" exists to avoid. */
+            static unsigned s_fb_warn_w = 0u, s_fb_warn_h = 0u;
+            if (s_fb_warn_w != cap_w || s_fb_warn_h != cap_h) {
+                RARCH_WARN("[groovy] downsample: gpu4 frame %ux%u arrived "
+                           "unreduced -- CPU box used\n", cap_w, cap_h);
+                s_fb_warn_w = cap_w;
+                s_fb_warn_h = cap_h;
+            }
+        }
+        send_w = cap_w / cpu_factor;
+        send_h = cap_h / cpu_factor;
     }
 
     /* Regime decision and announce. groovy_mode_on_frame (groovy_mode.h)
@@ -3211,7 +3246,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
      * four backends, software cores covered by construction. Right after
      * format normalization, before caching st->width/height. */
     const uint8_t *frame = st->swap_buf;
-    if (st->downsample_n > 1u) {
+    if (cpu_factor > 1u) {
         if (need > st->down_cap) {
             uint8_t *grown = (uint8_t *)realloc(st->down_buf, need);
             if (!grown) return false;   /* soft error, session alive */
@@ -3220,14 +3255,14 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         }
         uint64_t box_t0 = groovy_pacing_mono_ns();
         groovy_downsample_box_rgb888(st->down_buf, st->swap_buf,
-                                     cap_w, cap_h, st->downsample_n);
+                                     cap_w, cap_h, cpu_factor);
         uint64_t box_ns = groovy_pacing_mono_ns() - box_t0;
         st->downsample_ns_total += box_ns;
         if (box_ns > st->downsample_ns_max) st->downsample_ns_max = box_ns;
         if (++st->downsample_samples >= 600u) {
             RARCH_LOG("[groovy-box] factor=%s %ux%u -> %ux%u n=%u "
                       "average=%.1f us worst=%.1f us\n",
-                      groovy_downsample_factor_name(st->downsample_n),
+                      groovy_downsample_factor_name(cpu_factor),
                       cap_w, cap_h, send_w, send_h, st->downsample_samples,
                       (double)st->downsample_ns_total / (double)st->downsample_samples / 1000.0,
                       (double)st->downsample_ns_max / 1000.0);
@@ -4146,6 +4181,10 @@ static bool groovy_finalize(void *data)
                   "divisible by %u)\n",
                   (unsigned long long)st->downsample_dims_mismatch,
                   st->downsample_n);
+    if (st->downsample_prereduced_mismatch > 0u)
+        RARCH_LOG("[groovy] downsample: %llu frames refused (pre-reduced by "
+                  "the video driver, not expected)\n",
+                  (unsigned long long)st->downsample_prereduced_mismatch);
 
     /* Regime session summary -- ALWAYS emitted,
      * unlike the downsample report above: a session with zero switches is

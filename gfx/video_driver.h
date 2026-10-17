@@ -793,6 +793,15 @@ typedef struct video_driver
     * NULL (default, zero-initialized) = driver has no native capture path. */
    bool (*read_native)(void *data, uint8_t *buffer,
          unsigned width, unsigned height);
+
+   /* crt-bridge: optional. The factor by which read_native will have
+    * averaged the capture of a frame of these native dims (blocks of
+    * factor x factor): the buffer then holds (width / factor) x
+    * (height / factor) pixels. 1 = not reduced. Never more than 1 when width
+    * or height is not divisible by the factor. NULL (default,
+    * zero-initialized) = 1. */
+   unsigned (*native_capture_divisor)(void *data,
+         unsigned width, unsigned height);
 } video_driver_t;
 
 typedef struct

@@ -1286,6 +1286,7 @@ static void recording_dump_frame(
    ffemu_data.height   = height;
    ffemu_data.pitch    = (int)pitch;
    ffemu_data.is_dupe  = false;
+   ffemu_data.prereduced = 1;
 
    if (video_st->record_gpu_buffer)
    {
@@ -1328,20 +1329,35 @@ static void recording_dump_frame(
              * drop the frame instead of pushing stale-dim content. */
             {
                bool read_ok;
+               /* The driver may average the capture itself; ask by how
+                * much. A missing hook, a zero, or a factor that does not
+                * divide both dims means "not reduced". */
+               unsigned divisor = vid->native_capture_divisor
+                  ? vid->native_capture_divisor(video_st->data, width, height)
+                  : 1;
                retro_time_t ft0 = groovy_frametime_on()
                   ? cpu_features_get_time_usec() : 0;
+
+               if (   divisor == 0
+                   || (width  % divisor) != 0
+                   || (height % divisor) != 0)
+                  divisor = 1;
+
                read_ok = vid->read_native(video_st->data,
-                     video_st->record_gpu_buffer, width, height);
+                     video_st->record_gpu_buffer,
+                     width / divisor, height / divisor);
                if (ft0)
                   groovy_frametime_add(GROOVY_FT_READ,
                         cpu_features_get_time_usec() - ft0);
                if (!read_ok)
                   return;
+
+               ffemu_data.width      = width  / divisor;
+               ffemu_data.height     = height / divisor;
+               ffemu_data.prereduced = divisor;
             }
 
-            ffemu_data.width  = width;
-            ffemu_data.height = height;
-            ffemu_data.pitch  = (int)(width * 3); /* top-down BGR24 */
+            ffemu_data.pitch  = (int)(ffemu_data.width * 3); /* top-down BGR24 */
             ffemu_data.data   = video_st->record_gpu_buffer;
          }
 

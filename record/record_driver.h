@@ -91,6 +91,10 @@ struct record_video_data
    unsigned height;
    int pitch;
    bool is_dupe;
+   /* crt-bridge: 1 = the frame has the dimensions the core submitted;
+    * n > 1 = the video driver already averaged n x n blocks, and width and
+    * height are the reduced dimensions. */
+   unsigned prereduced;
 };
 
 struct record_audio_data
