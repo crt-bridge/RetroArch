@@ -51,6 +51,7 @@
 
 #include "../font_driver.h"
 #include "../../record/record_driver.h"
+#include "../../record/drivers/groovy_downsample.h"
 
 #ifdef HAVE_GLSL
 #include "../drivers_shader/shader_glsl.h"
@@ -117,6 +118,15 @@ typedef struct gl3
     * is copied and the menu is then drawn. */
    GLuint native_compose_fbo;
    GLuint native_compose_tex;
+#ifndef HAVE_OPENGLES
+   /* crt-bridge: GPU 4x4 box of the native capture (GROOVY_DOWNSAMPLE=gpu4).
+    * Our own reduced target at (native / 4) dims, and the program that
+    * averages each 4x4 block of the source into one of its pixels. */
+   GLuint native_box_fbo;
+   GLuint native_box_tex;
+   GLuint native_box_program;
+   GLint  native_box_src_loc;
+#endif
 
    /* Render chain for non-Slang shaders only. */
    struct
@@ -195,6 +205,10 @@ typedef struct gl3
    unsigned pbo_native_index;             /* crt-bridge */
    unsigned native_compose_w;             /* crt-bridge */
    unsigned native_compose_h;
+#ifndef HAVE_OPENGLES
+   unsigned native_box_w;                 /* crt-bridge: reduced target dims */
+   unsigned native_box_h;
+#endif
    unsigned menu_texture_width;
    unsigned menu_texture_height;
    GLuint scratch_vbos[GL_CORE_NUM_VBOS];
@@ -215,6 +229,12 @@ typedef struct gl3
     * ring is allocated at pbo_native_scaler's dims. */
    bool pbo_native_valid[GL_CORE_NUM_PBOS];
    bool pbo_native_ready;
+#ifndef HAVE_OPENGLES
+   /* crt-bridge: "gpu4" read once at driver init; disabled = the box
+    * failed once in this session and is never tried again. */
+   bool native_box_requested;
+   bool native_box_disabled;
+#endif
    bool menu_texture_rgb32;
 } gl3_t;
 
@@ -1625,11 +1645,275 @@ static void gl3_deinit_native_compose(gl3_t *gl)
    gl->native_compose_h   = 0;
 }
 
-static void gl3_pbo_async_readback_native(gl3_t *gl, GLuint src_fbo)
-{
-   unsigned width  = gl->native_capture_width;
-   unsigned height = gl->native_capture_height;
+#ifndef HAVE_OPENGLES
+/* crt-bridge: GPU 4x4 box of the native capture.
+ *
+ * With GROOVY_DOWNSAMPLE=gpu4 the recording asks for the native surface
+ * averaged over 4x4 blocks. Reading the full surface back (1280x960 for a
+ * 320x240 game at 4x supersampling) and averaging it on the CPU costs a large
+ * share of the frame; here the GPU averages each 4x4 block into OUR reduced
+ * target and only that target is read back — one sixteenth of the bytes.
+ *
+ * The result must be the CPU box byte for byte (groovy_downsample_box_
+ * rgb888_n4: integer sum of sixteen samples, one truncating division by 16).
+ * So the shader fetches the sixteen texels one by one with texelFetch,
+ * brings each channel back to its exact 8-bit integer, sums in integers and
+ * divides once. Bilinear filtering cannot do this: at 4:1 a bilinear tap
+ * placed in the middle of a block only reads its central 2x2, and two
+ * successive 2:1 bilinear copies round to a byte twice.
+ *
+ * Desktop GL only; under GLES the box is compiled out and the capture is
+ * read back unreduced (the recording then reduces it on the CPU). */
 
+/* GLSL 1.50 is the language of the 3.2 core context gl3_get_context asks
+ * for when the core does not ask for more — the floor of this driver. A
+ * core that asks for a newer context still accepts 1.50. */
+static const char *gl3_native_box_vs =
+   "#version 150\n"
+   "void main()\n"
+   "{\n"
+   "   /* One triangle covering the viewport. */\n"
+   "   vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n"
+   "   gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+   "}\n";
+
+static const char *gl3_native_box_fs =
+   "#version 150\n"
+   "uniform sampler2D src;\n"
+   "out vec4 frag;\n"
+   "void main()\n"
+   "{\n"
+   "   /* Target pixel (x, y) is the aligned source block (4x, 4y)-(4x+3, 4y+3),\n"
+   "    * in the source's own orientation. */\n"
+   "   ivec2 base = ivec2(gl_FragCoord.xy) * 4;\n"
+   "   uvec3 sum  = uvec3(0u);\n"
+   "   for (int y = 0; y < 4; y++)\n"
+   "      for (int x = 0; x < 4; x++)\n"
+   "         sum += uvec3(texelFetch(src, base + ivec2(x, y), 0).rgb * 255.0 + 0.5);\n"
+   "   /* Truncating integer division, as the CPU box does. */\n"
+   "   frag = vec4(vec3(sum / 16u) / 255.0, 1.0);\n"
+   "}\n";
+
+/* The predicate, the same everywhere: "gpu4" was read at init, the box has
+ * not been disabled in this session, and both dims are multiples of 4. */
+static bool gl3_native_box_applies(const gl3_t *gl,
+      unsigned width, unsigned height)
+{
+   return gl->native_box_requested
+       && !gl->native_box_disabled
+       && width  >= 4 && (width  % 4) == 0
+       && height >= 4 && (height % 4) == 0;
+}
+
+static void gl3_native_box_disable(gl3_t *gl, const char *reason)
+{
+   gl->native_box_disabled = true;
+   RARCH_ERR("[GLCore] Native-FBO GPU box disabled: %s -- frames are read back unreduced.\n",
+         reason);
+}
+
+/* A compile that failed without an info log comes back from
+ * gl3_compile_shader as a live shader object: check the status here. */
+static GLuint gl3_native_box_compile(GLenum stage, const char *source)
+{
+   GLint ok      = 0;
+   GLuint shader = gl3_compile_shader(stage, source);
+   if (!shader)
+      return 0;
+   glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+   if (!ok)
+   {
+      glDeleteShader(shader);
+      return 0;
+   }
+   return shader;
+}
+
+/* Lazy: built on the first frame that needs it, kept for the session. */
+static bool gl3_native_box_program(gl3_t *gl)
+{
+   GLint linked = 0;
+   GLuint vs, fs, prog;
+
+   if (gl->native_box_program != 0)
+      return true;
+
+   vs = gl3_native_box_compile(GL_VERTEX_SHADER,   gl3_native_box_vs);
+   fs = gl3_native_box_compile(GL_FRAGMENT_SHADER, gl3_native_box_fs);
+   if (!vs || !fs)
+   {
+      if (vs)
+         glDeleteShader(vs);
+      if (fs)
+         glDeleteShader(fs);
+      gl3_native_box_disable(gl, "the box shader did not compile");
+      return false;
+   }
+
+   prog = glCreateProgram();
+   glAttachShader(prog, vs);
+   glAttachShader(prog, fs);
+   glLinkProgram(prog);
+   glDetachShader(prog, vs);
+   glDetachShader(prog, fs);
+   glDeleteShader(vs);
+   glDeleteShader(fs);
+   glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+   if (!linked)
+   {
+      glDeleteProgram(prog);
+      gl3_native_box_disable(gl, "the box program did not link");
+      return false;
+   }
+
+   gl->native_box_program = prog;
+   gl->native_box_src_loc = glGetUniformLocation(prog, "src");
+   return true;
+}
+
+/* The reduced target, on the model of gl3_native_compose_target: RGBA8
+ * (the converter of the native ring expects ABGR8888), nearest filtering,
+ * clamped edges, dims derived from the native dims and never from the
+ * window. Lazy, rebuilt when the dims change; incomplete, it disables the
+ * box. */
+static bool gl3_native_box_target(gl3_t *gl,
+      unsigned width, unsigned height)
+{
+   GLint prev_draw_fbo, prev_read_fbo, prev_tex;
+   bool complete;
+   unsigned bw = width  / 4;
+   unsigned bh = height / 4;
+
+   if (   gl->native_box_fbo != 0
+       && gl->native_box_w   == bw
+       && gl->native_box_h   == bh)
+      return true;
+
+   /* (Re)creation binds a texture and a framebuffer: put them back. */
+   glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prev_draw_fbo);
+   glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prev_read_fbo);
+   glGetIntegerv(GL_TEXTURE_BINDING_2D,       &prev_tex);
+
+   if (gl->native_box_fbo != 0)
+      glDeleteFramebuffers(1, &gl->native_box_fbo);
+   if (gl->native_box_tex != 0)
+      glDeleteTextures(1, &gl->native_box_tex);
+   gl->native_box_fbo = 0;
+   gl->native_box_tex = 0;
+   gl->native_box_w   = 0;
+   gl->native_box_h   = 0;
+
+   glGenTextures(1, &gl->native_box_tex);
+   glBindTexture(GL_TEXTURE_2D, gl->native_box_tex);
+   glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, bw, bh);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,     GL_CLAMP_TO_EDGE);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,     GL_CLAMP_TO_EDGE);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+   glBindTexture(GL_TEXTURE_2D, (GLuint)prev_tex);
+
+   glGenFramebuffers(1, &gl->native_box_fbo);
+   glBindFramebuffer(GL_FRAMEBUFFER, gl->native_box_fbo);
+   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+         GL_TEXTURE_2D, gl->native_box_tex, 0);
+   complete = glCheckFramebufferStatus(GL_FRAMEBUFFER)
+      == GL_FRAMEBUFFER_COMPLETE;
+   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)prev_draw_fbo);
+   glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prev_read_fbo);
+
+   if (!complete)
+   {
+      char reason[64];
+      glDeleteFramebuffers(1, &gl->native_box_fbo);
+      glDeleteTextures(1, &gl->native_box_tex);
+      gl->native_box_fbo = 0;
+      gl->native_box_tex = 0;
+      snprintf(reason, sizeof(reason), "the %ux%u target is incomplete",
+            bw, bh);
+      gl3_native_box_disable(gl, reason);
+      return false;
+   }
+
+   gl->native_box_w = bw;
+   gl->native_box_h = bh;
+   RARCH_LOG("[GLCore] Native-FBO GPU box target (re)sized to %ux%u (from %ux%u).\n",
+         bw, bh, width, height);
+   return true;
+}
+
+/* One box pass: the (0,0)-(width,height) region of src_tex averaged into the
+ * reduced target. Every piece of GL state it touches is put back as it was:
+ * the window path draws right after. */
+static void gl3_native_box_pass(gl3_t *gl, GLuint src_tex)
+{
+   GLint prev_vp[4];
+   GLint prev_prog, prev_draw_fbo, prev_read_fbo;
+   GLint prev_active, prev_tex, prev_vao;
+   GLboolean prev_blend   = glIsEnabled(GL_BLEND);
+   GLboolean prev_depth   = glIsEnabled(GL_DEPTH_TEST);
+   GLboolean prev_scissor = glIsEnabled(GL_SCISSOR_TEST);
+   GLboolean prev_cull    = glIsEnabled(GL_CULL_FACE);
+
+   glGetIntegerv(GL_VIEWPORT,                 prev_vp);
+   glGetIntegerv(GL_CURRENT_PROGRAM,          &prev_prog);
+   glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prev_draw_fbo);
+   glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prev_read_fbo);
+   glGetIntegerv(GL_ACTIVE_TEXTURE,           &prev_active);
+   glGetIntegerv(GL_VERTEX_ARRAY_BINDING,     &prev_vao);
+   glActiveTexture(GL_TEXTURE0);
+   glGetIntegerv(GL_TEXTURE_BINDING_2D,       &prev_tex);
+
+   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gl->native_box_fbo);
+   glViewport(0, 0, (GLsizei)gl->native_box_w, (GLsizei)gl->native_box_h);
+   glDisable(GL_BLEND);
+   glDisable(GL_DEPTH_TEST);
+   glDisable(GL_SCISSOR_TEST);
+   glDisable(GL_CULL_FACE);
+   glUseProgram(gl->native_box_program);
+   if (gl->native_box_src_loc >= 0)
+      glUniform1i(gl->native_box_src_loc, 0);
+   glBindTexture(GL_TEXTURE_2D, src_tex);
+   glBindVertexArray(gl->vao);
+   glDrawArrays(GL_TRIANGLES, 0, 3);
+
+   glBindVertexArray((GLuint)prev_vao);
+   glBindTexture(GL_TEXTURE_2D, (GLuint)prev_tex);
+   glActiveTexture((GLenum)prev_active);
+   glUseProgram((GLuint)prev_prog);
+   if (prev_cull)
+      glEnable(GL_CULL_FACE);
+   if (prev_scissor)
+      glEnable(GL_SCISSOR_TEST);
+   if (prev_depth)
+      glEnable(GL_DEPTH_TEST);
+   if (prev_blend)
+      glEnable(GL_BLEND);
+   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)prev_draw_fbo);
+   glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prev_read_fbo);
+   glViewport(prev_vp[0], prev_vp[1],
+         (GLsizei)prev_vp[2], (GLsizei)prev_vp[3]);
+}
+
+/* Reduce the (0,0)-(width,height) region of src_tex into the reduced target.
+ * false = the box is not usable (now disabled for the session): the caller
+ * reads the source back unreduced. */
+static bool gl3_native_box_reduce(gl3_t *gl, GLuint src_tex,
+      unsigned width, unsigned height)
+{
+   if (!gl3_native_box_program(gl))
+      return false;
+   if (!gl3_native_box_target(gl, width, height))
+      return false;
+   gl3_native_box_pass(gl, src_tex);
+   return true;
+}
+#endif /* !HAVE_OPENGLES */
+
+/* crt-bridge: issue one async readback of the (0,0)-(width,height) region of
+ * src_fbo into the native ring. */
+static void gl3_pbo_async_readback_native(gl3_t *gl, GLuint src_fbo,
+      unsigned width, unsigned height)
+{
    if (!width || !height)
       return;
 
@@ -1652,9 +1936,9 @@ static void gl3_pbo_async_readback_native(gl3_t *gl, GLuint src_fbo)
       gl->pbo_native_index = 0;
    gl->pbo_native_valid[gl->pbo_native_index] = true;
 
-   /* Read the native (0,0)-(w,h) region of src_fbo — the core's HW FBO when
-    * the menu is closed, our compositing target when it is open. Never the
-    * window back buffer. */
+   /* Read the (0,0)-(w,h) region of src_fbo — the core's HW FBO when the
+    * menu is closed, our compositing target when it is open, or the reduced
+    * box target under gpu4. Never the window back buffer. */
    glBindFramebuffer(GL_READ_FRAMEBUFFER, src_fbo);
    glReadPixels(0, 0, (GLsizei)width, (GLsizei)height,
          GL_RGBA, GL_UNSIGNED_BYTE, NULL);
@@ -3094,6 +3378,11 @@ static void *gl3_init(const video_info_t *video,
 
    gl->ctx_driver = ctx_driver;
    gl->video_info = *video;
+#ifndef HAVE_OPENGLES
+   /* crt-bridge: the 4x4 reduction is asked of this driver once, here. */
+   gl->native_box_requested = groovy_downsample_on_gpu(
+         getenv("GROOVY_DOWNSAMPLE")) != 0;
+#endif
 
    RARCH_LOG("[GLCore] Found GL context: \"%s\".\n", ctx_driver->ident);
 
@@ -3952,6 +4241,20 @@ refilling:
    return false;
 }
 
+/* crt-bridge: the factor by which gl3_read_native will have averaged the
+ * capture of a frame of these native dims — 4 when the GPU box serves it
+ * (the predicate of gl3_native_box_applies, nothing else), 1 otherwise. */
+static unsigned gl3_native_capture_divisor(void *data,
+      unsigned width, unsigned height)
+{
+#ifndef HAVE_OPENGLES
+   gl3_t *gl = (gl3_t*)data;
+   if (gl && gl3_native_box_applies(gl, width, height))
+      return 4;
+#endif
+   return 1;
+}
+
 static void gl3_update_cpu_texture(gl3_t *gl,
       struct gl3_streamed_texture *streamed,
       const void *frame, unsigned width, unsigned height, unsigned pitch)
@@ -4184,11 +4487,26 @@ static void gl3_native_capture_step(gl3_t *gl)
       glViewport(prev_vp[0], prev_vp[1],
             (GLsizei)prev_vp[2], (GLsizei)prev_vp[3]);
 
-      gl3_pbo_async_readback_native(gl, gl->native_compose_fbo);
+      gl3_pbo_async_readback_native(gl, gl->native_compose_fbo,
+            width, height);
+      return;
+   }
+#else
+   unsigned width  = gl->native_capture_width;
+   unsigned height = gl->native_capture_height;
+#endif
+#ifndef HAVE_OPENGLES
+   /* gpu4: the GPU averages the core's surface into the reduced target and
+    * only that is read back. */
+   if (   gl3_native_box_applies(gl, width, height)
+       && gl3_native_box_reduce(gl, gl->hw_render_texture, width, height))
+   {
+      gl3_pbo_async_readback_native(gl, gl->native_box_fbo,
+            gl->native_box_w, gl->native_box_h);
       return;
    }
 #endif
-   gl3_pbo_async_readback_native(gl, gl->hw_render_fbo);
+   gl3_pbo_async_readback_native(gl, gl->hw_render_fbo, width, height);
 }
 
 static void gl3_update_input_size(gl3_t *gl, unsigned width, unsigned height)
@@ -5343,4 +5661,5 @@ video_driver_t video_gl3 = {
    gl3_gfx_widgets_enabled,
 #endif
    gl3_read_native, /* crt-bridge native-FBO capture */
+   gl3_native_capture_divisor, /* crt-bridge: 4 when the GPU box reduced it */
 };
