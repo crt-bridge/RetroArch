@@ -3063,9 +3063,9 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         static unsigned s_pre_warn_w = 0u, s_pre_warn_h = 0u;
         st->downsample_prereduced_mismatch++;
         if (s_pre_warn_w != cap_w || s_pre_warn_h != cap_h) {
-            RARCH_WARN("[groovy] downsample_prereduced_mismatch: %ux%u reduced by "
-                       "%u by the video driver, not expected -- frame refused\n",
-                       cap_w, cap_h, vid->prereduced);
+            RARCH_WARN(
+                "[groovy] downsample_prereduced_mismatch: %ux%u reduced by %u by the video driver, not expected -- frame refused\n",
+                cap_w, cap_h, vid->prereduced);
             s_pre_warn_w = cap_w;
             s_pre_warn_h = cap_h;
         }
@@ -3093,8 +3093,9 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
              * the cost is the one "gpu4" exists to avoid. */
             static unsigned s_fb_warn_w = 0u, s_fb_warn_h = 0u;
             if (s_fb_warn_w != cap_w || s_fb_warn_h != cap_h) {
-                RARCH_WARN("[groovy] downsample: gpu4 frame %ux%u arrived "
-                           "unreduced -- CPU box used\n", cap_w, cap_h);
+                RARCH_WARN(
+                    "[groovy] downsample: gpu4 frame %ux%u arrived unreduced -- CPU box used\n",
+                    cap_w, cap_h);
                 s_fb_warn_w = cap_w;
                 s_fb_warn_h = cap_h;
             }
@@ -4182,9 +4183,9 @@ static bool groovy_finalize(void *data)
                   (unsigned long long)st->downsample_dims_mismatch,
                   st->downsample_n);
     if (st->downsample_prereduced_mismatch > 0u)
-        RARCH_LOG("[groovy] downsample: %llu frames refused (pre-reduced by "
-                  "the video driver, not expected)\n",
-                  (unsigned long long)st->downsample_prereduced_mismatch);
+        RARCH_LOG(
+            "[groovy] downsample: %llu frames refused (pre-reduced by the video driver, not expected)\n",
+            (unsigned long long)st->downsample_prereduced_mismatch);
 
     /* Regime session summary -- ALWAYS emitted,
      * unlike the downsample report above: a session with zero switches is
