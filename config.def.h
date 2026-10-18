@@ -1056,6 +1056,11 @@
  * record/drivers/groovy_pad.h. */
 #define DEFAULT_GROOVY_PAD false
 
+/* Off by default as well: a 15 kHz-only tube cannot show a 31 kHz mode, and
+ * nothing on the wire tells the emitter what the receiver's tube takes. See
+ * record/drivers/groovy_khz31.h. */
+#define DEFAULT_GROOVY_31KHZ false
+
 /* 1 == GROOVY_AUDIO_RECEIVER (record/drivers/groovy_audio.h). The integer is
  * written here rather than the enum: config.def.h must not depend on any
  * driver header. A test refuses to let the two diverge

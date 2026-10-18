@@ -1814,6 +1814,9 @@ static struct config_bool_setting *populate_settings_bool(
    /* Padded session towards the MASTER, off by default (a MiSTer master
     * would break) -- see record/drivers/groovy_pad.h. */
    SETTING_BOOL("groovy_pad",                    &settings->bools.groovy_pad, true, DEFAULT_GROOVY_PAD, false);
+   /* The master receiver takes 31 kHz, off by default (a 15 kHz-only tube
+    * could not show it) -- see record/drivers/groovy_khz31.h. */
+   SETTING_BOOL("groovy_31khz",                  &settings->bools.groovy_31khz, true, DEFAULT_GROOVY_31KHZ, false);
    /* Four "Additional Follower N" switches, default off -- all off means no
     * follower, no string manipulation needed (replaces, IN THE MENU, the
     * groovy_followers text field below, which stays available). */

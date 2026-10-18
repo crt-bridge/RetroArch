@@ -719,6 +719,9 @@ typedef struct settings
        * groovy_new's precedence block). A follower's own padding lives in
        * its GROOVY_FOLLOWERS pad= key, not here. */
       bool groovy_pad;
+      /* The MASTER receiver's tube takes 31 kHz (0 or 1, resolved once in
+       * groovy_new's precedence block). Off by default. */
+      bool groovy_31khz;
       /* Four "Additional Follower N" switches, each with its address
        * (arrays above). Replace, IN THE MENU, the groovy_followers text
        * field, which stays the expert path (retroarch.cfg only). All off

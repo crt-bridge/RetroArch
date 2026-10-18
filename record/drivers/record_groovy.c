@@ -144,6 +144,11 @@ static inline void groovy_pacing_log_mute(const char *ev) { (void)ev; }
  * pad= key (groovy_followers.h), unrelated to this header. */
 #include "groovy_pad.h"
 
+/* "The receiver takes 31 kHz" setting: reads GROOVY_31KHZ, handed to the
+ * regime rule through st->mode_state.khz31 (groovy_mode.h). Header-only,
+ * same pattern as groovy_pad.h above. */
+#include "groovy_khz31.h"
+
 /* Per-session send MTU: reads GROOVY_MTU, handed to libgm via
  * gm_set_mtu. Header-only, same pattern as groovy_compression.h. */
 #include "groovy_mtu.h"
@@ -1312,6 +1317,31 @@ static void *groovy_new(const struct record_params *params)
             st->pad_master = (cfg && cfg->bools.groovy_pad) ? 1 : 0;
         }
 
+        /* 31 kHz (master only): the regime rule reads this ONE value for
+         * the whole session, through st->mode_state.khz31, set here and
+         * nowhere else -- before the first announce (st is zeroed, nothing
+         * has been announced yet). Off unless explicitly turned on: a
+         * 15 kHz-only tube cannot show a 31 kHz mode. */
+        {
+            int k;
+
+            env = getenv("GROOVY_31KHZ");
+            if (groovy_precedence_env_wins(env)) {
+                k = groovy_khz31_parse(env);
+                if (k < 0) {
+                    RARCH_WARN("[groovy] GROOVY_31KHZ=\"%s\" not understood "
+                               "(expected off or on): 480p stays off\n", env);
+                    k = 0;
+                }
+                groovy_precedence_msg(msg, sizeof msg, "groovy_31khz",
+                                      groovy_khz31_name(k), "GROOVY_31KHZ");
+                groovy_log_forced(msg);
+            } else {
+                k = (cfg && cfg->bools.groovy_31khz) ? 1 : 0;
+            }
+            st->mode_state.khz31 = (k != 0);
+        }
+
         /* son */
         env = getenv("GROOVY_AUDIO");
         if (groovy_precedence_env_wins(env)) {
@@ -1689,6 +1719,9 @@ static void *groovy_new(const struct record_params *params)
      * BEFORE gm_send_init (libgm/include/gm.h contract). */
     (void)gm_set_padding(st->gm, st->pad_master);
     RARCH_LOG("[groovy] pad: master=%s\n", groovy_pad_name(st->pad_master));
+    RARCH_LOG("[groovy-mode] 31khz=%s (on: an image taller than 280 lines "
+              "is announced as progressive 480p; off: interlaced 480i)\n",
+              groovy_khz31_name(st->mode_state.khz31));
     if (st->pad_master) {
         /* Same discipline as the follower warning further below: the
          * protocol has no way to detect what is actually at the other end
