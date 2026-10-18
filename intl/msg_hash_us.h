@@ -5319,6 +5319,14 @@ MSG_HASH(
    "On only towards a crt-bridge client or a crt-bridge receiver, never towards a MiSTer. Pads small packets so that a Wi-Fi link stops dropping the sound. Applies when recording starts."
    )
 MSG_HASH(
+   MENU_ENUM_LABEL_VALUE_GROOVY_31KHZ,
+   "Receiver 31 kHz"
+   )
+MSG_HASH(
+   MENU_ENUM_SUBLABEL_GROOVY_31KHZ,
+   "On only if the master receiver's tube takes 31 kHz: an image taller than 280 lines is then sent as progressive 480p instead of interlaced 480i. Off by default. Overridden by the GROOVY_31KHZ environment variable. Applies when recording starts."
+   )
+MSG_HASH(
    MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWERS,
    "Groovy Followers"
    )

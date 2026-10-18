@@ -17151,6 +17151,25 @@ static bool setting_append_list(
                   general_read_handler,
                   SD_FLAG_NONE
                   );
+            /* The master receiver's tube takes 31 kHz: an image taller
+             * than 280 lines goes out as progressive 480p. Off by default
+             * -- a 15 kHz-only tube cannot show it (record_groovy.c,
+             * groovy_khz31.h). */
+            CONFIG_BOOL(
+                  list, list_info,
+                  &settings->bools.groovy_31khz,
+                  MENU_ENUM_LABEL_GROOVY_31KHZ,
+                  MENU_ENUM_LABEL_VALUE_GROOVY_31KHZ,
+                  DEFAULT_GROOVY_31KHZ,
+                  MENU_ENUM_LABEL_VALUE_OFF,
+                  MENU_ENUM_LABEL_VALUE_ON,
+                  &group_info,
+                  &subgroup_info,
+                  parent_group,
+                  general_write_handler,
+                  general_read_handler,
+                  SD_FLAG_NONE
+                  );
             /* groovy_followers (the retroarch.cfg key itself) NO LONGER HAS
              * A MENU WIDGET. The single text field could not be cleared
              * from the menu (menu_input_st_string_cb refuses an empty
