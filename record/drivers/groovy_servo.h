@@ -47,6 +47,8 @@
 #include <string.h>
 #include <math.h>
 
+#include "groovy_mode.h"   /* enum groovy_mode: the cadence is indexed by regime */
+
 /* ---------------------------------------------------------------------------
  * Monotonic clock, injectable for tests -- same body as
  * groovy_pacing_mono_ns (groovy_pacing.h).
@@ -143,18 +145,24 @@ static inline const char *groovy_servo_mode_name(enum groovy_servo_mode m)
  * confirmed once; the rule above is applied a second time for the same
  * reason (zeta 0.7). */
 
-/* DELIBERATE, TRACKED COUPLING: the four constants below are COPIED from
- * the MODELINE_240P_SR_NTSC_* and MODELINE_480I_NTSC_* constants of
- * receiver/modelines.h, which carries the same derivation and points back
- * here. If one changes, change the other; the startup
- * [groovy-servo] settings: ... ff_240p= ff_480i= line shows the values in
- * effect in every session log. */
+/* DELIBERATE, TRACKED COUPLING: the constants below are COPIED from the
+ * MODELINE_240P_SR_NTSC_*, MODELINE_480I_NTSC_* and MODELINE_480P_*
+ * constants of receiver/modelines.h, which carries the same derivation and
+ * points back here. If one changes, change the other; a test reads both
+ * files and checks the clock, the totals and the three cadences. The
+ * startup [groovy-servo] settings: ... ff_240p= ff_480i= ... ff_480p= line
+ * shows the values in effect in every session log. */
 #define GROOVY_SERVO_PCLOCK_HZ       48480000.0  /* receiver/modelines.h, shared 240p/480i */
 #define GROOVY_SERVO_H_TOTAL              3088u  /* same, shared (mode-switch invariant) */
 #define GROOVY_SERVO_V_TOTAL_240P          262u
 #define GROOVY_SERVO_V_TOTAL_480I          525u  /* lines of the FULL frame (2 fields) */
 #define GROOVY_SERVO_CADENCE_240P_HZ  59.921687  /* 48480000/(3088*262) */
 #define GROOVY_SERVO_CADENCE_480I_HZ  59.807550  /* 48480000/(3088*525)*2 -- FIELDS */
+/* 480p has its own clock and width: it shares neither with 240p/480i. */
+#define GROOVY_SERVO_PCLOCK_480P_HZ   50350000.0  /* receiver/modelines.h, the 480p mode alone */
+#define GROOVY_SERVO_H_TOTAL_480P          1600u
+#define GROOVY_SERVO_V_TOTAL_480P           525u  /* progressive: all 525 lines in one frame */
+#define GROOVY_SERVO_CADENCE_480P_HZ  59.940476  /* 50350000/(1600*525) -- FRAMES */
 
 /* Loop constants. */
 #define GROOVY_SERVO_AUTHORITY_PPM       500.0   /* the SERVO only closes on the residual (~300 ppm worst case measured; ~50 ppm typical). 500, not 300: canceling a residual R needs servo = -R, and an authority equal to the expected residual saturates without converging. The step between modes is handled by the feed-forward. */
@@ -308,6 +316,38 @@ static inline double groovy_servo_cadence_hz(double pclock_hz, unsigned h_total,
     if (h_total == 0u || v_total == 0u)
         return 0.0;
     return pclock_hz / ((double)h_total * (double)v_total) * (interlace ? 2.0 : 1.0);
+}
+
+/* The reference cadence of a regime: its own clock, width and height, and
+ * its own interlace. Indexed by the regime, not by the interlace flag
+ * alone: with the flag only, 480p would inherit the 240p cadence and the
+ * feed-forward would be wrong by about 300 ppm. The constants are copied
+ * from the receiver's fixed modes (receiver/modelines.h); a test checks all
+ * three. An unknown value reads as 240p, the regime every session starts in. */
+static inline double groovy_servo_regime_cadence_hz(enum groovy_mode m)
+{
+    switch (m) {
+    case GROOVY_MODE_480I:
+        return groovy_servo_cadence_hz(GROOVY_SERVO_PCLOCK_HZ, GROOVY_SERVO_H_TOTAL,
+                                       GROOVY_SERVO_V_TOTAL_480I, 1);
+    case GROOVY_MODE_480P:
+        return groovy_servo_cadence_hz(GROOVY_SERVO_PCLOCK_480P_HZ, GROOVY_SERVO_H_TOTAL_480P,
+                                       GROOVY_SERVO_V_TOTAL_480P, 0);
+    default:
+        return groovy_servo_cadence_hz(GROOVY_SERVO_PCLOCK_HZ, GROOVY_SERVO_H_TOTAL,
+                                       GROOVY_SERVO_V_TOTAL_240P, 0);
+    }
+}
+
+/* The regime's name in the feed-forward log line. The 240p and 480i texts
+ * are the ones the log has always carried. */
+static inline const char *groovy_servo_regime_label(enum groovy_mode m)
+{
+    switch (m) {
+    case GROOVY_MODE_480I: return "480i";
+    case GROOVY_MODE_480P: return "480p";
+    default:               return "240p";
+    }
 }
 
 /* Feed-forward in ppm of core SPEED: how much faster (positive) or

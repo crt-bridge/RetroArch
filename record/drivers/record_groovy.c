@@ -960,10 +960,10 @@ static void groovy_announce_note(const groovy_state_t *st, struct groovy_receive
               issue, wsa, (unsigned)st->frame_id, (unsigned long long)t_ns);
 }
 
-/* Servo feed-forward. The 1905 ppm step between the receiver's two modes
- * is NOT servoed: it is APPLIED outright, on the step, at every
- * CMD_SWITCHRES. The servo then only works on the crystal's residual
- * drift (+/-500 ppm authority).
+/* Servo feed-forward. The 1905 ppm step between the receiver's 240p and
+ * 480i modes, and the 300 ppm one to 480p, are NOT servoed: they are
+ * APPLIED outright, on the step, at every CMD_SWITCHRES. The servo then
+ * only works on the crystal's residual drift (+/-500 ppm authority).
  *
  * WARNING: the source of the timings is NOT the modeline that goes out on
  * the wire. Outside legacy_modeset, the receiver ignores the wire
@@ -972,8 +972,9 @@ static void groovy_announce_note(const groovy_state_t *st, struct groovy_receive
  * receiver/modelines.h), and compute_modeline_from_dims sets pclock =
  * h_total * v_total * the CORE's fps -- dividing back out would recover
  * the core's cadence, not the tube's. The RECEIVER's constants are
- * therefore copied into groovy_servo.h, and only the interlace flag comes
- * from the wire: that one IS faithful to the regime.
+ * therefore copied into groovy_servo.h, indexed by the regime: the one
+ * the caller announced (groovy_mode_of on the announced cache), which is
+ * also what the modeline on the wire was computed from.
  *
  * Placed here (ahead of groovy_new, not just above groovy_switchres_all):
  * groovy_new calls this function right at session opening to apply the
@@ -983,15 +984,11 @@ static void groovy_announce_note(const groovy_state_t *st, struct groovy_receive
  * reason. The two CALL SITES stay exactly as designed (in
  * groovy_switchres_all and at opening); only the DEFINITION's location
  * changes. */
-static void groovy_servo_apply_ff(groovy_state_t *st, int interlace)
+static void groovy_servo_apply_ff(groovy_state_t *st, enum groovy_mode mode)
 {
     settings_t *cfg = config_get_ptr();
     const double vrr = cfg ? (double)cfg->floats.video_refresh_rate : 0.0;
-    const double cad = groovy_servo_cadence_hz(GROOVY_SERVO_PCLOCK_HZ,
-                                               GROOVY_SERVO_H_TOTAL,
-                                               interlace ? GROOVY_SERVO_V_TOTAL_480I
-                                                         : GROOVY_SERVO_V_TOTAL_240P,
-                                               interlace);
+    const double cad = groovy_servo_regime_cadence_hz(mode);
     const double ff  = groovy_servo_ff_ppm(cad, vrr);
     const double per = (cad > 0.0) ? (1.0e9 / cad) : 0.0;
     if (!(vrr > 0.0) && !st->servo_vrr_trace) {
@@ -1001,7 +998,7 @@ static void groovy_servo_apply_ff(groovy_state_t *st, int interlace)
     }
     RARCH_LOG("[groovy-servo] feed-forward: mode=%s cadence=%.6fHz vrr=%.6fHz "
               "ff=%+.1fppm period=%.5fms\n",
-              interlace ? "480i" : "240p", cad, vrr, ff, per * 1e-6);
+              groovy_servo_regime_label(mode), cad, vrr, ff, per * 1e-6);
     groovy_servo_set_feed_forward(&st->servo, ff, per);
 }
 
@@ -1504,16 +1501,16 @@ static void *groovy_new(const struct record_params *params)
         settings_t  *cfg = config_get_ptr();
         const double vrr = cfg ? (double)cfg->floats.video_refresh_rate : 0.0;
 
-        /* Both feed-forward cadences are copied from receiver/modelines.h;
-         * this startup line shows, in every session log, the values
-         * REALLY in effect -- like every GROOVY_* setting. trace=%s is
-         * APPENDED AT THE END: test_groovy_annonce_source.py's source
-         * gates read the first segments word for word, never an
-         * insertion in the middle. */
+        /* The three feed-forward cadences are copied from
+         * receiver/modelines.h; this startup line shows, in every session
+         * log, the values REALLY in effect -- like every GROOVY_* setting.
+         * trace=%s and ff_480p= are APPENDED AT THE END:
+         * test_groovy_annonce_source.py's source gates read the first
+         * segments word for word, never an insertion in the middle. */
         RARCH_LOG("[groovy-servo] settings: servo=%s audio_ratio=%s vrr=%.6fHz "
                   "ff_240p=%+.2fppm (%.6fHz) ff_480i=%+.2fppm (%.6fHz) "
                   "authority=%.0fppm slope=%.0fppm/s kp=%.0f ki=%.2f setpoint=%.2ftr "
-                  "trace=%s\n",
+                  "trace=%s ff_480p=%+.2fppm (%.6fHz)\n",
                   groovy_servo_mode_name(st->servo_mode),
                   st->audio_ratio_on ? "on" : "off",
                   vrr,
@@ -1522,7 +1519,8 @@ static void *groovy_new(const struct record_params *params)
                   GROOVY_SERVO_AUTHORITY_PPM, GROOVY_SERVO_SLOPE_MAX_PPM_S,
                   GROOVY_SERVO_KP_PPM_FRAME, GROOVY_SERVO_KI_PPM_FRAME,
                   GROOVY_SERVO_SETPOINT_FRAMES,
-                  st->servo_trace ? "on" : "off");
+                  st->servo_trace ? "on" : "off",
+                  groovy_servo_ff_ppm(GROOVY_SERVO_CADENCE_480P_HZ, vrr), GROOVY_SERVO_CADENCE_480P_HZ);
 
         /* This warning covers both ON and FF -- in 480i, in both modes,
          * the core slows down by ~1900 ppm and only the wire ratio
@@ -1956,7 +1954,7 @@ static void *groovy_new(const struct record_params *params)
      * groovy_mode_of(&st->av_cache) reads 240p (av_cache.valid == false)
      * until the first frame's groovy_mode_on_frame call announces (reason
      * FIRST) -- matches the daemon's own boot default. */
-    groovy_servo_apply_ff(st, 0);   /* initial feed-forward, 240p */
+    groovy_servo_apply_ff(st, GROOVY_MODE_240P_SUPER_RES);   /* initial feed-forward, 240p */
 
     /* Diagnostic: log all record_params dims to understand the FB pipeline.
      * out_width/out_height = desired output resolution, fb_width/fb_height =
@@ -2652,7 +2650,7 @@ static bool groovy_switchres_all(groovy_state_t *st, const gm_modeline *m)
      * call this setter directly -- adding it there would be a strict no-op
      * (see groovy_servo.h), with no benefit, and would multiply the sites
      * to re-check. */
-    groovy_servo_apply_ff(st, (int)m->interlace);
+    groovy_servo_apply_ff(st, groovy_mode_of(&st->av_cache));
 
     for (unsigned i = 0u; i < st->n_rx; i++) {
         if (st->rx[i].switchres_deferred) {
