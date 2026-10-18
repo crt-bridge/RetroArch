@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* groovy_mode.h — the single 240p/480i regime decision, shared by both
+/* groovy_mode.h — the single 240p/480i/480p regime decision, shared by both
  * announce points (groovy_push_av_info, groovy_push_video) and by the
  * unit-test bridge (libgm/test/groovy_test_bridge.c).
  *
@@ -17,6 +17,15 @@
  * at the receiver).
  * Core-doubled 240p (256x448, 320x448) stays 480i for now.
  * Detecting the doubling is left for later work.
+ *
+ * Session policy (khz31). When the user declares that the receiver takes a
+ * 31 kHz signal, an image of more than 280 lines is announced as 480p
+ * instead of 480i, whatever the core: libretro carries no interlace flag, so
+ * there is nothing to tell a truly interlaced image from a progressive one,
+ * and the doubt is settled in favour of progressive. With the policy off
+ * the rule is the one above, unchanged. The policy is read by
+ * groovy_mode_on_frame alone; the regime it picks is written into the
+ * announced cache, which is where everything else reads it from.
  */
 
 #ifndef GROOVY_MODE_H
@@ -25,7 +34,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-enum groovy_mode { GROOVY_MODE_240P_SUPER_RES = 0, GROOVY_MODE_480I = 1 };   /* moved from record_groovy.h */
+enum groovy_mode { GROOVY_MODE_240P_SUPER_RES = 0, GROOVY_MODE_480I = 1, GROOVY_MODE_480P = 2 };   /* moved from record_groovy.h */
 
 #define GROOVY_MODE_480I_ABOVE_LINES   280u                 /* 480i threshold */
 #define GROOVY_DIM_HYSTERESIS_FRAMES   15u                  /* moved from record_groovy.c */
@@ -38,6 +47,7 @@ typedef struct groovy_av_cache {                           /* moved from record_
     unsigned height;
     double   fps;
     bool     valid;
+    enum groovy_mode mode;      /* the announced regime; written by groovy_mode_announce alone */
 } groovy_av_cache_t;
 
 enum groovy_mode_action {
@@ -69,6 +79,7 @@ struct groovy_mode_state {
     uint32_t freezes;
     uint64_t frozen_drops;   /* frames refused: contrary to the frozen regime */
     uint64_t dims_drops;     /* frames refused: size != announced, same regime */
+    bool     khz31;          /* session policy: the receiver takes 31 kHz (zero = off) */
 };
 /* A zeroed struct (calloc) is the valid initial state. */
 
@@ -78,19 +89,35 @@ static inline enum groovy_mode groovy_mode_classify(unsigned h)
     return (h > GROOVY_MODE_480I_ABOVE_LINES) ? GROOVY_MODE_480I : GROOVY_MODE_240P_SUPER_RES;
 }
 
+/* groovy_mode_classify_policy — the regime rule under the session policy.
+ * Policy on and more than GROOVY_MODE_480I_ABOVE_LINES lines -> 480p, whatever
+ * the core; anything else is groovy_mode_classify, unchanged. */
+static inline enum groovy_mode groovy_mode_classify_policy(unsigned h, bool khz31)
+{
+    if (khz31 && h > GROOVY_MODE_480I_ABOVE_LINES)
+        return GROOVY_MODE_480P;
+    return groovy_mode_classify(h);
+}
+
 /* groovy_mode_of — the regime of the last announced cache is the
- * ONLY source the field-splitter and the modeline's interlace flag derive
- * from. An invalid cache (nothing announced yet) reads as 240p: the first
- * announce for any session comes from groovy_mode_on_frame's FIRST reason,
- * not from this helper. */
+ * ONLY source the field-splitter, the modeline and the servo derive from.
+ * It is the regime that was announced (the cache field), never a
+ * reclassification of the height: the policy may have changed since. An
+ * invalid cache (nothing announced yet) reads as 240p: the first announce
+ * for any session comes from groovy_mode_on_frame's FIRST reason, not from
+ * this helper. */
 static inline enum groovy_mode groovy_mode_of(const groovy_av_cache_t *c)
 {
-    return c->valid ? groovy_mode_classify(c->height) : GROOVY_MODE_240P_SUPER_RES;
+    return c->valid ? c->mode : GROOVY_MODE_240P_SUPER_RES;
 }
 
 static inline const char *groovy_mode_name(enum groovy_mode m)
 {
-    return (m == GROOVY_MODE_480I) ? "480i" : "240p_super_res";
+    switch (m) {
+    case GROOVY_MODE_480I: return "480i";
+    case GROOVY_MODE_480P: return "480p";
+    default:               return "240p_super_res";
+    }
 }
 
 /* groovy_mode_on_declare — the core's declaration is only a
@@ -163,16 +190,18 @@ static inline enum groovy_mode_action groovy_mode_guard(struct groovy_mode_state
     return GROOVY_MODE_ANNOUNCE;
 }
 
-/* groovy_mode_announce — internal. The only place that writes the cache.
- * Consumes the declaration hint exactly when this frame's size matches it:
- * a hint for a DIFFERENT size stays armed for a later frame. */
+/* groovy_mode_announce — internal. The only place that writes the cache,
+ * the announced regime included. Consumes the declaration hint exactly when
+ * this frame's size matches it: a hint for a DIFFERENT size stays armed for
+ * a later frame. */
 static inline enum groovy_mode_action groovy_mode_announce(struct groovy_mode_state *ms,
         groovy_av_cache_t *cache, unsigned w, unsigned h, double fps,
-        enum groovy_mode_reason reason)
+        enum groovy_mode mode, enum groovy_mode_reason reason)
 {
     cache->width      = w;
     cache->height     = h;
     cache->fps        = fps;
+    cache->mode       = mode;
     cache->valid      = true;
     ms->last_reason   = reason;
     if (ms->have_hint && w == ms->hint_w && h == ms->hint_h)
@@ -199,7 +228,7 @@ static inline enum groovy_mode_action groovy_mode_announce(struct groovy_mode_st
 static inline enum groovy_mode_action groovy_mode_on_frame(struct groovy_mode_state *ms,
         groovy_av_cache_t *cache, unsigned w, unsigned h, double fps, uint64_t now_ns)
 {
-    enum groovy_mode wanted = groovy_mode_classify(h);
+    enum groovy_mode wanted = groovy_mode_classify_policy(h, ms->khz31);
 
     groovy_mode_note_request(ms, wanted, now_ns);
 
@@ -213,20 +242,20 @@ static inline enum groovy_mode_action groovy_mode_on_frame(struct groovy_mode_st
     }
 
     if (!cache->valid)
-        return groovy_mode_announce(ms, cache, w, h, fps, GROOVY_MODE_REASON_FIRST);
+        return groovy_mode_announce(ms, cache, w, h, fps, wanted, GROOVY_MODE_REASON_FIRST);
 
     if (wanted != groovy_mode_of(cache)) {
         enum groovy_mode_action a = groovy_mode_guard(ms, groovy_mode_of(cache), wanted, now_ns);
         if (a == GROOVY_MODE_DROP_FROZEN)
             return a;
-        return groovy_mode_announce(ms, cache, w, h, fps, GROOVY_MODE_REASON_SWITCH);
+        return groovy_mode_announce(ms, cache, w, h, fps, wanted, GROOVY_MODE_REASON_SWITCH);
     }
 
     if (w != cache->width || h != cache->height) {
         if (ms->have_hint && w == ms->hint_w && h == ms->hint_h)
-            return groovy_mode_announce(ms, cache, w, h, fps, GROOVY_MODE_REASON_DECLARED);
+            return groovy_mode_announce(ms, cache, w, h, fps, wanted, GROOVY_MODE_REASON_DECLARED);
         if (ms->pending_streak >= GROOVY_DIM_HYSTERESIS_FRAMES)
-            return groovy_mode_announce(ms, cache, w, h, fps, GROOVY_MODE_REASON_SETTLED);
+            return groovy_mode_announce(ms, cache, w, h, fps, wanted, GROOVY_MODE_REASON_SETTLED);
     }
 
     return GROOVY_MODE_KEEP;

@@ -2519,11 +2519,12 @@ static void groovy_reannounce_emit(groovy_state_t *st, struct groovy_receiver *r
         return;
     }
 
-    /* interlace is no longer set here: compute_modeline_
-     * from_dims derives it from the SAME groovy_mode_classify(h) that
-     * groovy_mode_of(&st->av_cache) reads -- a re-announce always reapplies
-     * the regime already in the cache, never a separately-tracked one. */
-    compute_modeline_from_dims(st->av_cache.width, st->av_cache.height, st->av_cache.fps, &mode);
+    /* interlace is no longer set here: compute_modeline_from_dims derives
+     * it from the regime passed in, groovy_mode_of(&st->av_cache) -- a
+     * re-announce always reapplies the regime already in the cache, never a
+     * separately-tracked one. */
+    compute_modeline_from_dims(st->av_cache.width, st->av_cache.height, st->av_cache.fps,
+                               groovy_mode_of(&st->av_cache), &mode);
     {
         const int      rc_sw  = gm_send_switchres(rx->gm, &mode);
         const int      wsa_sw = gm_last_announce_error(rx->gm);
@@ -2606,7 +2607,8 @@ static void groovy_reannounce_flush_deferred(groovy_state_t *st, struct groovy_r
     }
     /* interlace: same rationale as groovy_reannounce_emit above -- derived
      * inside compute_modeline_from_dims, never set separately here. */
-    compute_modeline_from_dims(st->av_cache.width, st->av_cache.height, st->av_cache.fps, &mode);
+    compute_modeline_from_dims(st->av_cache.width, st->av_cache.height, st->av_cache.fps,
+                               groovy_mode_of(&st->av_cache), &mode);
     {
         const int      rc_sw  = gm_send_switchres(rx->gm, &mode);
         const int      wsa_sw = gm_last_announce_error(rx->gm);
@@ -2719,7 +2721,7 @@ static void groovy_switchres_repeat_send(groovy_state_t *st, struct groovy_recei
 /* The three ways to emit a frame, unified so the receiver table can be
  * looped over without duplicating the split-by-shape logic. */
 enum groovy_emit_kind {
-    GROOVY_EMIT_FULL   = 0,   /* CMD_BLIT_VSYNC (0x06), full frame -- 240p */
+    GROOVY_EMIT_FULL   = 0,   /* CMD_BLIT_VSYNC (0x06), full frame -- 240p and 480p */
     GROOVY_EMIT_FIELDS = 1,   /* two CMD_BLIT_FIELD_VSYNC (0x07) -- 480i, fld0+fld1 path */
     GROOVY_EMIT_HALF   = 2    /* one CMD_BLIT_VSYNC (0x06), half height -- 480i, "one field per frame" */
 };
@@ -3106,7 +3108,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
 
     /* Regime decision and announce. groovy_mode_on_frame (groovy_mode.h)
      * is the ONLY place that may decide to announce: it classifies this
-     * frame (height alone), compares it against the last announced cache
+     * frame (its height, under the session policy), compares it against the last announced cache
      * and the core's declared-size hint, and against the oscillation
      * guard. was_mode/was_frozen are read BEFORE the call so the freeze/
      * resume transition traces below can name what changed. The announce
@@ -3132,7 +3134,8 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
 
     if (mode_action == GROOVY_MODE_ANNOUNCE) {
         gm_modeline mode;
-        compute_modeline_from_dims(st->av_cache.width, st->av_cache.height, st->av_cache.fps, &mode);
+        compute_modeline_from_dims(st->av_cache.width, st->av_cache.height, st->av_cache.fps,
+                                   groovy_mode_of(&st->av_cache), &mode);
         (void)groovy_switchres_all(st, &mode);
         switch (st->mode_state.last_reason) {
         case GROOVY_MODE_REASON_FIRST:
@@ -3679,6 +3682,8 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         groovy_inject_parity_observe(&st->inject_parity,
                                      is_480i_fpf ? 1 : 0, st->frame_id);
 
+        /* The injected skip is a 240p fault: it stays tied to the 240p regime
+         * and does not fire on a 480p full frame. */
         if (skip_i >= 0 && split_mode == GROOVY_MODE_240P_SUPER_RES) {
             groovy_inject_note_fired(st, &st->inject_items[skip_i],
                                      st->frame_id, emit_t0);
@@ -3813,7 +3818,9 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         free(fld1);
         emit_ok = ok;
     } else {
-        /* GROOVY_MODE_240P_SUPER_RES — unchanged progressive path. */
+        /* GROOVY_MODE_240P_SUPER_RES and GROOVY_MODE_480P: progressive, the
+         * full frame in one CMD_BLIT_VSYNC. The announced modeline (240p or
+         * 480p) is the same for every receiver; the frame is not split. */
         emit_ok = groovy_fan_out(st, GROOVY_EMIT_FULL, vsync_target, 0u,
                                  frame, NULL, need);
         fan_out_done = true;

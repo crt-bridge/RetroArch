@@ -30,11 +30,12 @@
  *   v_total = round_even(v_active * 1.09)   ≈  9% vertical blanking
  *   pclock_mhz = (h_total * v_total * fps) / 1e6
  *
- * interlace (compute_modeline_from_dims only): posed HERE, by
- * the SAME groovy_mode_classify(h) that decides the regime -- never
- * left to the caller. A caller that still sets out->interlace afterwards is
- * a bug: the two decisions (regime, interlace) must never be able to
- * diverge again.
+ * interlace (compute_modeline_from_dims only): posed HERE, from the regime
+ * the caller passes in -- 1 for 480i, 0 for the two progressive regimes. The
+ * regime is the one groovy_mode_on_frame announced (groovy_mode_of on the
+ * announced cache): this function holds no copy of the height threshold. A
+ * caller that still sets out->interlace afterwards is a bug: the two
+ * decisions (regime, interlace) must never be able to diverge again.
  *
  * round_even: round to nearest EVEN integer (DRM modeline convention for
  * divisibility by 2 at each blanking boundary).
@@ -55,10 +56,10 @@
 #error "groovy_modeline.h must be included AFTER gm.h"
 #endif
 
-/* groovy_mode.h: the single 240p/480i regime decision.
- * compute_modeline_from_dims derives v_total AND interlace from the SAME
- * groovy_mode_classify(h) that the driver's frame-by-frame decision uses
- * -- no second copy of the height threshold. */
+/* groovy_mode.h: the single 240p/480i/480p regime decision.
+ * compute_modeline_from_dims derives v_total AND interlace from the regime
+ * its caller passes in (the announced one) -- no second copy of the height
+ * threshold. */
 #include "groovy_mode.h"
 
 /* retro_game_geometry and retro_system_av_info come from libretro.h in the
@@ -103,7 +104,8 @@ static inline unsigned groovy_round_even(double v)
     return u & ~1u;  /* force even */
 }
 
-/* compute_modeline_from_dims — derive a gm_modeline from explicit (w, h, fps).
+/* compute_modeline_from_dims — derive a gm_modeline from explicit (w, h, fps)
+ * and the regime `m` the caller announced.
  *
  * For use inside groovy_push_video (record_groovy.c) and the unit-test
  * bridge (groovy_test_bridge.c). Both must call this function — never
@@ -127,7 +129,8 @@ static inline unsigned groovy_round_even(double v)
  *
  * Thread safety: pure function. */
 static inline void compute_modeline_from_dims(unsigned w, unsigned h,
-                                               double fps, gm_modeline *out)
+                                               double fps, enum groovy_mode m,
+                                               gm_modeline *out)
 {
     memset(out, 0, sizeof(*out));
 
@@ -145,21 +148,24 @@ static inline void compute_modeline_from_dims(unsigned w, unsigned h,
      *   PAL  50Hz 31kHz: v_total = 625 (576p)
      * Result: hfreq = v_total * fps stays ~15.7 kHz or ~31.5 kHz regardless
      * of v_active — passes the JVC envelope and matches real arcade timings.
+     * 480i and 480p both scan the 31 kHz count (the 480i frame is 525 lines
+     * for its two fields); under 55 frames/s that is 625, which keeps the
+     * 480p line at 31.25 kHz instead of the 26.25 kHz a 525-line count would
+     * give at 50 Hz.
      *
-     * The 31kHz/15kHz split is no longer its own
-     * width-aware local boolean -- it is groovy_mode_classify(h), the
-     * SAME rule groovy_mode_on_frame uses to decide the regime. Width plays
-     * no part: a wide 240p image (640x240) still gets the 15kHz
-     * scanline count, matching what the receiver's super-res framebuffer
-     * (2560 wide, shared by both regimes) already expected. */
-    const enum groovy_mode m = groovy_mode_classify(h);
+     * The 31kHz/15kHz split is the regime `m` the caller passes in, the
+     * one groovy_mode_on_frame announced. Width plays no part: a wide 240p
+     * image (640x240) still gets the 15kHz scanline count, matching what
+     * the receiver's super-res framebuffer (2560 wide, shared by all
+     * regimes) already expected. */
     {
         bool is_50hz = (fps > 0.0 && fps < 55.0);
+        bool lines31 = (m == GROOVY_MODE_480I || m == GROOVY_MODE_480P);
         unsigned v_total;
         if (is_50hz) {
-            v_total = (m == GROOVY_MODE_480I) ? 625u : 312u;
+            v_total = lines31 ? 625u : 312u;
         } else {
-            v_total = (m == GROOVY_MODE_480I) ? 525u : 262u;
+            v_total = lines31 ? 525u : 262u;
         }
         /* Rule 1 fix: NOT force-even here. v_total is a
          * FIXED broadcast-standard scanline count (262/312/525/625), never
@@ -174,8 +180,8 @@ static inline void compute_modeline_from_dims(unsigned w, unsigned h,
     }
 
     /* h_total: keep arcade_15 horizontal blanking convention (~27% blanking).
-     * For hires h_active (e.g. 640), 1.27 gives h_total = 813 → hfreq =
-     * 525 * 60 ≈ 31.5 kHz. */
+     * For hires h_active (e.g. 640), 1.27 gives 812.8, rounded to the even
+     * h_total = 812 → hfreq = 525 * 59.94 ≈ 31.47 kHz. */
     out->h_total = (uint16_t)groovy_round_even((double)w * 1.27);
 
     /* Porches per blanking-split (Bug B fix). */
@@ -190,8 +196,8 @@ static inline void compute_modeline_from_dims(unsigned w, unsigned h,
 
     out->pclock_mhz = ((double)out->h_total * (double)out->v_total * fps) / 1.0e6;
 
-    /* interlace: posed HERE, by the same classification as v_total above --
-     * never left for a caller to set separately. */
+    /* interlace: posed HERE, from the same regime as v_total above -- only
+     * 480i is interlaced, never left for a caller to set separately. */
     out->interlace = (uint8_t)((m == GROOVY_MODE_480I) ? 1u : 0u);
 }
 
