@@ -679,7 +679,9 @@ static uint32_t   s_last_joy_frame  = 0u;
  * not (libgm fills its cache before the driver filters). 0 = no status
  * accepted in this session. */
 static uint32_t   s_groovy_master_ack_frame = 0u;
+#ifdef HAVE_GROOVY_BENCH
 static struct groovy_input_lat s_input_lat;
+#endif
 
 /* ---------------------------------------------------------------------------
  * groovy_input_set_clear -- clears the whole set of input channels and
@@ -800,7 +802,10 @@ static inline unsigned lat_hist_bucket(int64_t v)
 /* Cumulative-scan percentile read: min/p50/p95/max from a 64-bucket
  * histogram. No sort, no allocation — the entire point of the fixed-bucket
  * design (T-JUE-01 applies here too: this runs once per second, not per
- * frame, but stays allocation-free regardless). */
+ * frame, but stays allocation-free regardless). Only the bench latency line
+ * reads it, so it is built with HAVE_GROOVY_BENCH only; the histograms it
+ * reads are filled in every build. */
+#ifdef HAVE_GROOVY_BENCH
 static void lat_hist_percentiles(const uint16_t *hist, unsigned n,
                                   unsigned *out_min, unsigned *out_p50,
                                   unsigned *out_p95, unsigned *out_max)
@@ -829,6 +834,7 @@ static void lat_hist_percentiles(const uint16_t *hist, unsigned n,
         *out_max = b;   /* last non-empty bucket visited wins */
     }
 }
+#endif /* HAVE_GROOVY_BENCH */
 
 /* ---------------------------------------------------------------------------
  * Configuration.
@@ -1103,7 +1109,13 @@ static void groovy_log_send_path(gm_handle *gm, const char *who, unsigned mtu,
 /* Wall clock in milliseconds since the Unix epoch. The monotonic clock the
  * rest of the driver uses has no meaning outside this process; a wall time
  * written next to it lets the log of this machine be lined up with the log
- * of another one. Read once a second at most, plus once per fired fault. */
+ * of another one. Read once a second at most, plus once per fired fault.
+ *
+ * Everything from here to the end of the fault-injection functions is built
+ * only with HAVE_GROOVY_BENCH: the log lines that read the wall clock are
+ * bench lines too. Some of the functions share their names with the inert
+ * macros of groovy_bench.h. */
+#ifdef HAVE_GROOVY_BENCH
 static uint64_t groovy_wall_ms(void)
 {
 #ifdef _WIN32
@@ -1124,10 +1136,6 @@ static uint64_t groovy_wall_ms(void)
 #endif
 }
 
-/* The functions below share their names with the inert macros of
- * groovy_bench.h, so they exist only in a bench build. groovy_wall_ms above
- * stays: the log lines that are not bench-only also read it. */
-#ifdef HAVE_GROOVY_BENCH
 /* Nanoseconds since the session origin; 0 until the origin is set. */
 static uint64_t groovy_inject_elapsed_ns(const groovy_state_t *st,
         uint64_t now_ns)
@@ -2205,11 +2213,15 @@ int groovy_input_take_joy(gm_joy_inputs *out)
         s_groovy_input_mute_logged[i] = 0;   /* alive: the next transition will be traced */
 
         if (i == 0u && one.frame != s_last_joy_frame) {  /* k measurement, master only */
+#ifdef HAVE_GROOVY_BENCH
             /* The master's last ACCEPTED status, plus gm_last_ack_frame(h) --
-             * which reads the last status RECEIVED, spoofed ones included. */
+             * which reads the last status RECEIVED, spoofed ones included.
+             * The histogram is read by the bench [groovy-input-lat] line
+             * alone. */
             uint32_t ack = s_groovy_master_ack_frame;
             unsigned k   = (ack >= one.frame) ? (unsigned)(ack - one.frame) : 0u;
             groovy_input_lat_record(&s_input_lat, k);
+#endif
             s_last_joy_frame = one.frame;
         }
 
@@ -3044,7 +3056,8 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
     /* Diagnostic: log per-frame vid dims to verify whether vid->width/height
      * is the CURRENT frame size (libretro native, what we want) or the FB max
      * size (700x576). Logged once per ~2 seconds via simple counter to avoid
-     * spam. */
+     * spam. Bench build only: the counter serves this line alone. */
+#ifdef HAVE_GROOVY_BENCH
     {
         static unsigned diag_counter = 0u;
         if ((diag_counter++ % 120u) == 0u) {
@@ -3056,6 +3069,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
                       st->mode_state.pending_streak);
         }
     }
+#endif /* HAVE_GROOVY_BENCH */
 
     /* Phase 3.1 v3 fix (HIL run, "native resolution" goal): use the actual
      * per-frame vid dims as the wire size. PSX cores (Beetle PSX) change resolution mid-stream for menus
@@ -3273,7 +3287,9 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         /* [groovy-conv]: the input conversion alone, one line per 600
          * frames. Silent unless GROOVY_FRAMETIME=1 (read once), the same
          * switch as the main-loop [groovy-frametime] timing: when off, no
-         * clock is read here. */
+         * clock is read here. Bench build only: a release build converts
+         * and reads neither the variable nor the clock. */
+#ifdef HAVE_GROOVY_BENCH
         static int      conv_on = -1;
         static uint64_t conv_ns_total, conv_ns_max;
         static unsigned conv_samples;
@@ -3284,10 +3300,12 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         }
         if (conv_on)
             conv_t0 = groovy_pacing_mono_ns();
+#endif /* HAVE_GROOVY_BENCH */
         bgr24_to_rgb888(st->swap_buf, vid->data,
                         cap_w, cap_h,             /* dst dims (declare, 1:1) */
                         vid->width, vid->height,  /* src dims (RA FB) */
                         (unsigned)vid->pitch);
+#ifdef HAVE_GROOVY_BENCH
         if (conv_on) {
             uint64_t conv_ns = groovy_pacing_mono_ns() - conv_t0;
             conv_ns_total += conv_ns;
@@ -3302,6 +3320,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
             conv_ns_max   = 0u;
             conv_samples  = 0u;
         }
+#endif /* HAVE_GROOVY_BENCH */
     } else if (st->pix_fmt == FFEMU_PIX_ARGB8888) {
         xrgb8888_to_rgb888(st->swap_buf, vid->data,
                            cap_w, cap_h,
@@ -3335,7 +3354,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         st->downsample_ns_total += box_ns;
         if (box_ns > st->downsample_ns_max) st->downsample_ns_max = box_ns;
         if (++st->downsample_samples >= 600u) {
-            RARCH_LOG("[groovy-box] factor=%s %ux%u -> %ux%u n=%u "
+            GROOVY_BENCH_LOG("[groovy-box] factor=%s %ux%u -> %ux%u n=%u "
                       "average=%.1f us worst=%.1f us\n",
                       groovy_downsample_factor_name(cpu_factor),
                       cap_w, cap_h, send_w, send_h, st->downsample_samples,
@@ -3449,7 +3468,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
                 st->servo_log_ns = now_log_ns;
             else if (now_log_ns - st->servo_log_ns >= 1000000000ull)
             {
-                RARCH_LOG("[groovy-servo] state=%s freeze=%s "
+                GROOVY_BENCH_LOG("[groovy-servo] state=%s freeze=%s "
                           "ff=%+.1fppm servo=%+.1fppm term=%+.1fppm "
                           "latency=%.2fms error=%+.3ftr setpoint=%.2ftr "
                           "slope=%+.0fppm/s reanchors=%u toggles=%u "
@@ -3552,9 +3571,14 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         } else if (now_mono - st->lat_win_start_ns >= 1000000000ull) {
             /* One line PER RECEIVER, in rx[] order (master first), same
              * window for all -- printed even when n=0 (a declared follower
-             * that returned nothing says so, rather than staying silent). */
+             * that returned nothing says so, rather than staying silent).
+             *
+             * Only the printing is a bench matter: the counters and the
+             * window above are kept and reset in every build, so a release
+             * build has the same state as a bench one. */
             for (unsigned i = 0u; i < st->n_rx; i++) {
                 struct groovy_receiver *rx = &st->rx[i];
+#ifdef HAVE_GROOVY_BENCH
                 unsigned imin, ip50, ip95, imax;
                 unsigned nmin, np50, np95, nmax;
                 unsigned qmin, qp50, qp95, qmax;
@@ -3608,6 +3632,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
                           rx->rejects, rx->saturations, s_groovy_input_acc[i],
                           rx->announces_ok, rx->announces_failed,
                           lat_tail);
+#endif /* HAVE_GROOVY_BENCH */
 
                 memset(rx->lat.hist_inflight, 0, sizeof(rx->lat.hist_inflight));
                 memset(rx->lat.hist_net,      0, sizeof(rx->lat.hist_net));
@@ -3627,7 +3652,9 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
          * samples in the same log. Reuses the now_mono already read above
          * -- the same one-second window, not a second clock wakeup. Always
          * on, silent when nothing happened: any future regression is
-         * visible, same philosophy as the receiver side's depth_max. */
+         * visible, same philosophy as the receiver side's depth_max.
+         * Bench build only: the histogram feeds this line and nothing else. */
+#ifdef HAVE_GROOVY_BENCH
         if (groovy_input_lat_should_report(&s_input_lat, now_mono)) {
             unsigned kmin, kp50, kp95, kmax;
             groovy_input_lat_percentiles(&s_input_lat, &kmin, &kp50, &kp95, &kmax);
@@ -3635,6 +3662,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
                       s_input_lat.n, kmin, kp50, kp95, kmax);
             groovy_input_lat_reset(&s_input_lat);
         }
+#endif /* HAVE_GROOVY_BENCH */
     }
 
     /* Deferred CMD_SWITCHRES from re-announces, BEFORE the fan-out of a
@@ -3722,7 +3750,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
      * injection is on. Set once per session (calloc zeroes the field). */
     if (st->inject_t0_ns == 0u) {
         st->inject_t0_ns = emit_t0;
-        RARCH_LOG("[groovy-clock] origin t_ns=%llu utc_ms=%llu frame_id=%u\n",
+        GROOVY_BENCH_LOG("[groovy-clock] origin t_ns=%llu utc_ms=%llu frame_id=%u\n",
                   (unsigned long long)emit_t0,
                   (unsigned long long)groovy_wall_ms(),
                   (unsigned)st->frame_id);
@@ -4414,7 +4442,7 @@ static bool groovy_push_av_info(void *data, const struct retro_system_av_info *a
      * "real" geometry line left to protect this diagnostic prefix from.
      * Kept different regardless, for continuity with old logs from before
      * this phase. */
-    RARCH_LOG("[groovy-diag] push_av_info: %ux%u @ %.6f fps (cached=%.6f)\n",
+    GROOVY_BENCH_LOG("[groovy-diag] push_av_info: %ux%u @ %.6f fps (cached=%.6f)\n",
               av->geometry.base_width, av->geometry.base_height,
               av->timing.fps, s_last_valid_fps);
 
