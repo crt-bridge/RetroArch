@@ -17,13 +17,17 @@ Four subcommands, all stdlib-only (no RetroArch launched, nothing built):
 
     package-release.py check --platform {windows,linux} \\
         (--dir DIR | --archive FILE) [--mingw-bin DIR] [--objdump PATH] \\
-        [--require-branding]
+        [--require-branding] [--forbid-bench-strings]
         Verifies a staged directory or a built archive against the same
         rules a public CI run must pass before Sir ever tags a release:
         empty bridge target, no private address/host path, no core, no
         official branding in file names, every license present, the
         autoconfig profile with its axis binds, and (on Windows, with
-        --mingw-bin) a closed DLL import set.
+        --mingw-bin) a closed DLL import set. With --forbid-bench-strings,
+        the executable and every DLL of the kit must also be free of the
+        bench-only strings (BENCH_STRINGS) and of private addresses and
+        personal paths; this rule is opt-in because a bench binary staged
+        into a kit for a test legitimately carries them.
 
     package-release.py check-bench-strings --binary FILE [--dll FILE ...]
         Looks for every BENCH_STRINGS token (as ASCII and as UTF-16LE) and
@@ -831,6 +835,25 @@ def _rule_branding(root: Path, platform: str) -> list[tuple[str, str]]:
     return []
 
 
+def _rule_bench_strings(root: Path, platform: str) -> list[tuple[str, str]]:
+    """Opt-in (--forbid-bench-strings): the executable and every DLL of the
+    kit carry no BENCH_STRINGS token and no private address or personal path.
+    Off by default because a kit staged with a bench binary for a test
+    legitimately carries them. Same two functions as `check-bench-strings`,
+    so both give the same verdict on the same files."""
+    expected = "crt-bridge-emitter.exe" if platform == "windows" else "crt-bridge-emitter"
+    binary = root / expected
+    if not binary.is_file():
+        return [("bench-strings", f"{binary}: missing, cannot check bench strings")]
+    findings: list[tuple[str, str]] = []
+    for path in [binary] + sorted(root.glob("*.dll")):
+        for p, token, enc in bench_string_findings(path):
+            findings.append(("bench-strings", f"{p}: {token} ({enc})"))
+        for rule, offset in binary_leak_findings(path):
+            findings.append(("bench-strings", f"{path}: {rule} offset={offset}"))
+    return findings
+
+
 def _rule_readme(root: Path) -> list[tuple[str, str]]:
     readme = root / "README.md"
     if not readme.is_file():
@@ -919,6 +942,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     findings.extend(_rule_name(root, args.platform))
     if args.require_branding:
         findings.extend(_rule_branding(root, args.platform))
+    if args.forbid_bench_strings:
+        findings.extend(_rule_bench_strings(root, args.platform))
     findings.extend(_rule_readme(root))
     findings.extend(_rule_licenses(root, args.platform))
     if args.platform == "windows" and args.mingw_bin:
@@ -1034,6 +1059,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_check.add_argument("--mingw-bin")
     p_check.add_argument("--objdump")
     p_check.add_argument("--require-branding", action="store_true")
+    p_check.add_argument("--forbid-bench-strings", action="store_true")
 
     p_bench = sub.add_parser("check-bench-strings")
     p_bench.add_argument("--binary", required=True)
