@@ -236,6 +236,11 @@ static inline void groovy_pacing_log_mute(const char *ev) { (void)ev; }
 #include "../../configuration.h"       /* config_get_ptr, settings_t.floats.video_refresh_rate */
 #include "groovy_servo.h"              /* apres groovy_pacing.h : il consomme groovy_ack_state_t */
 
+/* Bench-only diagnostics switch (HAVE_GROOVY_BENCH). Keep this LAST among
+ * the groovy_*.h includes: its macros shadow the functions of the headers
+ * above at every call site. */
+#include "groovy_bench.h"
+
 /* ---------------------------------------------------------------------------
  * Per-instance state.
  *
@@ -1114,6 +1119,10 @@ static uint64_t groovy_wall_ms(void)
 #endif
 }
 
+/* The functions below share their names with the inert macros of
+ * groovy_bench.h, so they exist only in a bench build. groovy_wall_ms above
+ * stays: the log lines that are not bench-only also read it. */
+#ifdef HAVE_GROOVY_BENCH
 /* Nanoseconds since the session origin; 0 until the origin is set. */
 static uint64_t groovy_inject_elapsed_ns(const groovy_state_t *st,
         uint64_t now_ns)
@@ -1206,6 +1215,7 @@ static void groovy_inject_open(groovy_state_t *st)
         RARCH_LOG("[groovy-inject] armed n=%u items=%s\n", st->inject_n, canon);
     }
 }
+#endif /* HAVE_GROOVY_BENCH */
 
 static void *groovy_new(const struct record_params *params)
 {
@@ -1746,7 +1756,7 @@ static void *groovy_new(const struct record_params *params)
      * on the bench that a missing blit is tolerated. No effect when
      * GROOVY_SKIP_FRAME_EVERY is absent. */
     st->skip_every = groovy_skip_every_parse(getenv("GROOVY_SKIP_FRAME_EVERY"));
-    RARCH_LOG("[groovy] skip: one frame in %u%s\n", st->skip_every,
+    GROOVY_BENCH_LOG("[groovy] skip: one frame in %u%s\n", st->skip_every,
               (st->skip_every == 0u) ? " (off)" : " (GROOVY_SKIP_FRAME_EVERY)");
 
     /* Known-fault injection, read once here like the hook above. Absent or

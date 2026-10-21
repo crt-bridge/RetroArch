@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """package-release -- build, verify and compress a crt-bridge emitter release.
 
-Three subcommands, all stdlib-only (no RetroArch launched, nothing built):
+Four subcommands, all stdlib-only (no RetroArch launched, nothing built):
 
     package-release.py stage --platform {windows,linux} --fork-dir DIR \\
         --libgm-dir DIR --binary PATH --version VER --fork-commit SHA40 \\
@@ -25,14 +25,20 @@ Three subcommands, all stdlib-only (no RetroArch launched, nothing built):
         autoconfig profile with its axis binds, and (on Windows, with
         --mingw-bin) a closed DLL import set.
 
+    package-release.py check-bench-strings --binary FILE [--dll FILE ...]
+        Looks for every BENCH_STRINGS token (as ASCII and as UTF-16LE) and
+        for private addresses and personal paths in the given files. Any
+        file is accepted, an object file included. A leak is reported by
+        rule and position only, never with the string found.
+
     package-release.py archive --platform {windows,linux} --dir DIR --out FILE
         Compresses a staged directory: .zip on Windows, .tar.gz on Linux
         (root-owned, 0755 on the executable and the shell launcher, 0644
         elsewhere).
 
-Exit codes: 0 = PASS / success, 1 = findings (check only), 2 = usage or
-environment error (bad version string, missing required input, output
-already exists).
+Exit codes: 0 = PASS / success, 1 = findings (check and check-bench-strings
+only), 2 = usage or environment error (bad version string, missing or
+unreadable required input, output already exists).
 """
 from __future__ import annotations
 
@@ -84,6 +90,59 @@ _MAC_DOC_PREFIX = "00:00:5e:00:53"  # RFC 7042 documentation range, not a findin
 MACHINE_PATH_RE = re.compile(r"(?i)\b[a-z]:\\users\\|/home/[^/\s]+|/Users/[^/\s]+|~[\\/]")
 
 TOKEN_RE = re.compile(r"@[A-Z_]+@")
+
+# Bench-only strings: environment variable names and log markers of the
+# diagnostics that exist only in a build made with HAVE_GROOVY_BENCH=1. This
+# is the ONE list: it is read by `check-bench-strings`, by `check
+# --forbid-bench-strings`, by the CI step that calls the first, and by the
+# tests. A token leaves the list only with a written reason. A token is a
+# plain substring, searched in the raw bytes of a file, so it is found
+# whatever the linker did with the string table.
+#   GROOVY_DUMP_FRAME covers its _PATH, _INTERVAL and _SEQ variants;
+#   GROOVY_REANNOUNCE covers its _SPACING_US variant.
+# Names that stay public must never match a token: GROOVY_FRAME_DUP,
+# GROOVY_SERVO, GROOVY_AUDIO_RATIO, GROOVY_USO, GROOVY_FIELD_PER_FRAME,
+# GROOVY_FOLLOWERS, GROOVY_MTU, GROOVY_PAD, GROOVY_DOWNSAMPLE, GROOVY_31KHZ,
+# [groovy-mode], [groovy-annonce], [groovy-emit], [groovy-input], ack_lost,
+# "[groovy-servo] settings:" and "[groovy-servo] feed-forward:".
+BENCH_STRINGS = (
+    # environment variables
+    "GROOVY_INJECT",
+    "GROOVY_FRAMETIME",
+    "GROOVY_SKIP_FRAME_EVERY",
+    "GROOVY_SERVO_TRACE",
+    "GROOVY_DUMP_FRAME",
+    "GROOVY_VK_FLIP",
+    "GROOVY_D3D_FLIP",
+    "GROOVY_AUDIO_HOLD",
+    "GROOVY_REANNOUNCE",
+    # log markers and lines
+    "[groovy-inject]",
+    "[groovy-frametime]",
+    "[groovy-conv]",
+    "[groovy-servo-trace]",
+    "[groovy-lat]",
+    "[groovy-input-lat]",
+    "[groovy-clock]",
+    "[groovy-diag]",
+    "[groovy-box]",
+    "[groovy-audio-hold]",
+    "[groovy-servo] state=",
+    "[groovy] skip: one frame in",
+    "push_video vid:",
+    # counter (latency line field, XAudio2 underrun counter)
+    "pc_underruns",
+)
+
+# A personal path inside a binary: a drive-letter or POSIX home directory
+# followed by a user-name segment. The bare `~/` form of MACHINE_PATH_RE is
+# left out on purpose: it is ordinary text in a binary.
+BINARY_HOME_PATH_RE = re.compile(r"(?i)\b[a-z]:[\\/]users[\\/][^\\/\s]+|/home/[^/\s]+|/Users/[^/\s]+")
+
+# Printable runs of a binary: ASCII, and UTF-16LE (a printable byte followed
+# by a zero byte), five characters at least.
+_ASCII_RUN_RE = re.compile(rb"[\x20-\x7e]{5,}")
+_UTF16_RUN_RE = re.compile(rb"(?:[\x20-\x7e]\x00){5,}")
 
 # Every RetroArch directory-config key, relative to the kit. Read off
 # configuration.c's SETTING_PATH/SETTING_ARRAY calls on this branch. Left
@@ -198,6 +257,56 @@ def _scan_leak(text: str) -> list[str]:
     for m in MACHINE_PATH_RE.finditer(text):
         findings.append(f"machine-specific path {m.group(0)!r}")
     return findings
+
+
+# ---------------------------------------------------------------------------
+# Bench strings and leaks inside a binary (executable, DLL, object file).
+# ---------------------------------------------------------------------------
+
+
+def bench_string_findings(path: Path) -> list[tuple[str, str, str]]:
+    """Every BENCH_STRINGS token found in `path`, as (path, token, encoding)
+    with encoding `ascii` or `utf-16`. A plain substring search on the bytes
+    of the whole file, so a token is found wherever it sits."""
+    data = path.read_bytes()
+    out: list[tuple[str, str, str]] = []
+    for token in BENCH_STRINGS:
+        if token.encode("ascii") in data:
+            out.append((str(path), token, "ascii"))
+        if token.encode("utf-16le") in data:
+            out.append((str(path), token, "utf-16"))
+    return out
+
+
+def binary_leak_findings(path: Path) -> list[tuple[str, int]]:
+    """Private addresses and personal paths inside `path`, as (rule, offset).
+    Only the rule and the byte offset are returned, never the string found:
+    a CI log is public and must not republish an address or a name."""
+    data = path.read_bytes()
+    out: list[tuple[str, int]] = []
+    runs = [(m.start(), m.group(0).decode("ascii"), 1) for m in _ASCII_RUN_RE.finditer(data)]
+    runs += [
+        (m.start(), m.group(0).decode("utf-16le"), 2) for m in _UTF16_RUN_RE.finditer(data)
+    ]
+    for start, text, width in runs:
+        for m in PRIVATE_IPV4_RE.finditer(text):
+            out.append(("private-ipv4", start + width * m.start()))
+        for m in MAC_RE.finditer(text):
+            if not _is_doc_mac(m.group(0)):
+                out.append(("mac-address", start + width * m.start()))
+        for m in BINARY_HOME_PATH_RE.finditer(text):
+            out.append(("home-path", start + width * m.start()))
+    return sorted(out, key=lambda item: item[1])
+
+
+def _binary_lines(path: Path) -> list[str]:
+    """The `check-bench-strings` report lines for one file."""
+    lines = [f"FAIL bench-string {p} {token} {enc}" for p, token, enc in bench_string_findings(path)]
+    lines += [
+        f"FAIL binary-leak {path} {rule} offset={offset}"
+        for rule, offset in binary_leak_findings(path)
+    ]
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -829,6 +938,29 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# check-bench-strings
+# ---------------------------------------------------------------------------
+
+
+def cmd_check_bench_strings(args: argparse.Namespace) -> int:
+    paths = [Path(args.binary)] + [Path(d) for d in (args.dll or [])]
+    lines: list[str] = []
+    for path in paths:
+        try:
+            lines.extend(_binary_lines(path))
+        except OSError as exc:
+            print(f"ERROR: cannot read {path}: {exc.strerror or exc}", file=sys.stderr)
+            return 2
+    for line in lines:
+        print(line)
+    if lines:
+        print(f"FAIL ({len(lines)})")
+        return 1
+    print("PASS")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # archive
 # ---------------------------------------------------------------------------
 
@@ -903,6 +1035,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_check.add_argument("--objdump")
     p_check.add_argument("--require-branding", action="store_true")
 
+    p_bench = sub.add_parser("check-bench-strings")
+    p_bench.add_argument("--binary", required=True)
+    p_bench.add_argument("--dll", action="append")
+
     p_archive = sub.add_parser("archive")
     p_archive.add_argument("--platform", required=True, choices=["windows", "linux"])
     p_archive.add_argument("--dir", required=True)
@@ -914,6 +1050,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_stage(args)
     if args.command == "check":
         return cmd_check(args)
+    if args.command == "check-bench-strings":
+        return cmd_check_bench_strings(args)
     if args.command == "archive":
         return cmd_archive(args)
     return 2  # unreachable -- argparse subparsers are required

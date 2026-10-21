@@ -2612,6 +2612,10 @@ ifeq ($(HAVE_GROOVY), 1)
       LIBS         += -L$(LIBGM_DIR) -lgm
    endif
    DEFINES += -DHAVE_GROOVY
+   # bench tools: opt-in, never set by the release build
+   ifeq ($(HAVE_GROOVY_BENCH), 1)
+      DEFINES += -DHAVE_GROOVY_BENCH
+   endif
 endif
 
 # CRT mode switching
