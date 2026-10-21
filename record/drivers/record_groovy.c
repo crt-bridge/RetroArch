@@ -729,7 +729,11 @@ static void groovy_input_set_clear(void)
  * What the witness is, the three environment variables, sequence-mode
  * file naming, and the volume warning: see groovy_dump.h. Not duplicated
  * here -- a future reader should find only one source of truth.
+ *
+ * Bench only (HAVE_GROOVY_BENCH): the witness reads a path from the
+ * environment and writes files there, so a release build leaves it out.
  * ------------------------------------------------------------------------- */
+#ifdef HAVE_GROOVY_BENCH
 static const char *s_dump_path     = NULL;
 static unsigned    s_dump_interval = 60u;
 static bool        s_dump_resolved = false;
@@ -784,6 +788,7 @@ static void groovy_dump_frame_ppm(const uint8_t *rgb888,
     (void)remove(out);
     (void)rename(tmp, out);
 }
+#endif /* HAVE_GROOVY_BENCH */
 
 static inline unsigned lat_hist_bucket(int64_t v)
 {
@@ -1521,8 +1526,14 @@ static void *groovy_new(const struct record_params *params)
 
     /* Lever b6, read once here. See groovy_audio_hold.h for why this is
      * an environment variable and why the default is off on both sides
-     * (deliberate -- this lever is being measured). */
+     * (deliberate -- this lever is being measured). Read from the
+     * environment in a bench build only; a release build always runs with
+     * the lever off (groovy_audio_hold.h: absent variable = OFF). */
+#ifdef HAVE_GROOVY_BENCH
     st->audio_hold_mode = groovy_audio_hold_mode_parse(getenv("GROOVY_AUDIO_HOLD"));
+#else
+    st->audio_hold_mode = GROOVY_AUDIO_HOLD_OFF;
+#endif
 
     /* Clock servo, read once here. Default off when the variable is
      * absent: no setting = same cadence as today, an unmodified
@@ -1534,8 +1545,12 @@ static void *groovy_new(const struct record_params *params)
     /* Trace per measured ack, not throttled -- read once here, same
      * parser as the servo's other two settings. Off by default: no
      * setting = not one more byte in the log, not one more cycle in the
-     * loop. */
+     * loop. A release build never traces. */
+#ifdef HAVE_GROOVY_BENCH
     st->servo_trace    = (groovy_servo_mode_parse(getenv("GROOVY_SERVO_TRACE")) == GROOVY_SERVO_ON);
+#else
+    st->servo_trace    = 0;
+#endif
     groovy_servo_reset(&st->servo);
     {
         settings_t  *cfg = config_get_ptr();
@@ -1610,10 +1625,21 @@ static void *groovy_new(const struct record_params *params)
      * pattern as av_cache). The followers (rx[1..n_rx-1], below) need no
      * equivalent memset: the whole table comes straight out of calloc. */
     memset(&st->rx[0].reannounce, 0, sizeof(st->rx[0].reannounce));
+    /* A release build keeps the shipped behaviour: the re-announce stays on
+     * (GROOVY_REANNOUNCE_DEFAULT, what the parser returns for an absent
+     * variable) and the spacing takes its default. The variables that turn
+     * them off or change them are bench settings. */
+#ifdef HAVE_GROOVY_BENCH
     st->reannounce_enabled              = groovy_reannounce_parse(getenv("GROOVY_REANNOUNCE"));
+#else
+    st->reannounce_enabled              = GROOVY_REANNOUNCE_DEFAULT;
+#endif
     st->rx[0].reannounce_exhausted_logged = 0;
     RARCH_LOG("[groovy] re-announce: %s\n", st->reannounce_enabled ? "on" : "off");
 
+#ifndef HAVE_GROOVY_BENCH
+    st->reannounce_spacing_us = GROOVY_REANNOUNCE_SPACING_US_DEFAULT;
+#else
     {
         const char *esp = getenv("GROOVY_REANNOUNCE_SPACING_US");
         int         spacing_invalid;
@@ -1649,6 +1675,7 @@ static void *groovy_new(const struct record_params *params)
                   (st->reannounce_spacing_us == 0u) ? ", immediate send" : ", switchres deferred until a later frame",
                   spacing_invalid ? ", invalid value ignored" : "");
     }
+#endif /* HAVE_GROOVY_BENCH */
 
     /* Unchanged frame skip. The driver decides NOTHING: all the logic --
      * byte-for-byte comparison, full-frame cadence, header shape -- lives
@@ -1674,19 +1701,20 @@ static void *groovy_new(const struct record_params *params)
               groovy_frame_dup_mode_name(st->frame_dup_mode),
               groovy_frame_dup_mode_name(st->frame_dup_mode));
 
-    /* Lever b6: this line is UNCONDITIONAL and that's deliberate -- it's
-     * the proof, in every session's log, of the setting REALLY in
-     * effect, same discipline as [groovy-servo] settings:. It costs one
-     * line per session, not one per frame. Placed AFTER reading
+    /* Lever b6: in a bench build this line is UNCONDITIONAL and that's
+     * deliberate -- it's the proof, in every session's log, of the setting
+     * REALLY in effect, same discipline as [groovy-servo] settings:. It
+     * costs one line per session, not one per frame. A release build has no
+     * lever to report (always off) and prints neither line. Placed AFTER reading
      * GROOVY_FRAME_DUP so that st->frame_dup_mode is already set (the
      * warning below depends on it). */
-    RARCH_LOG("[groovy-audio-hold] audio_hold=%s (a frame's audio goes out stuck to "
+    GROOVY_BENCH_LOG("[groovy-audio-hold] audio_hold=%s (a frame's audio goes out stuck to "
               "the next frame's video burst; cost: one frame of audio latency, and the "
               "last held block never goes out)\n",
               groovy_audio_hold_mode_name(st->audio_hold_mode));
     if (st->audio_hold_mode == GROOVY_AUDIO_HOLD_ON
         && st->frame_dup_mode == GROOVY_FRAME_DUP_ON)
-        RARCH_WARN("[groovy-audio-hold] WARNING: audio_hold=on with frame_dup=on -- "
+        GROOVY_BENCH_WARN("[groovy-audio-hold] WARNING: audio_hold=on with frame_dup=on -- "
                    "a skipped frame only emits 9 bytes, so the audio would then stick to an "
                    "EMPTY burst. This lever is measured with -FrameDup off towards the "
                    "follower. Combination allowed, never a default.\n");
@@ -2855,7 +2883,7 @@ static void groovy_hold_flush_vers(groovy_state_t *st, struct groovy_receiver *r
             if (gm_send_audio(rx->gm, p + sent * (size_t)st->audio_channels,
                               chunk, st->audio_channels) != 0) {
                 if (rx->audio_errors++ == 0u)
-                    RARCH_WARN("[groovy-audio-hold] gm_send_audio refused a held block "
+                    GROOVY_BENCH_WARN("[groovy-audio-hold] gm_send_audio refused a held block "
                                "towards %s; this receiver's audio will stop where it "
                                "drops.\n", rx->target);
                 return;
@@ -2988,7 +3016,8 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
      * late to the driver as it would after a real hiccup of the run loop
      * and the wait is not part of anything this driver measures about the
      * frame. Needs the session origin, hence only from the second frame on.
-     * Fires once. Clock is read only when an item exists. */
+     * Fires once. Clock is read only when an item exists. Bench build only. */
+#ifdef HAVE_GROOVY_BENCH
     if (st->inject_n > 0u && st->inject_t0_ns != 0u) {
         const uint64_t stall_now = groovy_pacing_mono_ns();
         const int      stall_i   = groovy_inject_pending(st->inject_items,
@@ -3002,6 +3031,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
                 (uint64_t)st->inject_items[stall_i].param_ms * 1000000ull);
         }
     }
+#endif /* HAVE_GROOVY_BENCH */
 
     /* Instant this frame reached the driver, on the QPC clock the rest of
      * the driver uses. Together with emit_t0 below (the instant the send
@@ -3372,7 +3402,9 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
          * (branch (8) of groovy_servo_update_post_poll), rather than a
          * reanchor/freeze/miss. */
         const uint64_t servo_now_ns   = groovy_pacing_mono_ns();
+#ifdef HAVE_GROOVY_BENCH
         const uint32_t samples_before  = st->servo.samples;
+#endif
         groovy_servo_update_post_poll(&st->servo, &st->rx[0].ack_state,
                                       st->frame_id,
                                       servo_now_ns,
@@ -3389,7 +3421,8 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
          * re-read from the ring: the subtraction is EXACT, because
          * latency_ns is the difference of two nanosecond integers stored
          * in a double, and any integer under 2^53 ns (~104 days) fits
-         * there without loss. */
+         * there without loss. Bench build only. */
+#ifdef HAVE_GROOVY_BENCH
         if (st->servo_trace && st->servo.samples != samples_before) {
             const uint64_t send_ns = servo_now_ns - (uint64_t)st->servo.latency_ns;
             RARCH_LOG("[groovy-servo-trace] now_ns=%llu send_ns=%llu frame=%u emitted=%u "
@@ -3402,6 +3435,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
                       st->servo.raw_error_frames,
                       st->servo.window_n);
         }
+#endif /* HAVE_GROOVY_BENCH */
 
         /* One line per second, SEPARATE from [groovy-lat]. One concern per
          * line; existing tools don't change. The displayed slope is the
@@ -3660,8 +3694,10 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
 
     /* Witness of what actually goes out on the wire — after every guard, so
      * only frames really emitted get sampled. No effect when
-     * GROOVY_DUMP_FRAME_PATH is absent. */
+     * GROOVY_DUMP_FRAME_PATH is absent. Bench build only. */
+#ifdef HAVE_GROOVY_BENCH
     groovy_dump_frame_ppm(frame, send_w, send_h);
+#endif
 
     /* Timer for the emission path — brackets the gm_send_blit* calls below,
      * compression included since it lives inside them (gm_send_blit /
@@ -3711,8 +3747,10 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
      * it stays so; a lost closing half-frame changes nothing lasting. This
      * is the "opposite field" use of parity@0 (header groovy_inject.h).
      * The observation runs on every frame that reaches this block so that
-     * the tracked excursion ends when the video leaves interlaced mode. */
+     * the tracked excursion ends when the video leaves interlaced mode.
+     * Bench build only: a release build never withholds a frame here. */
     bool inject_hold = false;
+#ifdef HAVE_GROOVY_BENCH
     if (st->inject_n > 0u) {
         const uint64_t inj_elapsed = groovy_inject_elapsed_ns(st, emit_t0);
         const bool     is_480i_fpf = (split_mode == GROOVY_MODE_480I
@@ -3774,6 +3812,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
                     (uint64_t)st->inject_delay_ms * 1000000ull);
         }
     }
+#endif /* HAVE_GROOVY_BENCH */
 
     /* WAN-03 diagnostic hook. Placed AFTER every geometry guard and AFTER
      * the frame witness, so the skipped frame is one that would have
@@ -4018,7 +4057,8 @@ static bool groovy_push_audio(void *data, const struct record_audio_data *audio)
      * true hole and the resampling state is untouched. The block is
      * returned as consumed (true), like a deliberately dropped one. Needs
      * the session origin, which the video path sets. Same thread as the
-     * video, so no lock. */
+     * video, so no lock. Bench build only. */
+#ifdef HAVE_GROOVY_BENCH
     if (st->inject_n > 0u && st->inject_t0_ns != 0u) {
         const uint64_t gap_now = groovy_pacing_mono_ns();
 
@@ -4038,6 +4078,7 @@ static bool groovy_push_audio(void *data, const struct record_audio_data *audio)
             }
         }
     }
+#endif /* HAVE_GROOVY_BENCH */
 
     const int16_t *pcm    = (const int16_t *)audio->data;
     size_t         frames = audio->frames;
@@ -4120,7 +4161,7 @@ static bool groovy_push_audio(void *data, const struct record_audio_data *audio)
     if (st->audio_hold_mode == GROOVY_AUDIO_HOLD_ON) {
         if (!groovy_audio_hold_deposit(&st->audio_hold, pcm, frames, st->audio_channels)
             && st->audio_hold.lost == 1u)
-            RARCH_WARN("[groovy-audio-hold] an audio block could not be held "
+            GROOVY_BENCH_WARN("[groovy-audio-hold] an audio block could not be held "
                        "(queue full, different format, or memory); the end-of-session "
                        "report gives the count\n");
         st->audio_blocks++;
@@ -4216,12 +4257,14 @@ static bool groovy_finalize(void *data)
 
     /* Injected faults that never fired (their second was never reached, or
      * the video shape they need never occurred): said at a clean close, so
-     * that a missing "fired" line is never ambiguous. */
+     * that a missing "fired" line is never ambiguous. Bench build only. */
+#ifdef HAVE_GROOVY_BENCH
     for (unsigned i = 0u; i < st->inject_n; i++)
         if (!st->inject_items[i].fired)
             RARCH_LOG("[groovy-inject] not-fired kind=%s at_s=%u\n",
                       groovy_inject_kind_name(st->inject_items[i].kind),
                       (unsigned)st->inject_items[i].at_s);
+#endif /* HAVE_GROOVY_BENCH */
 
     /* Box report (quick 260901-po3), on the same model as the audio report
      * above. */
@@ -4247,7 +4290,9 @@ static bool groovy_finalize(void *data)
     /* Lever b6: closing report, BEFORE any gm_send_close -- it must
      * describe the queue's state at the moment the session ends.
      * at_close: the lever's SECOND named cost -- what remains in the queue
-     * is NOT sent here (no send at close time), it is lost and counted. */
+     * is NOT sent here (no send at close time), it is lost and counted.
+     * Both lines are bench lines; a release build never holds audio. */
+#ifdef HAVE_GROOVY_BENCH
     if (st->audio_hold.deposited > 0u || st->audio_hold_mode == GROOVY_AUDIO_HOLD_ON) {
         uint64_t not_played = 0u;
         for (unsigned i = 0u; i < st->n_rx; i++)
@@ -4266,6 +4311,7 @@ static bool groovy_finalize(void *data)
                           st->rx[i].target,
                           (unsigned long long)st->rx[i].audio_hold_not_played);
     }
+#endif /* HAVE_GROOVY_BENCH */
 
     /* Send path at close: did the segmented
      * path serve the whole session, or was it cut? rx[0].gm == st->gm. */
