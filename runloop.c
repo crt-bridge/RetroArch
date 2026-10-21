@@ -7296,7 +7296,9 @@ end:
  **/
 int runloop_iterate(void)
 {
+#ifdef HAVE_GROOVY_BENCH
    retro_time_t          groovy_ft_start = 0; /* crt-bridge */
+#endif
    input_driver_state_t         *input_st = input_state_get_ptr();
    audio_driver_state_t         *audio_st = audio_state_get_ptr();
    video_driver_state_t         *video_st = video_state_get_ptr();
@@ -7515,9 +7517,11 @@ int runloop_iterate(void)
 
    /* Measure the time between core_run() and video_driver_frame() */
    runloop_st->core_run_time = cpu_features_get_time_usec();
+#ifdef HAVE_GROOVY_BENCH
    /* crt-bridge: our own copy -- video_driver_frame turns
     * core_run_time into a difference (or 0) while core_run() is running. */
    groovy_ft_start           = runloop_st->core_run_time;
+#endif
 
    {
 #ifdef HAVE_RUNAHEAD

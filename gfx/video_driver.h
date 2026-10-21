@@ -1328,9 +1328,17 @@ enum groovy_frametime_slot
                         * audio sync wait */
    GROOVY_FT_COUNT
 };
+#ifdef HAVE_GROOVY_BENCH
 bool groovy_frametime_on(void);
 void groovy_frametime_add(unsigned slot, retro_time_t us);
 void groovy_frametime_iter(retro_time_t start, retro_time_t end);
+#else
+/* Without HAVE_GROOVY_BENCH the timer does not exist: the call sites stay
+ * as they are and compile to nothing, no variable is read. */
+#define groovy_frametime_on()             (false)
+#define groovy_frametime_add(slot, us)    ((void)0)
+#define groovy_frametime_iter(start, end) ((void)0)
+#endif
 
 void video_driver_update_title(void *data);
 

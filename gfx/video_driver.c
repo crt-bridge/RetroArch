@@ -1193,6 +1193,7 @@ static bool video_driver_bridge_menu_live(void)
 #endif
 }
 
+#ifdef HAVE_GROOVY_BENCH
 /* crt-bridge: see groovy_frametime_slot in video_driver.h. */
 #define GROOVY_FT_WINDOW 600
 static int          s_gft_on = -1;
@@ -1271,6 +1272,7 @@ void groovy_frametime_iter(retro_time_t start, retro_time_t end)
    }
    s_gft_n = 0;
 }
+#endif /* HAVE_GROOVY_BENCH */
 
 static void recording_dump_frame(
       const void *data, unsigned width,
