@@ -296,7 +296,7 @@ void audio_driver_set_buffer_size(size_t bufsize);
 void   audio_driver_set_groovy_term(double term);
 double audio_driver_get_groovy_term(void);
 
-#ifdef HAVE_XAUDIO
+#if defined(HAVE_XAUDIO) && defined(HAVE_GROOVY_BENCH)
 /* crt-bridge -- sound-card underrun counter of the XAudio2 driver.
  * Returns 1 when the XAudio2 driver is open (0 otherwise) and writes the
  * cumulative number of times its source-voice queue ran dry to *count.

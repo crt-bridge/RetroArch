@@ -6061,8 +6061,12 @@ static bool vulkan_read_native(void *data, uint8_t *buffer,
     * the other direction without a rebuild. */
    if (flip < 0)
    {
+#ifdef HAVE_GROOVY_BENCH
       const char *env = getenv("GROOVY_VK_FLIP");
       flip = (env && *env == '1') ? 1 : 0;
+#else
+      flip = 0;
+#endif
    }
 
    ctx             = &vk->native.scaler;

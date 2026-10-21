@@ -130,8 +130,10 @@ static bool xaudio_imm_start_thread(xa_t *xa)
  *
  * The callbacks run on a thread of XAudio2: they only use Interlocked
  * operations here, no logging, no allocation, no lock. */
+#ifdef HAVE_GROOVY_BENCH
 static LONG volatile s_groovy_underruns = 0;
 static LONG volatile s_groovy_active    = 0;
+#endif
 
 #if defined(__cplusplus) && !defined(CINTERFACE)
 struct xaudio2 : public IXAudio2VoiceCallback
@@ -151,8 +153,12 @@ struct xaudio2
    STDMETHOD_(void, OnBufferStart) (void *) {}
    STDMETHOD_(void, OnBufferEnd) (void *)
    {
+#ifdef HAVE_GROOVY_BENCH
       if (InterlockedDecrement((LONG volatile*)&buffers) == 0)
          InterlockedIncrement(&s_groovy_underruns);
+#else
+      InterlockedDecrement((LONG volatile*)&buffers);
+#endif
       SetEvent(hEvent);
    }
    STDMETHOD_(void, OnLoopEnd) (void *) {}
@@ -182,8 +188,12 @@ static void WINAPI xa_voice_on_buffer_end(IXAudio2VoiceCallback *handle_, void *
 {
    xaudio2_t *handle = (xaudio2_t*)handle_;
    (void)data;
+#ifdef HAVE_GROOVY_BENCH
    if (InterlockedDecrement((LONG volatile*)&handle->buffers) == 0)
       InterlockedIncrement(&s_groovy_underruns);
+#else
+   InterlockedDecrement((LONG volatile*)&handle->buffers);
+#endif
    SetEvent(handle->hEvent);
 }
 
@@ -224,6 +234,7 @@ static void xaudio2_set_format(WAVEFORMATEX *wf,
    wf->cbSize            = 0;
 }
 
+#ifdef HAVE_GROOVY_BENCH
 /* Cumulative count of source-voice queue run-outs and whether this driver
  * is currently open. Returns 1 when open, 0 otherwise; *count receives the
  * cumulative count either way. A plain read of an aligned word: the caller
@@ -234,13 +245,16 @@ int xaudio2_groovy_underruns(unsigned long *count)
       *count = (unsigned long)s_groovy_underruns;
    return s_groovy_active ? 1 : 0;
 }
+#endif
 
 static void xaudio2_free(xaudio2_t *handle)
 {
    if (!handle)
       return;
 
+#ifdef HAVE_GROOVY_BENCH
    s_groovy_active = 0;
+#endif
 
    if (handle->pSourceVoice)
    {
@@ -483,7 +497,9 @@ static xaudio2_t *xaudio2_new(unsigned *rate, unsigned channels,
                XAUDIO2_COMMIT_NOW)))
       goto error;
 
+#ifdef HAVE_GROOVY_BENCH
    s_groovy_active = 1;
+#endif
 
    if (list)
       string_list_free(list);

@@ -4208,8 +4208,12 @@ static bool d3d11_read_native(void *data, uint8_t *buffer,
     * GROOVY_D3D_FLIP=1 forces the other direction without a rebuild. */
    if (flip < 0)
    {
+#ifdef HAVE_GROOVY_BENCH
       const char *env = getenv("GROOVY_D3D_FLIP");
       flip = (env && *env == '1') ? 1 : 0;
+#else
+      flip = 0;
+#endif
    }
 
    rows = (const uint8_t*)map.pData;
