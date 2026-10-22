@@ -130,6 +130,13 @@ jobs:
           # 1 not found) is unchanged.
           objdump -p retroarch.exe | grep 'DLL Name: libgm.dll' >/dev/null
 
+      - name: Check bench strings
+        # Bench tools (fault injection, frame timer, diagnostic log lines)
+        # are built only with an opt-in make flag this workflow never sets.
+        # The list of their strings lives in package-release.py; one of
+        # them found in the executable or in libgm.dll fails the build.
+        run: python pkg/crt-bridge/package-release.py check-bench-strings --binary retroarch.exe --dll libgm/libgm.dll
+
       - name: Package
         run: |
           set -euo pipefail
@@ -143,13 +150,13 @@ jobs:
             --out dist --mingw-bin "$MINGW_BIN" --msys-root "$MSYS_ROOT"
           python pkg/crt-bridge/package-release.py check \
             --platform windows --dir "dist/crt-bridge-emitter-$VERSION-windows-x64" \
-            --mingw-bin "$MINGW_BIN" --require-branding
+            --mingw-bin "$MINGW_BIN" --require-branding --forbid-bench-strings
           python pkg/crt-bridge/package-release.py archive \
             --platform windows --dir "dist/crt-bridge-emitter-$VERSION-windows-x64" \
             --out "dist/crt-bridge-emitter-$VERSION-windows-x64.zip"
           python pkg/crt-bridge/package-release.py check \
             --platform windows --archive "dist/crt-bridge-emitter-$VERSION-windows-x64.zip" \
-            --mingw-bin "$MINGW_BIN" --require-branding
+            --mingw-bin "$MINGW_BIN" --require-branding --forbid-bench-strings
 
       - name: Upload artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -210,6 +217,13 @@ jobs:
         # instead of the intended pass/fail signal.
         run: nm retroarch | grep -w gm_init >/dev/null
 
+      - name: Check bench strings
+        # Same check as the Windows job: bench tools are built only with an
+        # opt-in make flag this workflow never sets, and the list of their
+        # strings lives in package-release.py. libgm is linked statically
+        # here, so the executable is the only file to read.
+        run: python3 pkg/crt-bridge/package-release.py check-bench-strings --binary retroarch
+
       - name: Package
         run: |
           set -euo pipefail
@@ -221,13 +235,13 @@ jobs:
             --out dist
           python3 pkg/crt-bridge/package-release.py check \
             --platform linux --dir "dist/crt-bridge-emitter-$VERSION-linux-x64" \
-            --require-branding
+            --require-branding --forbid-bench-strings
           python3 pkg/crt-bridge/package-release.py archive \
             --platform linux --dir "dist/crt-bridge-emitter-$VERSION-linux-x64" \
             --out "dist/crt-bridge-emitter-$VERSION-linux-x64.tar.gz"
           python3 pkg/crt-bridge/package-release.py check \
             --platform linux --archive "dist/crt-bridge-emitter-$VERSION-linux-x64.tar.gz" \
-            --require-branding
+            --require-branding --forbid-bench-strings
 
       - name: Upload artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
