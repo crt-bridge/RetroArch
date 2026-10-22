@@ -270,7 +270,15 @@ command_t* command_network_new(uint16_t port)
          (unsigned short)port);
 
    if (fd < 0)
+   {
+#ifdef HAVE_GROOVY
+      /* Never a silent fallback, never a silent close: name the setting. */
+      if (bind_addr)
+         RARCH_ERR("[NetCMD] GROOVY_NETCMD_BIND=\"%s\" is not a usable address:"
+               " the command interface stays closed.\n", bind_addr);
+#endif
       goto error;
+   }
 
    netcmd->net_fd = fd;
    cmd->userptr   = netcmd;
@@ -285,6 +293,12 @@ command_t* command_network_new(uint16_t port)
    {
       RARCH_ERR("[NetCMD] %s\n",
             msg_hash_to_str(MSG_FAILED_TO_BIND_SOCKET));
+#ifdef HAVE_GROOVY
+      if (bind_addr)
+         RARCH_ERR("[NetCMD] GROOVY_NETCMD_BIND=\"%s\" could not be bound"
+               " (port in use, or not an address of this machine):"
+               " the command interface stays closed.\n", bind_addr);
+#endif
       goto error;
    }
 
