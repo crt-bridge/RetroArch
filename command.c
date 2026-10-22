@@ -238,6 +238,7 @@ command_t* command_network_new(uint16_t port)
    struct addrinfo     *res  = NULL;
    command_t            *cmd = NULL;
    command_network_t *netcmd = NULL;
+   const char     *bind_addr = NULL;
    int                    fd = -1;
 
    /* Allocate-then-check in sequence, matching command_uds_new.
@@ -254,7 +255,14 @@ command_t* command_network_new(uint16_t port)
    if (!(netcmd = (command_network_t*)calloc(1, sizeof(command_network_t))))
       goto error;
 
-   fd = socket_init((void**)&res, port, NULL,
+#ifdef HAVE_GROOVY
+   /* A test can bind the command interface to one address (loopback);
+    * unset or empty keeps the upstream behavior, all interfaces. */
+   if ((bind_addr = getenv("GROOVY_NETCMD_BIND")) && !*bind_addr)
+      bind_addr = NULL;
+#endif
+
+   fd = socket_init((void**)&res, port, bind_addr,
          SOCKET_TYPE_DATAGRAM, AF_INET);
 
    RARCH_LOG("[NetCMD] %s %hu.\n",
