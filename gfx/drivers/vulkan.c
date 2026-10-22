@@ -5828,8 +5828,9 @@ static void vulkan_readback(vk_t *vk, struct vk_image *readback_image)
  *    exactly as vulkan_readback() already does for the window path.
  *  - GL FBOs read back bottom-up; Vulkan images are top-down. The row flip
  *    the GL port needs is therefore expected to be absent here. "Expected" is
- *    not "verified": GROOVY_VK_FLIP=1 forces the other direction so the sense
- *    can be settled at the bench without a rebuild.
+ *    not "verified": in a bench build (HAVE_GROOVY_BENCH), GROOVY_VK_FLIP=1
+ *    forces the other direction so the sense can be settled at the bench
+ *    without a rebuild. Any other build reads no variable and never flips.
  */
 
 static bool vulkan_native_capture_active(vk_t *vk)
@@ -6057,8 +6058,9 @@ static bool vulkan_read_native(void *data, uint8_t *buffer,
    }
 
    /* Vulkan images are top-down, unlike GL FBOs, so no row flip is expected
-    * here. Settled at the bench, not by reasoning: GROOVY_VK_FLIP=1 forces
-    * the other direction without a rebuild. */
+    * here. Settled at the bench, not by reasoning: in a bench build
+    * (HAVE_GROOVY_BENCH), GROOVY_VK_FLIP=1 forces the other direction without
+    * a rebuild. Any other build reads no variable and never flips. */
    if (flip < 0)
    {
 #ifdef HAVE_GROOVY_BENCH

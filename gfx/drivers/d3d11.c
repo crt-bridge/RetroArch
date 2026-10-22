@@ -4204,8 +4204,10 @@ static bool d3d11_read_native(void *data, uint8_t *buffer,
       return false;
 
    /* D3D11 textures are top-down, like Vulkan images and unlike GL FBOs, so
-    * no row flip is expected. Settled at the bench, not by reasoning:
-    * GROOVY_D3D_FLIP=1 forces the other direction without a rebuild. */
+    * no row flip is expected. Settled at the bench, not by reasoning: in a
+    * bench build (HAVE_GROOVY_BENCH), GROOVY_D3D_FLIP=1 forces the other
+    * direction without a rebuild. Any other build reads no variable and
+    * never flips. */
    if (flip < 0)
    {
 #ifdef HAVE_GROOVY_BENCH
