@@ -134,6 +134,12 @@ BENCH_STRINGS = (
     "[groovy-servo] state=",
     "[groovy] skip: one frame in",
     "push_video vid:",
+    # bench lines with no marker of their own: each has its own token, so a
+    # line that leaves its gated block is seen even when the variable read
+    # next to it stays gated (the public "[groovy] re-announce: on|off"
+    # line must not match)
+    "frame witness active:",
+    "re-announce: spacing",
     # counter (latency line field, XAudio2 underrun counter)
     "pc_underruns",
 )
