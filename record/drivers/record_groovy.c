@@ -3484,9 +3484,9 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         st->downsample_ns_total += box_ns;
         if (box_ns > st->downsample_ns_max) st->downsample_ns_max = box_ns;
         if (++st->downsample_samples >= 600u) {
-            GROOVY_BENCH_LOG("[groovy-box] factor=%s %ux%u -> %ux%u n=%u "
+            GROOVY_BENCH_LOG("[groovy-box] factor=%u %ux%u -> %ux%u n=%u "
                       "average=%.1f us worst=%.1f us\n",
-                      groovy_downsample_factor_name(cpu_factor),
+                      cpu_factor,
                       cap_w, cap_h, send_w, send_h, st->downsample_samples,
                       (double)st->downsample_ns_total / (double)st->downsample_samples / 1000.0,
                       (double)st->downsample_ns_max / 1000.0);
@@ -4435,6 +4435,30 @@ static bool groovy_finalize(void *data)
         RARCH_LOG(
             "[groovy] downsample: %llu frames refused (pre-reduced by the video driver, not expected)\n",
             (unsigned long long)st->downsample_prereduced_mismatch);
+
+    /* One line per cause of refusal the rule gave, under the setting that
+     * gave it. The two reports above keep their own counters. */
+    {
+        static const struct {
+            enum groovy_reduction_reason reason;
+            const char                  *cause;
+        } causes[] = {
+            { GROOVY_REDUCTION_REFUSED_OVERSIZE,
+              "too large for the receiver" },
+            { GROOVY_REDUCTION_REFUSED_NOT_DIVISIBLE,
+              "does not divide by the chosen factor" },
+            { GROOVY_REDUCTION_REFUSED_NO_CLEAN_FACTOR,
+              "no clean factor makes it fit" }
+        };
+        for (unsigned c = 0u; c < sizeof causes / sizeof causes[0]; c++) {
+            const uint64_t refused = st->reduction_refused[causes[c].reason];
+            if (refused > 0u)
+                RARCH_LOG("[groovy] downsample: %llu frames refused (%s) under %s\n",
+                          (unsigned long long)refused, causes[c].cause,
+                          groovy_reduction_name(st->reduction_mode,
+                                                st->downsample_gpu));
+        }
+    }
 
     /* Regime session summary -- ALWAYS emitted,
      * unlike the downsample report above: a session with zero switches is
