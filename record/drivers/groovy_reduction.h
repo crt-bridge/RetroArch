@@ -218,6 +218,34 @@ static inline int groovy_reduction_parse(const char *s,
     return 1;
 }
 
+/* Reads the GROOVY_DOWNSAMPLE_PATH value: where the reduction runs. Only
+ * "auto" (the card reduces when it can) and "cpu" (the processor reduces and
+ * the card is not asked), spelled exactly, are known. Anything else (NULL,
+ * empty, another case, another word) returns 0 and leaves *cpu untouched, so
+ * the caller can warn naming the value and fall back to auto. Returns 1 when
+ * the value is known; *cpu is 1 for "cpu", 0 for "auto". A NULL output
+ * pointer is skipped.
+ *
+ * This setting is outside the menu on purpose. It exists to measure, and to
+ * rule the card out when something looks wrong. */
+static inline int groovy_reduction_path_parse(const char *s, int *cpu)
+{
+    int c;
+
+    if (!s)
+        return 0;
+    if (!strcmp(s, "auto"))
+        c = 0;
+    else if (!strcmp(s, "cpu"))
+        c = 1;
+    else
+        return 0;
+
+    if (cpu)
+        *cpu = c;
+    return 1;
+}
+
 /* The name the variable and the "[groovy] downsample: factor=" log line
  * use: auto off 2 4 8 gpu4. An unknown mode is named like Auto. */
 static inline const char *groovy_reduction_name(
@@ -373,12 +401,16 @@ static inline int groovy_reduction_status_due(
  * `setting` is the display name of the setting, rw x rh the rendered size,
  * sw x sh the size sent. A refused frame (factor 0, or path REFUSED) reads
  *   Supersampling reduction: Off -> refused (1280x960), REFUSED, glcore
- * A NULL setting or engine reads "?". Returns the length written (cap-1 when
- * cut), or -1 for an unusable buffer. */
+ * A NULL setting or engine reads "?". `reason` is the cause of a CPU path,
+ * said in parentheses after CPU:
+ *   Supersampling reduction: 4x -> 4x (1280x864 -> 320x216), CPU (forced by GROOVY_DOWNSAMPLE_PATH), vulkan
+ * It is read only for the CPU path, and only when it is not empty: a NULL or
+ * empty reason, and any other path, read exactly as without one. Returns the
+ * length written (cap-1 when cut), or -1 for an unusable buffer. */
 static inline int groovy_reduction_status_format(char *buf, size_t cap,
         const char *setting, unsigned factor, unsigned rw, unsigned rh,
         unsigned sw, unsigned sh, enum groovy_reduction_path path,
-        const char *engine)
+        const char *reason, const char *engine)
 {
     int n;
 
@@ -394,6 +426,10 @@ static inline int groovy_reduction_status_format(char *buf, size_t cap,
         n = snprintf(buf, cap,
                 "Supersampling reduction: %s -> refused (%ux%u), REFUSED, %s",
                 setting, rw, rh, engine);
+    else if (path == GROOVY_REDUCTION_PATH_CPU && reason && reason[0] != '\0')
+        n = snprintf(buf, cap,
+                "Supersampling reduction: %s -> %ux (%ux%u -> %ux%u), CPU (%s), %s",
+                setting, factor, rw, rh, sw, sh, reason, engine);
     else
         n = snprintf(buf, cap,
                 "Supersampling reduction: %s -> %ux (%ux%u -> %ux%u), %s, %s",

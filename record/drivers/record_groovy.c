@@ -529,6 +529,7 @@ typedef struct {
     int       downsample_gpu;               /* 1 = "gpu4": the video driver is asked to do the 4x4 reduction */
     int       reduction_hw;                 /* 1 = hardware capture (a supersampled FBO) */
     int       reduction_from_env;           /* 1 = GROOVY_DOWNSAMPLE chose the mode, 0 = the menu */
+    int       reduction_path_cpu;           /* 1 = GROOVY_DOWNSAMPLE_PATH=cpu: the processor reduces, the card is not asked */
     struct groovy_reduction_memo   reduction_memo;   /* decision per rendered size */
     char      capture_note[GROOVY_CAPTURE_NOTE_CAP]; /* why the video driver did not reduce, as it said it */
     struct groovy_reduction_said   reduction_said;   /* what the status line last said */
@@ -1845,6 +1846,36 @@ static void *groovy_new(const struct record_params *params)
     RARCH_LOG("[groovy] downsample: source=%s hw_capture=%d\n",
               st->reduction_from_env ? "GROOVY_DOWNSAMPLE" : "menu",
               st->reduction_hw);
+
+    /* Where the reduction runs. GROOVY_DOWNSAMPLE_PATH is outside the menu on
+     * purpose: it exists to measure, and to rule the card out when something
+     * looks wrong. Read once per session. "cpu" makes the capture hook answer
+     * "no reduction" so the processor reduces; "auto" or no variable leaves
+     * the card free to reduce. A value that is not understood is named, then
+     * auto is used. */
+    st->reduction_path_cpu = 0;
+    {
+        const char *penv = getenv("GROOVY_DOWNSAMPLE_PATH");
+
+        if (penv) {
+            char pmsg[GROOVY_FORCED_MSG_CAP];
+            int  pcpu = 0;
+
+            if (!groovy_reduction_path_parse(penv, &pcpu)) {
+                pcpu = 0;
+                snprintf(pmsg, sizeof pmsg,
+                         "GROOVY_DOWNSAMPLE_PATH=\"%s\" not understood "
+                         "(expected auto or cpu): auto is used", penv);
+                groovy_log_error(pmsg);
+            } else if (pcpu) {
+                groovy_log_forced("GROOVY_DOWNSAMPLE_PATH=cpu: the processor "
+                                  "reduces, the card is not asked");
+            }
+            st->reduction_path_cpu = pcpu;
+        }
+    }
+    RARCH_LOG("[groovy] downsample: path=%s\n",
+              st->reduction_path_cpu ? "cpu" : "auto");
 
     /* Diagnostic hook: deliberately skip sending one frame in N, to prove
      * on the bench that a missing blit is tolerated. No effect when
@@ -3297,12 +3328,17 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
                                         red_shown, red_path)) {
             char        line[GROOVY_FORCED_MSG_CAP];
             const char *engine = video_driver_get_ident();
+            /* Only a CPU path has a cause to say; the forced path is the
+             * one cause known here. */
+            const char *cause  = (red_path == GROOVY_REDUCTION_PATH_CPU
+                                  && st->reduction_path_cpu)
+                ? "forced by GROOVY_DOWNSAMPLE_PATH" : NULL;
 
             groovy_reduction_status_format(line, sizeof line,
                     groovy_reduction_display_name(st->reduction_mode,
                                                   st->downsample_gpu),
                     red_shown, rend_w, rend_h, send_w, send_h, red_path,
-                    engine ? engine : "?");
+                    cause, engine ? engine : "?");
             groovy_log_forced(line);
         }
     }
@@ -4673,7 +4709,8 @@ static bool groovy_push_av_info(void *data, const struct retro_system_av_info *a
  * rendered size. The answer comes from the same per-size memory that
  * groovy_push_video reads for the same rendered size, so the two never
  * disagree: the driver never decides the factor itself. A refusal, factor 1
- * and a software capture all answer 1 (nothing to reduce).
+ * and a software capture all answer 1 (nothing to reduce), and so does a
+ * session whose path is forced to the processor: the card is not asked.
  * ------------------------------------------------------------------------- */
 static unsigned groovy_capture_reduction(void *data, unsigned w, unsigned h)
 {
@@ -4681,6 +4718,8 @@ static unsigned groovy_capture_reduction(void *data, unsigned w, unsigned h)
     struct groovy_reduction_decision d;
 
     if (!st || !st->reduction_hw)
+        return 1u;
+    if (st->reduction_path_cpu)
         return 1u;
 
     d = groovy_reduction_memo_frame(&st->reduction_memo, st->reduction_mode,
