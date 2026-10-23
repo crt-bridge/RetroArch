@@ -52,6 +52,7 @@
 #include "../font_driver.h"
 #include "../../record/record_driver.h"
 #include "../../record/drivers/groovy_downsample.h"
+#include "../../record/drivers/groovy_box_selftest.h"
 
 #ifdef HAVE_GLSL
 #include "../drivers_shader/shader_glsl.h"
@@ -119,9 +120,10 @@ typedef struct gl3
    GLuint native_compose_fbo;
    GLuint native_compose_tex;
 #ifndef HAVE_OPENGLES
-   /* crt-bridge: GPU 4x4 box of the native capture (GROOVY_DOWNSAMPLE=gpu4).
-    * Our own reduced target at (native / 4) dims, and the program that
-    * averages each 4x4 block of the source into one of its pixels. */
+   /* crt-bridge: GPU box of the native capture.
+    * Our own reduced target at (native / factor) dims, and the program that
+    * averages each factor x factor block of the source into one of its
+    * pixels. */
    GLuint native_box_fbo;
    GLuint native_box_tex;
    GLuint native_box_program;
@@ -208,6 +210,10 @@ typedef struct gl3
 #ifndef HAVE_OPENGLES
    unsigned native_box_w;                 /* crt-bridge: reduced target dims */
    unsigned native_box_h;
+   /* The (factor, size) pairs that reproduced the CPU box in this session. */
+   struct groovy_boxtest_results native_box_results;
+   /* The last note given to the recording about why the card did not reduce. */
+   char native_box_note[128];
 #endif
    unsigned menu_texture_width;
    unsigned menu_texture_height;
@@ -230,11 +236,10 @@ typedef struct gl3
    bool pbo_native_valid[GL_CORE_NUM_PBOS];
    bool pbo_native_ready;
 #ifndef HAVE_OPENGLES
-   /* crt-bridge: "gpu4" read once at driver init; disabled = the box
-    * failed once in this session and is never tried again. */
-   bool native_box_requested;
+   /* crt-bridge: disabled = the box failed once in this session and is
+    * never tried again. The factor is asked of the recording on every
+    * frame, never read from the environment here. */
    bool native_box_disabled;
-   bool native_box_tested;                /* self-test already run */
 #endif
    bool menu_texture_rgb32;
 } gl3_t;
@@ -1647,13 +1652,16 @@ static void gl3_deinit_native_compose(gl3_t *gl)
 }
 
 #ifndef HAVE_OPENGLES
-/* crt-bridge: GPU 4x4 box of the native capture.
+/* crt-bridge: GPU box of the native capture.
  *
- * With GROOVY_DOWNSAMPLE=gpu4 the recording asks for the native surface
- * averaged over 4x4 blocks. Reading the full surface back (1280x960 for a
+ * The recording is asked, on every frame, by what factor it wants the native
+ * surface averaged (recording_capture_reduction); the factor is never read
+ * from the environment here. Reading the full surface back (1280x960 for a
  * 320x240 game at 4x supersampling) and averaging it on the CPU costs a large
  * share of the frame; here the GPU averages each 4x4 block into OUR reduced
  * target and only that target is read back — one sixteenth of the bytes.
+ * A pair (factor, size) is reduced on the card only after it reproduced the
+ * CPU box in this session.
  *
  * The result must be the CPU box byte for byte (groovy_downsample_box_
  * rgb888_n4: integer sum of sixteen samples, one truncating division by 16).
@@ -1695,22 +1703,55 @@ static const char *gl3_native_box_fs =
    "   frag = vec4(vec3(sum / 16u) / 255.0, 1.0);\n"
    "}\n";
 
-/* The predicate, the same everywhere: "gpu4" was read at init, the box has
- * not been disabled in this session, and both dims are multiples of 4. */
+/* The predicate, the same everywhere: the recording asked for the factor f,
+ * the box has not been disabled in this session, and both dims are multiples
+ * of f. */
 static bool gl3_native_box_applies(const gl3_t *gl,
-      unsigned width, unsigned height)
+      unsigned width, unsigned height, unsigned f)
 {
-   return gl->native_box_requested
+   return f == 4
        && !gl->native_box_disabled
-       && width  >= 4 && (width  % 4) == 0
-       && height >= 4 && (height % 4) == 0;
+       && width  >= f && (width  % f) == 0
+       && height >= f && (height % f) == 0;
 }
 
-static void gl3_native_box_disable(gl3_t *gl, const char *reason)
+/* Applies AND the pair reproduced the CPU box in this session: the only
+ * case where the card's reduction is trusted and announced. */
+static bool gl3_native_box_ready(const gl3_t *gl,
+      unsigned width, unsigned height, unsigned f)
+{
+   return gl3_native_box_applies(gl, width, height, f)
+       && groovy_boxtest_results_has(&gl->native_box_results,
+            f, width, height);
+}
+
+/* Tell the recording why the card did not reduce (NULL: it does). Only a
+ * change of text is passed on. */
+static void gl3_native_box_note(gl3_t *gl, const char *note)
+{
+   const char *want = note ? note : "";
+
+   if (strcmp(gl->native_box_note, want) == 0)
+      return;
+   snprintf(gl->native_box_note, sizeof(gl->native_box_note), "%s", want);
+   recording_capture_note(note);
+}
+
+static void gl3_native_box_disable_note(gl3_t *gl, const char *reason,
+      const char *note)
 {
    gl->native_box_disabled = true;
    RARCH_ERR("[GLCore] Native-FBO GPU box disabled: %s -- frames are read back unreduced.\n",
          reason);
+   gl3_native_box_note(gl, note);
+}
+
+static void gl3_native_box_disable(gl3_t *gl, const char *reason)
+{
+   char note[128];
+
+   snprintf(note, sizeof(note), "GPU path disabled: %s", reason);
+   gl3_native_box_disable_note(gl, reason, note);
 }
 
 /* A compile that failed without an info log comes back from
@@ -1778,12 +1819,12 @@ static bool gl3_native_box_program(gl3_t *gl)
  * window. Lazy, rebuilt when the dims change; incomplete, it disables the
  * box. */
 static bool gl3_native_box_target(gl3_t *gl,
-      unsigned width, unsigned height)
+      unsigned width, unsigned height, unsigned f)
 {
    GLint prev_draw_fbo, prev_read_fbo, prev_tex;
    bool complete;
-   unsigned bw = width  / 4;
-   unsigned bh = height / 4;
+   unsigned bw = width  / f;
+   unsigned bh = height / f;
 
    if (   gl->native_box_fbo != 0
        && gl->native_box_w   == bw
@@ -1845,7 +1886,7 @@ static bool gl3_native_box_target(gl3_t *gl,
 /* One box pass: the (0,0)-(width,height) region of src_tex averaged into the
  * reduced target. Every piece of GL state it touches is put back as it was:
  * the window path draws right after. */
-static void gl3_native_box_pass(gl3_t *gl, GLuint src_tex)
+static void gl3_native_box_pass(gl3_t *gl, GLuint src_tex, unsigned f)
 {
    GLint prev_vp[4];
    GLint prev_prog, prev_draw_fbo, prev_read_fbo;
@@ -1864,6 +1905,7 @@ static void gl3_native_box_pass(gl3_t *gl, GLuint src_tex)
    glActiveTexture(GL_TEXTURE0);
    glGetIntegerv(GL_TEXTURE_BINDING_2D,       &prev_tex);
 
+   (void)f;
    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gl->native_box_fbo);
    glViewport(0, 0, (GLsizei)gl->native_box_w, (GLsizei)gl->native_box_h);
    glDisable(GL_BLEND);
@@ -1895,30 +1937,26 @@ static void gl3_native_box_pass(gl3_t *gl, GLuint src_tex)
          (GLsizei)prev_vp[2], (GLsizei)prev_vp[3]);
 }
 
-/* The self-test, once per session, before the first real pass: a synthetic
- * frame of the native dims goes through the GPU box above and through the CPU
- * box the recording would otherwise run (groovy_downsample_box_rgb888_n4),
- * and every RGB byte is compared. Any difference, or any GL error raised
- * meanwhile, disables the box for the session: the frames are then read back
- * unreduced and the recording averages them on the CPU, where it shows.
- *
- * The frame: every RGB byte from a fixed-seed linear congruential generator
- * (non-uniform blocks, whose averages truncate), except the first row of
- * blocks, made of uniform 4x4 blocks that must come out unchanged (2D
- * invariance), with 0 and 255 in every channel across that row. */
+/* The self-test, once per (factor, size) pair of a session, before the first
+ * real pass: a synthetic frame of that size goes through the GPU box above
+ * and through the CPU box the recording would otherwise run, and every RGB
+ * byte is compared. The frame, the expected bytes and the comparison are the
+ * shared ones (groovy_box_selftest.h), so every driver is judged by the same
+ * bytes. Any difference, or any GL error raised meanwhile, disables the box
+ * for the session: the frames are then read back unreduced and the recording
+ * averages them on the CPU, where it shows. The reduced target must already
+ * be sized for (width, height, f). */
 static bool gl3_native_box_self_test(gl3_t *gl,
-      unsigned width, unsigned height)
+      unsigned width, unsigned height, unsigned f)
 {
-   static const uint8_t levels[8] = { 0, 255, 1, 254, 127, 128, 64, 191 };
-   unsigned bw          = width  / 4;
-   unsigned bh          = height / 4;
+   unsigned bw          = width  / f;
+   unsigned bh          = height / f;
    size_t npx           = (size_t)width * (size_t)height;
    size_t nbox          = (size_t)bw * (size_t)bh;
    uint8_t *rgba        = (uint8_t*)malloc(npx  * 4);
    uint8_t *rgb         = (uint8_t*)malloc(npx  * 3);
    uint8_t *cpu         = (uint8_t*)malloc(nbox * 3);
    uint8_t *gpu         = (uint8_t*)malloc(nbox * 4);
-   uint32_t seed        = 0x1badb002u;
    unsigned differ      = 0;
    unsigned compared    = (unsigned)(nbox * 3);
    GLuint tex           = 0;
@@ -1928,10 +1966,7 @@ static bool gl3_native_box_self_test(gl3_t *gl,
    GLint prev_pack_buf, prev_pack_align, prev_pack_row;
    GLint prev_read_fbo, prev_active, prev_tex;
    char reason[96];
-   size_t i;
-   unsigned x, y;
-
-   gl->native_box_tested = true;
+   unsigned x;
 
    if (!rgba || !rgb || !cpu || !gpu)
    {
@@ -1939,30 +1974,9 @@ static bool gl3_native_box_self_test(gl3_t *gl,
       goto done;
    }
 
-   for (i = 0; i < npx; i++)
-   {
-      seed          = seed * 1664525u + 1013904223u;
-      rgba[4*i + 0] = (uint8_t)(seed >> 24);
-      rgba[4*i + 1] = (uint8_t)(seed >> 16);
-      rgba[4*i + 2] = (uint8_t)(seed >>  8);
-      rgba[4*i + 3] = 255;
-   }
-   for (y = 0; y < 4; y++)
-      for (x = 0; x < width; x++)
-      {
-         unsigned b = x / 4;
-         uint8_t *p = rgba + ((size_t)y * width + x) * 4;
-         p[0]       = levels[b % 8];
-         p[1]       = (uint8_t)(255 - levels[b % 8]);
-         p[2]       = levels[(b + 3) % 8];
-      }
-   for (i = 0; i < npx; i++)
-   {
-      rgb[3*i + 0] = rgba[4*i + 0];
-      rgb[3*i + 1] = rgba[4*i + 1];
-      rgb[3*i + 2] = rgba[4*i + 2];
-   }
-   groovy_downsample_box_rgb888_n4(cpu, rgb, width, height);
+   groovy_boxtest_fill_rgba(rgba, width, height, f);
+   groovy_boxtest_rgba_to_rgb(rgb, rgba, npx);
+   groovy_boxtest_expected(cpu, rgb, width, height, f);
 
    /* Drop errors raised before us: only ours decide. */
    for (x = 0; x < 16 && glGetError() != GL_NO_ERROR; x++)
@@ -1993,7 +2007,7 @@ static bool gl3_native_box_self_test(gl3_t *gl,
    glPixelStorei(GL_UNPACK_ALIGNMENT,  prev_unpack_align);
    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, (GLuint)prev_unpack_buf);
 
-   gl3_native_box_pass(gl, tex);
+   gl3_native_box_pass(gl, tex, f);
 
    /* Synchronous readback, with nothing bound to the pack target. */
    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &prev_pack_buf);
@@ -2013,12 +2027,7 @@ static bool gl3_native_box_self_test(gl3_t *gl,
 
    err = glGetError();
 
-   for (i = 0; i < nbox; i++)
-   {
-      differ += gpu[4*i + 0] != cpu[3*i + 0];
-      differ += gpu[4*i + 1] != cpu[3*i + 1];
-      differ += gpu[4*i + 2] != cpu[3*i + 2];
-   }
+   differ = groovy_boxtest_compare(gpu, cpu, bw, bh);
 
    RARCH_LOG("[GLCore] Native-FBO GPU box self-test: %ux%u -> %ux%u, %u of %u bytes differ from the CPU box.\n",
          width, height, bw, bh, differ, compared);
@@ -2031,10 +2040,13 @@ static bool gl3_native_box_self_test(gl3_t *gl,
    }
    else if (differ != 0)
    {
+      char note[64];
       snprintf(reason, sizeof(reason),
             "the self-test found %u bytes that differ from the CPU box",
             differ);
-      gl3_native_box_disable(gl, reason);
+      snprintf(note, sizeof(note),
+            "GPU self-test failed: %u bytes differ", differ);
+      gl3_native_box_disable_note(gl, reason, note);
    }
    else
       ok = true;
@@ -2050,18 +2062,28 @@ done:
 }
 
 /* Reduce the (0,0)-(width,height) region of src_tex into the reduced target.
- * false = the box is not usable (now disabled for the session): the caller
- * reads the source back unreduced. */
+ * false = the box is not usable (disabled for the session, or not for this
+ * size): the caller reads the source back unreduced. A pair that has not yet
+ * reproduced the CPU box is tested here, once, before its first reduced
+ * frame. */
 static bool gl3_native_box_reduce(gl3_t *gl, GLuint src_tex,
-      unsigned width, unsigned height)
+      unsigned width, unsigned height, unsigned f)
 {
    if (!gl3_native_box_program(gl))
       return false;
-   if (!gl3_native_box_target(gl, width, height))
+   if (!gl3_native_box_target(gl, width, height, f))
       return false;
-   if (!gl->native_box_tested && !gl3_native_box_self_test(gl, width, height))
-      return false;
-   gl3_native_box_pass(gl, src_tex);
+   if (!groovy_boxtest_results_has(&gl->native_box_results,
+            f, width, height))
+   {
+      if (!gl3_native_box_self_test(gl, width, height, f))
+         return false;
+      if (!groovy_boxtest_results_add(&gl->native_box_results,
+               f, width, height))
+         return false;
+   }
+   gl3_native_box_pass(gl, src_tex, f);
+   gl3_native_box_note(gl, NULL);
    return true;
 }
 
@@ -3554,12 +3576,6 @@ static void *gl3_init(const video_info_t *video,
 
    gl->ctx_driver = ctx_driver;
    gl->video_info = *video;
-#ifndef HAVE_OPENGLES
-   /* crt-bridge: the 4x4 reduction is asked of this driver once, here. */
-   gl->native_box_requested = groovy_downsample_on_gpu(
-         getenv("GROOVY_DOWNSAMPLE")) != 0;
-#endif
-
    RARCH_LOG("[GLCore] Found GL context: \"%s\".\n", ctx_driver->ident);
 
    if (gl->ctx_driver->get_video_size)
@@ -4418,15 +4434,22 @@ refilling:
 }
 
 /* crt-bridge: the factor by which gl3_read_native will have averaged the
- * capture of a frame of these native dims — 4 when the GPU box serves it
- * (the predicate of gl3_native_box_applies, nothing else), 1 otherwise. */
+ * capture of a frame of these native dims: the factor the recording asked
+ * for when the GPU box serves it (the predicate of gl3_native_box_applies
+ * AND a pair that has reproduced the CPU box, gl3_native_box_ready), 1
+ * otherwise. The factor is asked of the recording, never read here; a pair is
+ * reduced only after it reproduced the CPU box. */
 static unsigned gl3_native_capture_divisor(void *data,
       unsigned width, unsigned height)
 {
 #ifndef HAVE_OPENGLES
    gl3_t *gl = (gl3_t*)data;
-   if (gl && gl3_native_box_applies(gl, width, height))
-      return 4;
+   if (gl)
+   {
+      unsigned f = recording_capture_reduction(width, height);
+      if (gl3_native_box_ready(gl, width, height, f))
+         return f;
+   }
 #endif
    return 1;
 }
@@ -4636,6 +4659,10 @@ static void gl3_native_capture_step(gl3_t *gl)
 #if defined(HAVE_MENU)
    unsigned width  = gl->native_capture_width;
    unsigned height = gl->native_capture_height;
+#ifndef HAVE_OPENGLES
+   /* Asked once per frame of the recording, for both branches. */
+   unsigned f      = recording_capture_reduction(width, height);
+#endif
 
    if (   (gl->flags & GL3_FLAG_MENU_TEXTURE_ENABLE)
        && gl->menu_texture != 0
@@ -4667,9 +4694,9 @@ static void gl3_native_capture_step(gl3_t *gl)
       /* gpu4: the composite goes through the same box as play. The box
        * keeps its source's orientation and 4 divides the height, so the
        * block grid does not depend on the drawing direction above. */
-      if (   gl3_native_box_applies(gl, width, height)
+      if (   gl3_native_box_applies(gl, width, height, f)
           && gl3_native_box_reduce(gl, gl->native_compose_tex,
-               width, height))
+               width, height, f))
       {
          gl3_pbo_async_readback_native(gl, gl->native_box_fbo,
                gl->native_box_w, gl->native_box_h);
@@ -4683,12 +4710,16 @@ static void gl3_native_capture_step(gl3_t *gl)
 #else
    unsigned width  = gl->native_capture_width;
    unsigned height = gl->native_capture_height;
+#ifndef HAVE_OPENGLES
+   unsigned f      = recording_capture_reduction(width, height);
+#endif
 #endif
 #ifndef HAVE_OPENGLES
-   /* gpu4: the GPU averages the core's surface into the reduced target and
-    * only that is read back. */
-   if (   gl3_native_box_applies(gl, width, height)
-       && gl3_native_box_reduce(gl, gl->hw_render_texture, width, height))
+   /* The GPU averages the core's surface into the reduced target and only
+    * that is read back. */
+   if (   gl3_native_box_applies(gl, width, height, f)
+       && gl3_native_box_reduce(gl, gl->hw_render_texture,
+            width, height, f))
    {
       gl3_pbo_async_readback_native(gl, gl->native_box_fbo,
             gl->native_box_w, gl->native_box_h);
