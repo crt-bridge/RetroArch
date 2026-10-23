@@ -33,8 +33,8 @@
  * average the 4x4 blocks on the GPU instead and read back only the native
  * size. The video driver reports, for every frame, the factor by which it
  * already reduced the capture; groovy_downsample_cpu_factor() turns that
- * report and the setting into the factor the CPU box still has to apply, so
- * a frame is never reduced twice. If the video driver did not reduce a
+ * report and the decided factor into the factor the CPU box still has to
+ * apply, so a frame is never reduced twice. If the video driver did not reduce a
  * "gpu4" frame, the CPU box does it (the image stays correct, only slower).
  * groovy_downsample_factor_parse() does not know "gpu4" on purpose: it keeps
  * its meaning for every other value, and an older binary reads "gpu4" as
@@ -91,18 +91,20 @@ static inline const char *groovy_downsample_mode_name(unsigned n, int on_gpu)
 }
 
 /* The factor the CPU box still has to apply to one frame; 0 = refuse it.
- * `factor` is the requested reduction, `on_gpu` says it was requested from the
- * video driver, `prereduced` is the factor by which the video driver already
- * averaged this frame (1 = not reduced).
- *   on_gpu:  prereduced == factor -> 1 (send as is); prereduced == 1 -> factor
- *            (the driver did not reduce, the CPU does); anything else -> 0.
- *   !on_gpu: prereduced == 1 -> factor; anything else -> 0 (a reduced frame
- *            nobody asked for must not be reduced again). */
-static inline unsigned groovy_downsample_cpu_factor(unsigned factor, int on_gpu,
+ * `factor` is the decided reduction, `prereduced` is the factor by which the
+ * video driver already averaged this frame (1 = not reduced). The answer
+ * does not depend on which setting chose the factor.
+ *   prereduced == factor -> 1 (the driver did the whole reduction: send as is)
+ *   prereduced == 1      -> factor (the driver did not reduce: the CPU does)
+ *   anything else        -> 0.
+ * A partial reduction is refused and never finished by a second box: two
+ * truncating boxes in cascade do not equal the single n*n box, so the frame
+ * would differ from the one the CPU path gives for the same setting. */
+static inline unsigned groovy_downsample_cpu_factor(unsigned factor,
                                                     unsigned prereduced)
 {
-    if (on_gpu && prereduced == factor) return 1u;
-    if (prereduced == 1u)               return factor;
+    if (prereduced == factor) return 1u;
+    if (prereduced == 1u)     return factor;
     return 0u;
 }
 

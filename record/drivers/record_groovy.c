@@ -3220,8 +3220,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
     enum groovy_reduction_reason red_reason = red.reason;
     unsigned cpu_factor = 0u;
     if (red.factor != 0u) {
-        cpu_factor = groovy_downsample_cpu_factor(red.factor,
-                st->downsample_gpu, pre_n);
+        cpu_factor = groovy_downsample_cpu_factor(red.factor, pre_n);
         if (cpu_factor == 0u)
             red_reason = GROOVY_REDUCTION_REFUSED_PREREDUCED;
     }
@@ -4663,6 +4662,28 @@ static bool groovy_push_av_info(void *data, const struct retro_system_av_info *a
 }
 
 /* ---------------------------------------------------------------------------
+ * vtable function: groovy_capture_reduction
+ *
+ * The video driver asks which factor it should reduce the capture by, for a
+ * rendered size. The answer comes from the same per-size memory that
+ * groovy_push_video reads for the same rendered size, so the two never
+ * disagree: the driver never decides the factor itself. A refusal, factor 1
+ * and a software capture all answer 1 (nothing to reduce).
+ * ------------------------------------------------------------------------- */
+static unsigned groovy_capture_reduction(void *data, unsigned w, unsigned h)
+{
+    groovy_state_t *st = (groovy_state_t *)data;
+    struct groovy_reduction_decision d;
+
+    if (!st || !st->reduction_hw)
+        return 1u;
+
+    d = groovy_reduction_memo_frame(&st->reduction_memo, st->reduction_mode,
+            st->reduction_hw, w, h, NULL);
+    return (d.factor > 0u) ? d.factor : 1u;
+}
+
+/* ---------------------------------------------------------------------------
  * Vtable registration.
  *
  * Field names use C99 designated initializers. push_av_info is registered
@@ -4686,4 +4707,5 @@ const record_driver_t record_groovy = {
     .finalize     = groovy_finalize,
     .ident        = "groovy",
     .push_av_info = groovy_push_av_info,   /* + Plan 03-06 EMT-03 */
+    .capture_reduction = groovy_capture_reduction,
 };

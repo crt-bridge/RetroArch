@@ -119,6 +119,12 @@ typedef struct record_driver
     * positional NULL entries skip cleanly. */
    bool  (*push_av_info)(void *data,
          const struct retro_system_av_info *av);
+   /* + crt-bridge: optional reduction hook. A video driver that can average
+    * the capture itself asks the recording which factor it wants for a
+    * rendered size; it never decides the factor. Returns the factor
+    * (1 = no reduction). NULL-default, as for push_av_info: drivers that
+    * omit the trailing members get NULL. */
+   unsigned (*capture_reduction)(void *data, unsigned width, unsigned height);
 } record_driver_t;
 
 
@@ -170,6 +176,11 @@ bool recording_init(void);
 void streaming_set_state(bool state);
 
 recording_state_t *recording_state_get_ptr(void);
+
+/* + crt-bridge: the factor the active record driver wants the capture of the
+ * given rendered size reduced by. 1 when nothing records or the driver has
+ * no reduction hook. */
+unsigned recording_capture_reduction(unsigned width, unsigned height);
 
 extern const record_driver_t *record_drivers[];
 
