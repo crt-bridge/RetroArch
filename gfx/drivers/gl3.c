@@ -214,6 +214,9 @@ typedef struct gl3
    struct groovy_boxtest_results native_box_results;
    /* The last note given to the recording about why the card did not reduce. */
    char native_box_note[128];
+   /* The last size left to the CPU, so that it is said once in the log. */
+   unsigned native_box_skip_w;
+   unsigned native_box_skip_h;
 #endif
    unsigned menu_texture_width;
    unsigned menu_texture_height;
@@ -2093,6 +2096,23 @@ done:
    return ok;
 }
 
+/* This size stays on the CPU: one line in the log per size, and the reason
+ * told to the recording. Always false, for the caller to return. */
+static bool gl3_native_box_skip(gl3_t *gl,
+      unsigned width, unsigned height, const char *why)
+{
+   if (   gl->native_box_skip_w != width
+       || gl->native_box_skip_h != height)
+   {
+      gl->native_box_skip_w = width;
+      gl->native_box_skip_h = height;
+      RARCH_LOG("[GLCore] Native-FBO GPU box not used for %ux%u: %s.\n",
+            width, height, why);
+   }
+   gl3_native_box_note(gl, why);
+   return false;
+}
+
 /* Reduce the (0,0)-(width,height) region of src_tex into the reduced target.
  * false = the box is not usable (disabled for the session, or not for this
  * size): the caller reads the source back unreduced. A pair that has not yet
@@ -2106,9 +2126,14 @@ static bool gl3_native_box_reduce(gl3_t *gl, GLuint src_tex,
    if (!groovy_boxtest_results_has(&gl->native_box_results,
             f, width, height))
    {
-      /* A size the test cannot allocate for stays on the CPU. */
+      /* A size the test cannot allocate for, or one the table of proven
+       * pairs has no room for, stays on the CPU. */
       if (!groovy_boxtest_fits(width, height, f))
-         return false;
+         return gl3_native_box_skip(gl, width, height,
+               "frame too large for the GPU self-test");
+      if (gl->native_box_results.count >= GROOVY_BOXTEST_TABLE_CAP)
+         return gl3_native_box_skip(gl, width, height,
+               "GPU self-test table full");
       /* The first time a factor is used, the stand-alone test on a size
        * whose width and height differ and are not 4:3 comes first: it
        * catches an inversion of the axes that the real size, if it is

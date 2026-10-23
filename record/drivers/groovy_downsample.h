@@ -24,10 +24,10 @@
  * The setting is the "Supersampling reduction" entry of the Recording
  * menu; the GROOVY_DOWNSAMPLE environment variable overrides it when set.
  * record_groovy.c reads both, and groovy_reduction.h decides the factor
- * (including "auto"). gl3.c still reads GROOVY_DOWNSAMPLE itself at init,
- * for "gpu4" only.
+ * (including "auto"). The video driver does not read the variable: it asks
+ * the recording for the factor with recording_capture_reduction().
  *
- * "gpu4" is a second way to ask for the same 4x4 reduction. Reading the
+ * "gpu4" is an alias of the 4x4 reduction. Reading the
  * full-size frame back from the GPU and averaging it on the CPU costs a
  * large share of the per-frame budget at 1280x960; a video driver can
  * average the 4x4 blocks on the GPU instead and read back only the native
@@ -73,21 +73,6 @@ static inline const char *groovy_downsample_factor_name(unsigned n)
         case 8u: return "8";
         default: return "off";
     }
-}
-
-/* 1 for exactly "gpu4" (case included, like the other values), 0 otherwise,
- * NULL included: the 4x4 reduction is requested from the video driver. */
-static inline int groovy_downsample_on_gpu(const char *s)
-{
-    return (s && !strcmp(s, "gpu4")) ? 1 : 0;
-}
-
-/* Name of the setting as logged: "gpu4" when the reduction is requested from
- * the video driver (factor 4), otherwise the plain factor name. */
-static inline const char *groovy_downsample_mode_name(unsigned n, int on_gpu)
-{
-    if (on_gpu && n == 4u) return "gpu4";
-    return groovy_downsample_factor_name(n);
 }
 
 /* The factor the CPU box still has to apply to one frame; 0 = refuse it.
