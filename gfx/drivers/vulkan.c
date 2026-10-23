@@ -309,6 +309,7 @@ typedef struct vk
       VkPipeline alpha_blend;
       VkPipeline font;
       VkPipeline rgb565_to_rgba8888;
+      VkPipeline native_box[3]; /* box reduction by 2, 4, 8: see vulkan_native_box_index */
 #ifdef VULKAN_HDR_SWAPCHAIN
       VkPipeline hdr;
       VkPipeline hdr_to_sdr; /* for readback */
@@ -1165,7 +1166,8 @@ static struct vk_texture vulkan_create_texture(vk_t *vk,
          break;
 
       case VULKAN_TEXTURE_READBACK:
-         buffer_info.usage  = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+         buffer_info.usage  = VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                            | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
          info.initialLayout = VK_IMAGE_LAYOUT_GENERAL;
          info.tiling        = VK_IMAGE_TILING_LINEAR;
          break;
@@ -3232,7 +3234,8 @@ static void vulkan_init_pipeline_layout(
    bindings[1].binding            = 1;
    bindings[1].descriptorType     = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
    bindings[1].descriptorCount    = 1;
-   bindings[1].stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT;
+   bindings[1].stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT |
+                                    VK_SHADER_STAGE_COMPUTE_BIT;
    bindings[1].pImmutableSamplers = NULL;
 
    bindings[2].binding            = 2;
@@ -3276,6 +3279,17 @@ static void vulkan_init_pipeline_layout(
          &layout_info, NULL, &vk->pipelines.layout);
 }
 
+/* Slot of the box reduction pipeline for factor f, which is 2, 4 or 8
+ * (the callers never pass another one). */
+static unsigned vulkan_native_box_index(unsigned f)
+{
+   if (f == 8)
+      return 2;
+   if (f == 4)
+      return 1;
+   return 0;
+}
+
 static void vulkan_init_pipelines(vk_t *vk)
 {
 #ifdef VULKAN_HDR_SWAPCHAIN
@@ -3301,6 +3315,10 @@ static void vulkan_init_pipelines(vk_t *vk)
 
    static const uint32_t rgb565_to_rgba8888_comp[] =
 #include "vulkan_shaders/rgb565_to_rgba8888.comp.inc"
+   ;
+
+   static const uint32_t native_box_comp[] =
+#include "vulkan_shaders/native_box.comp.inc"
    ;
 
    static const uint32_t pipeline_ribbon_vert[] =
@@ -3845,6 +3863,43 @@ static void vulkan_init_pipelines(vk_t *vk)
    vkCreateComputePipelines(vk->context->device, vk->pipelines.cache,
          1, &cpipe, NULL, &vk->pipelines.rgb565_to_rgba8888);
    vkDestroyShaderModule(vk->context->device, cpipe.stage.module, NULL);
+
+   /* Box reduction by 2, 4 and 8: one pipeline per factor, the factor being
+    * the specialisation constant 0 of the same shader. A pipeline that does
+    * not get created leaves its slot null, and the card is then never asked
+    * to reduce by that factor. */
+   {
+      unsigned f;
+      for (f = 2; f <= 8; f *= 2)
+      {
+         uint32_t factor                      = f;
+         VkSpecializationMapEntry spec_entry;
+         VkSpecializationInfo spec_info;
+         VkPipeline *slot                     =
+            &vk->pipelines.native_box[vulkan_native_box_index(f)];
+
+         spec_entry.constantID                = 0;
+         spec_entry.offset                    = 0;
+         spec_entry.size                      = sizeof(factor);
+         spec_info.mapEntryCount              = 1;
+         spec_info.pMapEntries                = &spec_entry;
+         spec_info.dataSize                   = sizeof(factor);
+         spec_info.pData                      = &factor;
+
+         *slot                                = VK_NULL_HANDLE;
+         module_info.codeSize                 = sizeof(native_box_comp);
+         module_info.pCode                    = native_box_comp;
+         cpipe.stage.pSpecializationInfo      = &spec_info;
+         if (vkCreateShaderModule(vk->context->device,
+                  &module_info, NULL, &cpipe.stage.module) != VK_SUCCESS)
+            continue;
+         if (vkCreateComputePipelines(vk->context->device, vk->pipelines.cache,
+                  1, &cpipe, NULL, slot) != VK_SUCCESS)
+            *slot = VK_NULL_HANDLE;
+         vkDestroyShaderModule(vk->context->device, cpipe.stage.module, NULL);
+      }
+      cpipe.stage.pSpecializationInfo         = NULL;
+   }
 }
 
 static void vulkan_init_samplers(vk_t *vk)
@@ -4034,6 +4089,16 @@ static void vulkan_deinit_pipelines(vk_t *vk)
          vk->pipelines.font, NULL);
    vkDestroyPipeline(vk->context->device,
          vk->pipelines.rgb565_to_rgba8888, NULL);
+   {
+      unsigned f;
+      for (f = 2; f <= 8; f *= 2)
+      {
+         unsigned slot = vulkan_native_box_index(f);
+         vkDestroyPipeline(vk->context->device,
+               vk->pipelines.native_box[slot], NULL);
+         vk->pipelines.native_box[slot] = VK_NULL_HANDLE;
+      }
+   }
 #ifdef VULKAN_HDR_SWAPCHAIN
 if (vk->context->flags & VK_CTX_FLAG_HDR_SUPPORT)
 {
