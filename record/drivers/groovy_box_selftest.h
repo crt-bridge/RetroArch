@@ -34,6 +34,17 @@
 #include <string.h>
 #include "groovy_downsample.h"
 
+/* The size of the second, stand-alone test of every factor. It is neither
+ * square nor 4:3, so a swap of width and height cannot pass it, and its width
+ * and height reduced by 8 (127 x 93) are both odd, which a size that is a
+ * multiple of 16 would never show. */
+#define GROOVY_BOXTEST_AXIS_W      1016u
+#define GROOVY_BOXTEST_AXIS_H      744u
+
+/* The most pixels a test image may have (4096 x 2048): the test allocates
+ * seven bytes per pixel, and the size comes from whatever core is running. */
+#define GROOVY_BOXTEST_MAX_PIXELS  (4096u * 2048u)
+
 /* 1 for the factors the CPU box has a fixed version of (2, 4, 8), 0 for the
  * rest: the self-test is never run for a factor it cannot judge. */
 static inline int groovy_boxtest_factor_ok(unsigned n)
@@ -41,9 +52,24 @@ static inline int groovy_boxtest_factor_ok(unsigned n)
     return n == 2u || n == 4u || n == 8u;
 }
 
+/* 1 when a w x h image can be tested for the factor n: the factor is admitted,
+ * both sides are at least n and divide by it, and the pixel count (computed on
+ * 64 bits, so a hostile size cannot wrap) is at most
+ * GROOVY_BOXTEST_MAX_PIXELS. */
+static inline int groovy_boxtest_fits(unsigned w, unsigned h, unsigned n)
+{
+    if (!groovy_boxtest_factor_ok(n))
+        return 0;
+    if (w < n || h < n)
+        return 0;
+    if ((w % n) != 0u || (h % n) != 0u)
+        return 0;
+    return ((uint64_t)w * (uint64_t)h) <= (uint64_t)GROOVY_BOXTEST_MAX_PIXELS;
+}
+
 /* Fill `rgba` (w * h pixels, rows in order, R G B A in memory) with the test
- * image for the factor n. Writes nothing if the factor is not admitted or the
- * dimensions do not divide by it. */
+ * image for the factor n. Writes nothing if the image does not fit
+ * (groovy_boxtest_fits). */
 static inline void groovy_boxtest_fill_rgba(uint8_t *rgba, unsigned w,
                                             unsigned h, unsigned n)
 {
@@ -52,7 +78,7 @@ static inline void groovy_boxtest_fill_rgba(uint8_t *rgba, unsigned w,
     size_t   npx, i;
     unsigned x, y;
 
-    if (!rgba || !groovy_boxtest_factor_ok(n) || !groovy_downsample_dims_ok(w, h, n))
+    if (!rgba || !groovy_boxtest_fits(w, h, n))
         return;
 
     npx = (size_t)w * (size_t)h;
@@ -90,13 +116,12 @@ static inline void groovy_boxtest_rgba_to_rgb(uint8_t *rgb, const uint8_t *rgba,
 
 /* What the card must produce: the CPU box of the packed RGB888 image `rgb`
  * (w x h), written to `cpu_rgb` as (w / n) x (h / n) packed RGB888. Returns 1
- * when it was computed, 0 (and writes nothing) for a factor that is not
- * admitted or dimensions that do not divide by it. */
+ * when it was computed, 0 (and writes nothing) when the image does not fit
+ * (groovy_boxtest_fits). */
 static inline int groovy_boxtest_expected(uint8_t *cpu_rgb, const uint8_t *rgb,
                                           unsigned w, unsigned h, unsigned n)
 {
-    if (!cpu_rgb || !rgb || !groovy_boxtest_factor_ok(n)
-            || !groovy_downsample_dims_ok(w, h, n))
+    if (!cpu_rgb || !rgb || !groovy_boxtest_fits(w, h, n))
         return 0;
 
     switch (n) {
