@@ -9636,8 +9636,10 @@ unsigned menu_displaylist_build_list(
                 * none of them is any use. This renumbers the seven groovy
                 * .checked lines (12 to 18), never the twelve before them.
                 * The receiver 31 kHz switch follows the padded session
-                * (index 19, the other master-receiver settings), which
-                * moves the follower entries one slot down (20 to 27). */
+                * (index 19, the other master-receiver settings). The
+                * supersampling reduction follows the 31 kHz switch (index
+                * 20), which moves the follower entries one more slot down
+                * (21 to 28). */
                {MENU_ENUM_LABEL_GROOVY_MASTER_ADDRESS,                                 PARSE_ONLY_STRING,         false},
                {MENU_ENUM_LABEL_GROOVY_BRIDGE_ENABLE,                                  PARSE_ONLY_BOOL,           false},
                {MENU_ENUM_LABEL_GROOVY_COMPRESSION,                                    PARSE_ONLY_BOOL,           false},
@@ -9646,10 +9648,11 @@ unsigned menu_displaylist_build_list(
                {MENU_ENUM_LABEL_GROOVY_MTU,                                            PARSE_ONLY_UINT,           false},
                {MENU_ENUM_LABEL_GROOVY_PAD,                                            PARSE_ONLY_BOOL,           false},
                {MENU_ENUM_LABEL_GROOVY_31KHZ,                                          PARSE_ONLY_BOOL,           false},
+               {MENU_ENUM_LABEL_GROOVY_REDUCTION,                                      PARSE_ONLY_UINT,           false},
                /* groovy_followers (the single text field) NO LONGER has an
                 * entry here -- replaced, IN THE MENU, by the four
                 * "Additional Follower N" switches and their addresses
-                * below (indices 20 to 27). The key stays the expert path,
+                * below (indices 21 to 28). The key stays the expert path,
                 * hand-editable in retroarch.cfg. */
                {MENU_ENUM_LABEL_GROOVY_FOLLOWER_1_ENABLE,                              PARSE_ONLY_BOOL,           false},
                {MENU_ENUM_LABEL_GROOVY_FOLLOWER_1_ADDRESS,                             PARSE_ONLY_STRING,         false},
@@ -9678,14 +9681,15 @@ unsigned menu_displaylist_build_list(
             build_list[17].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_MTU */
             build_list[18].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_PAD */
             build_list[19].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_31KHZ */
-            build_list[20].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_1_ENABLE */
-            build_list[21].checked = is_groovy && groovy_follower_1_on; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_1_ADDRESS */
-            build_list[22].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_2_ENABLE */
-            build_list[23].checked = is_groovy && groovy_follower_2_on; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_2_ADDRESS */
-            build_list[24].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_3_ENABLE */
-            build_list[25].checked = is_groovy && groovy_follower_3_on; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_3_ADDRESS */
-            build_list[26].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_4_ENABLE */
-            build_list[27].checked = is_groovy && groovy_follower_4_on; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_4_ADDRESS */
+            build_list[20].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_REDUCTION */
+            build_list[21].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_1_ENABLE */
+            build_list[22].checked = is_groovy && groovy_follower_1_on; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_1_ADDRESS */
+            build_list[23].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_2_ENABLE */
+            build_list[24].checked = is_groovy && groovy_follower_2_on; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_2_ADDRESS */
+            build_list[25].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_3_ENABLE */
+            build_list[26].checked = is_groovy && groovy_follower_3_on; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_3_ADDRESS */
+            build_list[27].checked = is_groovy; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_4_ENABLE */
+            build_list[28].checked = is_groovy && groovy_follower_4_on; /* MENU_ENUM_LABEL_GROOVY_FOLLOWER_4_ADDRESS */
 
             for (i = 0; i < ARRAY_SIZE(build_list); i++)
             {
