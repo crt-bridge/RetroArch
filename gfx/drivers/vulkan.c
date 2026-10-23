@@ -6161,15 +6161,16 @@ static void vulkan_native_readback(vk_t *vk, VkImage src,
  * A failure turns the card off for the session: frames are then read back
  * unreduced and the recording averages them on the CPU, where it shows. */
 
-/* Tell the recording why the card did not reduce (NULL: it does). Only a
- * change of text is passed on. */
+/* Tell the recording why the card did not reduce (NULL: it does). Passed on
+ * every time the decision is taken, not only when the text changes: a
+ * recording that restarts under a driver that is still alive starts with no
+ * note, and a cached "same text" would never tell it again. The copy kept
+ * here is the one vulkan_native_capture_divisor repeats once the card is
+ * off. */
 static void vulkan_native_box_note(vk_t *vk, const char *note)
 {
-   const char *want = note ? note : "";
-
-   if (strcmp(vk->native.box_note, want) == 0)
-      return;
-   strlcpy(vk->native.box_note, want, sizeof(vk->native.box_note));
+   strlcpy(vk->native.box_note, note ? note : "",
+         sizeof(vk->native.box_note));
    recording_capture_note(note);
 }
 
@@ -7560,6 +7561,12 @@ static unsigned vulkan_native_capture_divisor(void *data,
       unsigned f                        = recording_capture_reduction(width, height);
       VkFormat format                   = vk->hw.image->create_info.format;
       const VkImageViewCreateInfo *view = &vk->hw.image->create_info;
+
+      /* Once the card is off nothing decides again, so nothing would say
+       * why: repeat the cause on every frame, before the recording reads
+       * the capture, for a recording that started after the card went off. */
+      if (vk->native.box_disabled)
+         recording_capture_note(vk->native.box_note);
 
 #if defined(HAVE_MENU)
       if (vulkan_native_menu_composes(vk, width, height))

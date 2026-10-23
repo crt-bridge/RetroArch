@@ -1746,15 +1746,15 @@ static bool gl3_native_box_ready(const gl3_t *gl,
             f, width, height);
 }
 
-/* Tell the recording why the card did not reduce (NULL: it does). Only a
- * change of text is passed on. */
+/* Tell the recording why the card did not reduce (NULL: it does). Passed on
+ * every time the decision is taken, not only when the text changes: a
+ * recording that restarts under a driver that is still alive starts with no
+ * note, and a cached "same text" would never tell it again. The copy kept
+ * here is the one gl3_native_capture_divisor repeats once the card is off. */
 static void gl3_native_box_note(gl3_t *gl, const char *note)
 {
-   const char *want = note ? note : "";
-
-   if (strcmp(gl->native_box_note, want) == 0)
-      return;
-   snprintf(gl->native_box_note, sizeof(gl->native_box_note), "%s", want);
+   snprintf(gl->native_box_note, sizeof(gl->native_box_note), "%s",
+         note ? note : "");
    recording_capture_note(note);
 }
 
@@ -4530,6 +4530,11 @@ static unsigned gl3_native_capture_divisor(void *data,
    if (gl)
    {
       unsigned f = recording_capture_reduction(width, height);
+      /* Once the card is off nothing decides again, so nothing would say
+       * why: repeat the cause on every frame, before the recording reads
+       * the capture, for a recording that started after the card went off. */
+      if (gl->native_box_disabled)
+         recording_capture_note(gl->native_box_note);
       if (gl3_native_box_ready(gl, width, height, f))
          return f;
    }
