@@ -437,6 +437,11 @@ static inline int groovy_reduction_refusal_format(char *buf, size_t cap,
         n = snprintf(buf, cap, "Frame refused: %ux%u reduced by %u "
                 "is still too large for the receiver. Choose Auto or a larger factor.",
                 w, h, fixed);
+    else if (decision.reason == GROOVY_REDUCTION_REFUSED_NOT_DIVISIBLE
+            && fixed == 0u)
+        n = snprintf(buf, cap, "Frame refused: %ux%u does not divide by "
+                "the reduction factor. Choose another setting.",
+                w, h);
     else if (decision.reason == GROOVY_REDUCTION_REFUSED_NOT_DIVISIBLE)
         n = snprintf(buf, cap, "Frame refused: %ux%u does not divide by %u. "
                 "Choose Auto or another factor.",
