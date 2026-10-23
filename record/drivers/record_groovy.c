@@ -156,6 +156,8 @@ static inline void groovy_pacing_log_mute(const char *ev) { (void)ev; }
 /* Generic CPU supersampling box: reads GROOVY_DOWNSAMPLE and averages
  * n*n blocks. Same pattern as groovy_compression.h above. */
 #include "groovy_downsample.h"
+/* Supersampling reduction rule: setting, per-size memory, status line. */
+#include "groovy_reduction.h"
 #include "groovy_convert.h"
 
 /* Input-channel setting and latency histogram: reads GROOVY_INPUT,
@@ -234,6 +236,7 @@ static inline void groovy_pacing_log_mute(const char *ev) { (void)ev; }
 #include "../../menu/menu_defines.h"   /* MENU_ST_FLAG_ALIVE */
 #endif
 #include "../../configuration.h"       /* config_get_ptr, settings_t.floats.video_refresh_rate */
+#include "../../gfx/video_driver.h"    /* video_driver_is_hw_context, video_driver_get_ident */
 #include "groovy_servo.h"              /* apres groovy_pacing.h : il consomme groovy_ack_state_t */
 
 /* Bench-only diagnostics switch (HAVE_GROOVY_BENCH). Keep this LAST among
@@ -513,11 +516,18 @@ typedef struct {
     uint64_t  last_emit_e_ns;               /* QPC at entry of groovy_push_video */
     uint64_t  last_emit_s_ns;               /* QPC just before the send chain (emit_t0) */
 
-    /* --- Supersampling CPU box. Set at session opening; 1 = off, and then
-     * none of this is touched. --- */
-    unsigned  downsample_n;                 /* 1, 2, 4 or 8 */
+    /* --- Supersampling reduction. The mode, its origin and the capture
+     * kind are set once at session opening; the memo, the two limiters and
+     * the refusal counters are zero at the start (calloc). --- */
+    enum groovy_reduction_mode reduction_mode;
     int       downsample_gpu;               /* 1 = "gpu4": the video driver is asked to do the 4x4 reduction */
-    uint8_t  *down_buf;                     /* box destination, allocated as needed */
+    int       reduction_hw;                 /* 1 = hardware capture (a supersampled FBO) */
+    int       reduction_from_env;           /* 1 = GROOVY_DOWNSAMPLE chose the mode, 0 = the menu */
+    struct groovy_reduction_memo   reduction_memo;   /* decision per rendered size */
+    struct groovy_reduction_said   reduction_said;   /* what the status line last said */
+    struct groovy_reduction_pacer  reduction_pacer;  /* limits the refusal message */
+    uint64_t  reduction_refused[GROOVY_REDUCTION_REFUSED_PREREDUCED + 1]; /* frames refused, per cause */
+    uint8_t  *down_buf;                    /* box destination, allocated as needed */
     size_t    down_cap;
     uint64_t  downsample_dims_mismatch;     /* frames rejected, never distorted */
     uint64_t  downsample_prereduced_mismatch; /* frames already reduced by the video driver, not expected */
@@ -1365,6 +1375,39 @@ static void *groovy_new(const struct record_params *params)
             st->mode_state.khz31 = (k != 0);
         }
 
+        /* Supersampling reduction. Read once per session, so a change made
+         * in the menu applies the next time content is loaded. "gpu4" keeps
+         * the card doing the reduction because the video driver reads the
+         * same variable when it starts, before any menu exists; every other
+         * setting reduces on the processor. */
+        env = getenv("GROOVY_DOWNSAMPLE");
+        if (groovy_precedence_env_wins(env)) {
+            enum groovy_reduction_mode rm = GROOVY_REDUCTION_AUTO;
+            int                        rg = 0;
+
+            if (!groovy_reduction_parse(env, &rm, &rg)) {
+                rm = GROOVY_REDUCTION_AUTO;
+                rg = 0;
+                snprintf(msg, sizeof msg,
+                         "GROOVY_DOWNSAMPLE=\"%s\" not understood (expected "
+                         "auto, off, 2, 4, 8 or gpu4): Auto is used", env);
+                groovy_log_error(msg);
+            }
+            st->reduction_mode     = rm;
+            st->downsample_gpu     = rg;
+            st->reduction_from_env = 1;
+            groovy_precedence_msg(msg, sizeof msg, "groovy_reduction",
+                                  groovy_reduction_name(rm, rg),
+                                  "GROOVY_DOWNSAMPLE");
+            groovy_log_forced(msg);
+        } else {
+            st->reduction_mode = groovy_reduction_mode_from_menu(
+                    cfg ? cfg->uints.groovy_reduction
+                        : (unsigned)GROOVY_REDUCTION_AUTO);
+            st->downsample_gpu = 0;
+            st->reduction_from_env = 0;
+        }
+
         /* son */
         env = getenv("GROOVY_AUDIO");
         if (groovy_precedence_env_wins(env)) {
@@ -1779,14 +1822,22 @@ static void *groovy_new(const struct record_params *params)
                    st->rx[0].target);
     }
 
-    /* Supersampling box setting, read once here. See groovy_downsample.h
-     * for why this is an environment variable. */
-    st->downsample_gpu = groovy_downsample_on_gpu(getenv("GROOVY_DOWNSAMPLE"));
-    st->downsample_n   = st->downsample_gpu
-                       ? 4u
-                       : groovy_downsample_factor_parse(getenv("GROOVY_DOWNSAMPLE"));
+    /* Supersampling reduction: the mode is resolved above, in the "Menu /
+     * variable precedence" block. What is left to know here is whether the
+     * capture is a hardware one (a supersampled FBO), which the rule needs.
+     * Some cores never call push_av_info, so the declared size is also
+     * remembered from the parameters of the session. */
+    st->reduction_hw = (params && params->video_gpu_record
+                        && params->pix_fmt == FFEMU_PIX_BGR24
+                        && video_driver_is_hw_context()) ? 1 : 0;
+    groovy_reduction_memo_declare(&st->reduction_memo,
+                                  params ? params->out_width : 0u,
+                                  params ? params->out_height : 0u);
     RARCH_LOG("[groovy] downsample: factor=%s\n",
-              groovy_downsample_mode_name(st->downsample_n, st->downsample_gpu));
+              groovy_reduction_name(st->reduction_mode, st->downsample_gpu));
+    RARCH_LOG("[groovy] downsample: source=%s hw_capture=%d\n",
+              st->reduction_from_env ? "GROOVY_DOWNSAMPLE" : "menu",
+              st->reduction_hw);
 
     /* Diagnostic hook: deliberately skip sending one frame in N, to prove
      * on the bench that a missing blit is tolerated. No effect when
@@ -3135,26 +3186,56 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         s_ff_last_emit_usec = now;
     }
 
-    /* Supersampling box, CPU side (quick 260901-po3): divide the dims BEFORE mode
+    /* Supersampling reduction, CPU side: divide the dims BEFORE mode
      * classification, otherwise an enlarged submission accidentally flips
      * the receiver into 480i. Placed AFTER the two guards above so that
-     * downsample_dims_mismatch doesn't count startup frames, from before
-     * the fps handshake. */
+     * the refusal counters don't count startup frames, from before the
+     * fps handshake.
+     *
+     * The factor comes from the memory by RENDERED size (the captured size
+     * times what the video driver already reduced), and it is asked for
+     * here, before the regime is classified: the factor never depends on
+     * the regime, and it only changes when the rendered size does. A
+     * product that does not fit 32 bits is a refusal. */
+    const unsigned pre_n = (vid->prereduced > 0u) ? vid->prereduced : 1u;
+    struct groovy_reduction_decision red;
+    unsigned rend_w = cap_w;
+    unsigned rend_h = cap_h;
+    if ((uint64_t)cap_w * pre_n > UINT32_MAX
+        || (uint64_t)cap_h * pre_n > UINT32_MAX) {
+        red = groovy_reduction_make(0u, GROOVY_REDUCTION_REFUSED_OVERSIZE);
+    } else {
+        rend_w = cap_w * pre_n;
+        rend_h = cap_h * pre_n;
+        red = groovy_reduction_memo_frame(&st->reduction_memo,
+                st->reduction_mode, st->reduction_hw, rend_w, rend_h, NULL);
+    }
+
     /* The factor the CPU box still applies to THIS frame. The video driver
-     * may already have reduced the capture (vid->prereduced > 1); a frame is
-     * never reduced twice, and a reduced frame nobody asked for is refused
+     * may already have reduced the capture (pre_n > 1); a frame is never
+     * reduced twice, and a reduced frame nobody asked for is refused
      * (cpu_factor 0). groovy_downsample_cpu_factor() holds the decision. */
-    const unsigned cpu_factor = groovy_downsample_cpu_factor(
-            st->downsample_n, st->downsample_gpu, vid->prereduced);
+    enum groovy_reduction_reason red_reason = red.reason;
+    unsigned cpu_factor = 0u;
+    if (red.factor != 0u) {
+        cpu_factor = groovy_downsample_cpu_factor(red.factor,
+                st->downsample_gpu, pre_n);
+        if (cpu_factor == 0u)
+            red_reason = GROOVY_REDUCTION_REFUSED_PREREDUCED;
+    }
     if (cpu_factor == 0u) {
-        static unsigned s_pre_warn_w = 0u, s_pre_warn_h = 0u;
-        st->downsample_prereduced_mismatch++;
-        if (s_pre_warn_w != cap_w || s_pre_warn_h != cap_h) {
-            RARCH_WARN(
-                "[groovy] downsample_prereduced_mismatch: %ux%u reduced by %u by the video driver, not expected -- frame refused\n",
-                cap_w, cap_h, vid->prereduced);
-            s_pre_warn_w = cap_w;
-            s_pre_warn_h = cap_h;
+        if (red_reason == GROOVY_REDUCTION_REFUSED_PREREDUCED) {
+            static unsigned s_pre_warn_w = 0u, s_pre_warn_h = 0u;
+            st->downsample_prereduced_mismatch++;
+            if (s_pre_warn_w != cap_w || s_pre_warn_h != cap_h) {
+                RARCH_WARN(
+                    "[groovy] downsample_prereduced_mismatch: %ux%u reduced by %u by the video driver, not expected -- frame refused\n",
+                    cap_w, cap_h, pre_n);
+                s_pre_warn_w = cap_w;
+                s_pre_warn_h = cap_h;
+            }
+        } else {
+            st->reduction_refused[red_reason]++;
         }
         return true;   /* soft-skip, session alive */
     }
@@ -4298,9 +4379,9 @@ static bool groovy_finalize(void *data)
      * above. */
     if (st->downsample_dims_mismatch > 0u)
         RARCH_LOG("[groovy] downsample: %llu frames refused (dims not "
-                  "divisible by %u)\n",
+                  "divisible) under %s\n",
                   (unsigned long long)st->downsample_dims_mismatch,
-                  st->downsample_n);
+                  groovy_reduction_name(st->reduction_mode, st->downsample_gpu));
     if (st->downsample_prereduced_mismatch > 0u)
         RARCH_LOG(
             "[groovy] downsample: %llu frames refused (pre-reduced by the video driver, not expected)\n",
@@ -4457,15 +4538,23 @@ static bool groovy_push_av_info(void *data, const struct retro_system_av_info *a
      * every frame (design finding 4). */
     unsigned gw = av->geometry.base_width;
     unsigned gh = av->geometry.base_height;
-    if (st->downsample_n > 1u) {
-        if (!groovy_downsample_dims_ok(gw, gh, st->downsample_n)) {
-            RARCH_WARN("[groovy] downsample_dims_mismatch (av_info): %ux%u not "
-                       "divisible by %u — no announcement\n",
-                       gw, gh, st->downsample_n);
+
+    /* The declared size is remembered as the candidate reference of the
+     * memory by rendered size: it is adopted at the next change of rendered
+     * size, so a declaration that flips under a stable picture cannot move
+     * the factor. The factor applied to the declared base is the setting's
+     * decision on that base. */
+    groovy_reduction_memo_declare(&st->reduction_memo, gw, gh);
+    {
+        const struct groovy_reduction_decision hint = groovy_reduction_decide(
+                st->reduction_mode, st->reduction_hw, gw, gh, gw, gh);
+        if (hint.factor == 0u) {
+            RARCH_WARN("[groovy] downsample (av_info): %ux%u refused by the setting -- no announcement\n",
+                       gw, gh);
             return true;   /* announce nothing rather than announce something wrong */
         }
-        gw /= st->downsample_n;
-        gh /= st->downsample_n;
+        gw /= hint.factor;
+        gh /= hint.factor;
     }
 
     /* Update the per-instance last-known-fps cache (still needed:
