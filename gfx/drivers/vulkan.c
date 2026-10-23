@@ -6552,6 +6552,24 @@ static bool vulkan_native_box_prove(vk_t *vk,
    return true;
 }
 
+/* Why the card does not read an image of this format (one that is not on the
+ * whitelist): the text told to the recording and written in the log. */
+static void vulkan_native_box_format_why(VkFormat format,
+      char *why, size_t cap)
+{
+   switch (format)
+   {
+      case VK_FORMAT_R8G8B8A8_SRGB:
+      case VK_FORMAT_B8G8R8A8_SRGB:
+      case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+         snprintf(why, cap, "sRGB image");
+         break;
+      default:
+         snprintf(why, cap, "unsupported image format %d", (int)format);
+         break;
+   }
+}
+
 /* The card may reduce the core's image only when the image reads exactly as
  * the CPU reads it: say why not, once per size, when it does not. Otherwise
  * prove the pair. */
@@ -6566,18 +6584,7 @@ static bool vulkan_native_box_consider(vk_t *vk,
 
    if (!vulkan_native_box_format_ok(view->format))
    {
-      switch (view->format)
-      {
-         case VK_FORMAT_R8G8B8A8_SRGB:
-         case VK_FORMAT_B8G8R8A8_SRGB:
-         case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
-            snprintf(why, sizeof(why), "sRGB image");
-            break;
-         default:
-            snprintf(why, sizeof(why), "unsupported image format %d",
-                  (int)view->format);
-            break;
-      }
+      vulkan_native_box_format_why(view->format, why, sizeof(why));
       return vulkan_native_box_skip(vk, width, height, why);
    }
    if (!vulkan_native_box_view_ok(view))
@@ -7292,6 +7299,42 @@ static bool vulkan_native_compose_target(vk_t *vk,
    return true;
 }
 
+#if defined(HAVE_MENU)
+/* Does this frame of the capture read the surface the driver composes (the
+ * core's frame with the menu drawn over it) rather than the core's own
+ * image? The step and the divisor ask this alike. */
+static bool vulkan_native_menu_composes(vk_t *vk,
+      unsigned width, unsigned height)
+{
+   return (vk->flags & VK_FLAG_MENU_ENABLE)
+       && (   vk->menu.textures[vk->menu.last_index].image  != VK_NULL_HANDLE
+           || vk->menu.textures[vk->menu.last_index].buffer != VK_NULL_HANDLE)
+       && width && height;
+}
+
+/* Menu open: the pair is proven, and the only thing between the card and the
+ * composed surface is the swapchain's format. Say so, once per size, as for
+ * the core's own image. The menu is composed at the size of the last core
+ * frame, so the pair is already proven and nothing else is announced. */
+static void vulkan_native_box_menu_note(vk_t *vk,
+      unsigned width, unsigned height, unsigned f)
+{
+   VkFormat format = vk->context->swapchain_format;
+   char why[48];
+
+   if (   !groovy_boxtest_factor_ok(f)
+       || vk->native.box_disabled
+       || !vulkan_native_box_divides(width, height, f)
+       || !groovy_boxtest_results_has(&vk->native.box_results,
+            f, width, height)
+       || vulkan_native_box_format_ok(format))
+      return;
+
+   vulkan_native_box_format_why(format, why, sizeof(why));
+   vulkan_native_box_skip(vk, width, height, why);
+}
+#endif
+
 /* One native capture pass.
  *
  * Menu closed — all of gameplay — the readback aims straight at the core's
@@ -7311,10 +7354,7 @@ static void vulkan_native_capture_step(vk_t *vk)
    unsigned f                = recording_capture_reduction(width, height);
 
 #if defined(HAVE_MENU)
-   if (   (vk->flags & VK_FLAG_MENU_ENABLE)
-       && (   vk->menu.textures[vk->menu.last_index].image  != VK_NULL_HANDLE
-           || vk->menu.textures[vk->menu.last_index].buffer != VK_NULL_HANDLE)
-       && width && height
+   if (   vulkan_native_menu_composes(vk, width, height)
        && vulkan_native_compose_target(vk, width, height))
    {
       struct vk_draw_quad quad;
@@ -7444,10 +7484,39 @@ static void vulkan_native_capture_step(vk_t *vk)
       vk->tracker.pipeline = VK_NULL_HANDLE;
       vk->tracker.dirty   |= VULKAN_DIRTY_DYNAMIC_BIT;
 
-      /* 4. Read OUR surface, not the core's. */
-      vulkan_native_readback(vk, vk->native.compose.image,
-            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            vk->context->swapchain_format, width, height);
+      /* 4. Read OUR surface, not the core's. The composite goes through the
+       *    same box as play when the swapchain's format is one the card
+       *    reads as the CPU does (an sRGB or other swapchain leaves the CPU
+       *    to reduce it, and says so). The surface is sampled by the pass:
+       *    it leaves the render pass as a colour attachment and goes to
+       *    SHADER_READ_ONLY_OPTIMAL first. The pass keeps the orientation of
+       *    the surface it reads, like the copy. */
+      {
+         VkImageLayout compose_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+         if (vulkan_native_box_ready(vk, width, height, f,
+                  vk->context->swapchain_format, NULL))
+         {
+            VULKAN_IMAGE_LAYOUT_TRANSITION(vk->cmd, vk->native.compose.image,
+                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                  VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                  VK_ACCESS_SHADER_READ_BIT,
+                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            compose_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+            if (vulkan_native_box_readback(vk, vk->native.compose.view,
+                     compose_layout, f, width, height))
+               return;
+         }
+         else
+            vulkan_native_box_menu_note(vk, width, height, f);
+
+         vulkan_native_readback(vk, vk->native.compose.image,
+               compose_layout, vk->context->swapchain_format,
+               width, height);
+      }
       return;
    }
 #endif
@@ -7478,7 +7547,9 @@ static void vulkan_native_capture_step(vk_t *vk)
  * never read here, and it is answered only for a pair the card has already
  * reproduced (vulkan_native_box_ready, the predicate of the capture step
  * too): the first frame of a new pair is read at full size and dropped by the
- * dimension guard of vulkan_read_native, as it is today. */
+ * dimension guard of vulkan_read_native, as it is today. The image the
+ * predicate looks at is the one the step reads: the core's, or, menu open,
+ * the surface composed in the swapchain's format. */
 static unsigned vulkan_native_capture_divisor(void *data,
       unsigned width, unsigned height)
 {
@@ -7486,11 +7557,19 @@ static unsigned vulkan_native_capture_divisor(void *data,
 
    if (vk && vulkan_native_capture_active(vk))
    {
-      unsigned f = recording_capture_reduction(width, height);
+      unsigned f                        = recording_capture_reduction(width, height);
+      VkFormat format                   = vk->hw.image->create_info.format;
+      const VkImageViewCreateInfo *view = &vk->hw.image->create_info;
 
-      if (vulkan_native_box_ready(vk, width, height, f,
-               vk->hw.image->create_info.format,
-               &vk->hw.image->create_info))
+#if defined(HAVE_MENU)
+      if (vulkan_native_menu_composes(vk, width, height))
+      {
+         format = vk->context->swapchain_format;
+         view   = NULL;
+      }
+#endif
+
+      if (vulkan_native_box_ready(vk, width, height, f, format, view))
          return f;
    }
    return 1;
