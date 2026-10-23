@@ -126,8 +126,8 @@ typedef struct gl3
     * pixels. */
    GLuint native_box_fbo;
    GLuint native_box_tex;
-   GLuint native_box_program;
-   GLint  native_box_src_loc;
+   GLuint native_box_program[3];         /* factors 2, 4, 8 */
+   GLint  native_box_src_loc[3];
 #endif
 
    /* Render chain for non-Slang shaders only. */
@@ -1686,22 +1686,40 @@ static const char *gl3_native_box_vs =
    "   gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
    "}\n";
 
-static const char *gl3_native_box_fs =
-   "#version 150\n"
+/* The body of the box shader. FACTOR is defined, right after the #version
+ * line, by gl3_native_box_fs_source: one program per factor (2, 4 and 8),
+ * compiled the first time the factor is used. */
+static const char *gl3_native_box_fs_body =
    "uniform sampler2D src;\n"
    "out vec4 frag;\n"
    "void main()\n"
    "{\n"
-   "   /* Target pixel (x, y) is the aligned source block (4x, 4y)-(4x+3, 4y+3),\n"
-   "    * in the source's own orientation. */\n"
-   "   ivec2 base = ivec2(gl_FragCoord.xy) * 4;\n"
+   "   /* Target pixel (x, y) is the aligned source block\n"
+   "    * (FACTOR*x, FACTOR*y)-(FACTOR*x+FACTOR-1, FACTOR*y+FACTOR-1), in the\n"
+   "    * source's own orientation. */\n"
+   "   ivec2 base = ivec2(gl_FragCoord.xy) * FACTOR;\n"
    "   uvec3 sum  = uvec3(0u);\n"
-   "   for (int y = 0; y < 4; y++)\n"
-   "      for (int x = 0; x < 4; x++)\n"
+   "   for (int y = 0; y < FACTOR; y++)\n"
+   "      for (int x = 0; x < FACTOR; x++)\n"
    "         sum += uvec3(texelFetch(src, base + ivec2(x, y), 0).rgb * 255.0 + 0.5);\n"
    "   /* Truncating integer division, as the CPU box does. */\n"
-   "   frag = vec4(vec3(sum / 16u) / 255.0, 1.0);\n"
+   "   frag = vec4(vec3(sum / uint(FACTOR * FACTOR)) / 255.0, 1.0);\n"
    "}\n";
+
+/* The fragment source for the factor f: "#version 150" first, then the
+ * factor, then the body. false = it did not fit in buf. */
+static bool gl3_native_box_fs_source(unsigned f, char *buf, size_t cap)
+{
+   int n = snprintf(buf, cap, "#version 150\n#define FACTOR %u\n%s",
+         f, gl3_native_box_fs_body);
+   return n > 0 && (size_t)n < cap;
+}
+
+/* Index of the factor in the per-factor members: 2, 4, 8 -> 0, 1, 2. */
+static int gl3_native_box_index(unsigned f)
+{
+   return groovy_boxtest_factor_index(f);
+}
 
 /* The predicate, the same everywhere: the recording asked for the factor f,
  * the box has not been disabled in this session, and both dims are multiples
@@ -1709,7 +1727,7 @@ static const char *gl3_native_box_fs =
 static bool gl3_native_box_applies(const gl3_t *gl,
       unsigned width, unsigned height, unsigned f)
 {
-   return f == 4
+   return groovy_boxtest_factor_ok(f)
        && !gl->native_box_disabled
        && width  >= f && (width  % f) == 0
        && height >= f && (height % f) == 0;
@@ -1771,17 +1789,28 @@ static GLuint gl3_native_box_compile(GLenum stage, const char *source)
    return shader;
 }
 
-/* Lazy: built on the first frame that needs it, kept for the session. */
-static bool gl3_native_box_program(gl3_t *gl)
+/* Lazy: built on the first frame that needs the factor, kept for the
+ * session. */
+static bool gl3_native_box_program(gl3_t *gl, unsigned f)
 {
    GLint linked = 0;
    GLuint vs, fs, prog;
+   char source[1024];
+   int idx = gl3_native_box_index(f);
 
-   if (gl->native_box_program != 0)
+   if (idx < 0)
+      return false;
+   if (gl->native_box_program[idx] != 0)
       return true;
 
+   if (!gl3_native_box_fs_source(f, source, sizeof(source)))
+   {
+      gl3_native_box_disable(gl, "the box shader source is too long");
+      return false;
+   }
+
    vs = gl3_native_box_compile(GL_VERTEX_SHADER,   gl3_native_box_vs);
-   fs = gl3_native_box_compile(GL_FRAGMENT_SHADER, gl3_native_box_fs);
+   fs = gl3_native_box_compile(GL_FRAGMENT_SHADER, source);
    if (!vs || !fs)
    {
       if (vs)
@@ -1808,8 +1837,8 @@ static bool gl3_native_box_program(gl3_t *gl)
       return false;
    }
 
-   gl->native_box_program = prog;
-   gl->native_box_src_loc = glGetUniformLocation(prog, "src");
+   gl->native_box_program[idx] = prog;
+   gl->native_box_src_loc[idx] = glGetUniformLocation(prog, "src");
    return true;
 }
 
@@ -1895,6 +1924,10 @@ static void gl3_native_box_pass(gl3_t *gl, GLuint src_tex, unsigned f)
    GLboolean prev_depth   = glIsEnabled(GL_DEPTH_TEST);
    GLboolean prev_scissor = glIsEnabled(GL_SCISSOR_TEST);
    GLboolean prev_cull    = glIsEnabled(GL_CULL_FACE);
+   int idx                = gl3_native_box_index(f);
+
+   if (idx < 0 || gl->native_box_program[idx] == 0)
+      return;
 
    glGetIntegerv(GL_VIEWPORT,                 prev_vp);
    glGetIntegerv(GL_CURRENT_PROGRAM,          &prev_prog);
@@ -1905,16 +1938,15 @@ static void gl3_native_box_pass(gl3_t *gl, GLuint src_tex, unsigned f)
    glActiveTexture(GL_TEXTURE0);
    glGetIntegerv(GL_TEXTURE_BINDING_2D,       &prev_tex);
 
-   (void)f;
    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gl->native_box_fbo);
    glViewport(0, 0, (GLsizei)gl->native_box_w, (GLsizei)gl->native_box_h);
    glDisable(GL_BLEND);
    glDisable(GL_DEPTH_TEST);
    glDisable(GL_SCISSOR_TEST);
    glDisable(GL_CULL_FACE);
-   glUseProgram(gl->native_box_program);
-   if (gl->native_box_src_loc >= 0)
-      glUniform1i(gl->native_box_src_loc, 0);
+   glUseProgram(gl->native_box_program[idx]);
+   if (gl->native_box_src_loc[idx] >= 0)
+      glUniform1i(gl->native_box_src_loc[idx], 0);
    glBindTexture(GL_TEXTURE_2D, src_tex);
    glBindVertexArray(gl->vao);
    glDrawArrays(GL_TRIANGLES, 0, 3);
@@ -2069,19 +2101,40 @@ done:
 static bool gl3_native_box_reduce(gl3_t *gl, GLuint src_tex,
       unsigned width, unsigned height, unsigned f)
 {
-   if (!gl3_native_box_program(gl))
-      return false;
-   if (!gl3_native_box_target(gl, width, height, f))
+   if (!gl3_native_box_program(gl, f))
       return false;
    if (!groovy_boxtest_results_has(&gl->native_box_results,
             f, width, height))
    {
+      /* A size the test cannot allocate for stays on the CPU. */
+      if (!groovy_boxtest_fits(width, height, f))
+         return false;
+      /* The first time a factor is used, the stand-alone test on a size
+       * whose width and height differ and are not 4:3 comes first: it
+       * catches an inversion of the axes that the real size, if it is
+       * square or 4:3, would hide. It reads back synchronously into memory
+       * and never goes through the native PBO ring, whose size is the
+       * recording's and is left as it was. */
+      if (groovy_boxtest_axis_due(&gl->native_box_results, f))
+      {
+         bool axis_ok = gl3_native_box_target(gl,
+                  GROOVY_BOXTEST_AXIS_W, GROOVY_BOXTEST_AXIS_H, f)
+            && gl3_native_box_self_test(gl,
+                  GROOVY_BOXTEST_AXIS_W, GROOVY_BOXTEST_AXIS_H, f);
+         groovy_boxtest_axis_done(&gl->native_box_results, f);
+         if (!axis_ok)
+            return false;
+      }
+      if (!gl3_native_box_target(gl, width, height, f))
+         return false;
       if (!gl3_native_box_self_test(gl, width, height, f))
          return false;
       if (!groovy_boxtest_results_add(&gl->native_box_results,
                f, width, height))
          return false;
    }
+   else if (!gl3_native_box_target(gl, width, height, f))
+      return false;
    gl3_native_box_pass(gl, src_tex, f);
    gl3_native_box_note(gl, NULL);
    return true;
@@ -2090,15 +2143,20 @@ static bool gl3_native_box_reduce(gl3_t *gl, GLuint src_tex,
 /* Gives back the target, its texture and the program. */
 static void gl3_deinit_native_box(gl3_t *gl)
 {
+   unsigned i;
+
    if (gl->native_box_fbo != 0)
       glDeleteFramebuffers(1, &gl->native_box_fbo);
    if (gl->native_box_tex != 0)
       glDeleteTextures(1, &gl->native_box_tex);
-   if (gl->native_box_program != 0)
-      glDeleteProgram(gl->native_box_program);
+   for (i = 0; i < 3; i++)
+   {
+      if (gl->native_box_program[i] != 0)
+         glDeleteProgram(gl->native_box_program[i]);
+      gl->native_box_program[i] = 0;
+   }
    gl->native_box_fbo     = 0;
    gl->native_box_tex     = 0;
-   gl->native_box_program = 0;
    gl->native_box_w       = 0;
    gl->native_box_h       = 0;
 }
