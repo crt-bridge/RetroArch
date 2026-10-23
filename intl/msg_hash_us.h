@@ -5327,6 +5327,14 @@ MSG_HASH(
    "On only if the master receiver's tube takes 31 kHz: an image taller than 280 lines is then sent as progressive 480p instead of interlaced 480i. Off by default. Overridden by the GROOVY_31KHZ environment variable. Applies when recording starts."
    )
 MSG_HASH(
+   MENU_ENUM_LABEL_VALUE_GROOVY_REDUCTION,
+   "Supersampling reduction"
+   )
+MSG_HASH(
+   MENU_ENUM_SUBLABEL_GROOVY_REDUCTION,
+   "Auto reduces only an image the core rendered at an integer multiple of its size, and leaves a native image untouched. Off sends the image as rendered and refuses one the receiver cannot show. 2x, 4x and 8x always reduce by that factor. Overridden by the GROOVY_DOWNSAMPLE environment variable. Applies the next time content is loaded."
+   )
+MSG_HASH(
    MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWERS,
    "Groovy Followers"
    )
