@@ -307,6 +307,11 @@ typedef struct vk
       unsigned box_skip_w;
       unsigned box_skip_h;
       bool box_disabled;
+      /* What the ring holds: false = whole frames copied from the image, true
+       * = frames the card reduced, packed RGBA words in rows of exactly
+       * width * 4 bytes. Part of the ring's key with width and height: it is
+       * rebuilt, and every entry invalidated, when any of the three changes. */
+      bool box_mode;
    } native;
 
    struct
@@ -6003,15 +6008,20 @@ static void vulkan_deinit_native_readback(vk_t *vk)
          vulkan_destroy_texture(vk->context->device, &vk->native.staging[i]);
       vk->native.valid[i] = false;
    }
-   vk->native.index  = 0;
-   vk->native.ready  = false;
-   vk->native.width  = 0;
-   vk->native.height = 0;
+   vk->native.index    = 0;
+   vk->native.ready    = false;
+   vk->native.box_mode = false;
+   vk->native.width    = 0;
+   vk->native.height   = 0;
    scaler_ctx_gen_reset(&vk->native.scaler);
 }
 
+/* width x height are the dims of what the ring holds: the native ones when
+ * the frames are copied, the reduced ones when the card reduced them. A
+ * reduced entry is always read as ABGR8888, whatever the image it came from:
+ * the card writes the logical R, G, B, A of the texel in that byte order. */
 static bool vulkan_init_native_readback(vk_t *vk,
-      unsigned width, unsigned height, VkFormat src_format)
+      unsigned width, unsigned height, VkFormat src_format, bool reduced)
 {
    /* Tear the previous ring down and invalidate every in-flight readback:
     * their content carries the previous dims. */
@@ -6024,7 +6034,8 @@ static bool vulkan_init_native_readback(vk_t *vk,
    vk->native.scaler.in_height   = height;
    vk->native.scaler.out_width   = width;
    vk->native.scaler.out_height  = height;
-   vk->native.scaler.in_fmt      = vulkan_native_scaler_fmt(src_format);
+   vk->native.scaler.in_fmt      = reduced
+      ? SCALER_FMT_ABGR8888 : vulkan_native_scaler_fmt(src_format);
    vk->native.scaler.out_fmt     = SCALER_FMT_BGR24;
    vk->native.scaler.scaler_type = SCALER_TYPE_POINT;
 
@@ -6034,11 +6045,16 @@ static bool vulkan_init_native_readback(vk_t *vk,
       return false;
    }
 
-   vk->native.width  = width;
-   vk->native.height = height;
-   vk->native.ready  = true;
-   RARCH_LOG("[Vulkan] Native capture readback (re)sized to %ux%u"
-         " (source format %d).\n", width, height, (int)src_format);
+   vk->native.width    = width;
+   vk->native.height   = height;
+   vk->native.box_mode = reduced;
+   vk->native.ready    = true;
+   if (reduced)
+      RARCH_LOG("[Vulkan] Native capture readback (re)sized to %ux%u"
+            " (reduced by the card).\n", width, height);
+   else
+      RARCH_LOG("[Vulkan] Native capture readback (re)sized to %ux%u"
+            " (source format %d).\n", width, height, (int)src_format);
    return true;
 }
 
@@ -6058,14 +6074,17 @@ static void vulkan_native_readback(vk_t *vk, VkImage src,
       return;
 
    /* Native dims change at runtime (240p gameplay <-> 480i menus of the
-    * game): rebuild the ring and the scaler before issuing the copy. */
+    * game): rebuild the ring and the scaler before issuing the copy. A ring
+    * that holds frames the card reduced is rebuilt too: its entries are not
+    * images to be read by this copy's scaler. */
    if (   !vk->native.ready
+       || vk->native.box_mode
        || vk->native.width  != width
        || vk->native.height != height
        || (unsigned)vk->native.scaler.in_fmt
              != (unsigned)vulkan_native_scaler_fmt(src_format))
    {
-      if (!vulkan_init_native_readback(vk, width, height, src_format))
+      if (!vulkan_init_native_readback(vk, width, height, src_format, false))
          return;
    }
 
@@ -6568,10 +6587,107 @@ static bool vulkan_native_box_consider(vk_t *vk,
    return vulkan_native_box_prove(vk, width, height, f);
 }
 
+/* Both dims are multiples of f, and at least f. */
+static bool vulkan_native_box_divides(unsigned width, unsigned height,
+      unsigned f)
+{
+   return f
+       && width  >= f && (width  % f) == 0
+       && height >= f && (height % f) == 0;
+}
+
+/* The predicate, the same for the capture step and for the divisor: the
+ * recording asked for a factor the card knows, the card is not off, both dims
+ * are multiples of the factor, the pipeline of that factor was built, and the
+ * image reads exactly as the CPU reads it (format and view on the whitelist).
+ * view NULL = an image this driver made itself, whose view is plain by
+ * construction. */
+static bool vulkan_native_box_applies(vk_t *vk,
+      unsigned width, unsigned height, unsigned f,
+      VkFormat format, const VkImageViewCreateInfo *view)
+{
+   return groovy_boxtest_factor_ok(f)
+       && !vk->native.box_disabled
+       && vulkan_native_box_divides(width, height, f)
+       && vk->pipelines.native_box[vulkan_native_box_index(f)]
+            != VK_NULL_HANDLE
+       && vulkan_native_box_format_ok(format)
+       && (!view || vulkan_native_box_view_ok(view));
+}
+
+/* Applies AND the pair reproduced the CPU box in this session: the only case
+ * where the card's reduction is trusted, recorded and announced. */
+static bool vulkan_native_box_ready(vk_t *vk,
+      unsigned width, unsigned height, unsigned f,
+      VkFormat format, const VkImageViewCreateInfo *view)
+{
+   return vulkan_native_box_applies(vk, width, height, f, format, view)
+       && groovy_boxtest_results_has(&vk->native.box_results,
+            f, width, height);
+}
+
+/* Reduce `view` (an image of width x height in `layout`) by f into the
+ * current entry of the ring, and advance it like the copy does. The ring then
+ * holds (width / f) x (height / f) packed words, in rows of exactly that
+ * width * 4 bytes: the texture's own pitch is not what the shader wrote.
+ * false = nothing was recorded, and the card is off for the session: the
+ * divisor must not go on announcing a factor this driver no longer delivers. */
+static bool vulkan_native_box_readback(vk_t *vk, VkImageView view,
+      VkImageLayout layout, unsigned f, unsigned width, unsigned height)
+{
+   unsigned out_w;
+   unsigned out_h;
+   unsigned slot;
+   struct vk_texture *staging;
+
+   if (!groovy_boxtest_factor_ok(f))
+      return false;
+
+   out_w = width  / f;
+   out_h = height / f;
+
+   /* The key of the ring is the reduced dims and the mode. */
+   if (   !vk->native.ready
+       || !vk->native.box_mode
+       || vk->native.width  != out_w
+       || vk->native.height != out_h)
+   {
+      if (!vulkan_init_native_readback(vk, out_w, out_h,
+               VK_FORMAT_R8G8B8A8_UNORM, true))
+      {
+         vulkan_native_box_disable(vk, "could not set up the reduced readback");
+         return false;
+      }
+   }
+
+   slot    = vk->native.index;
+   staging = &vk->native.staging[slot];
+
+   /* The ring was torn down at any change of key, so a buffer that is there
+    * is of the right size: it is written again, not created again. */
+   if (staging->buffer == VK_NULL_HANDLE)
+      *staging = vulkan_create_texture(vk, NULL, out_w, out_h,
+            VK_FORMAT_B8G8R8A8_UNORM, NULL, NULL, VULKAN_TEXTURE_READBACK);
+
+   if (   staging->buffer == VK_NULL_HANDLE
+       || !vulkan_native_box_record(vk, vk->cmd, view, layout,
+            staging->buffer, (uint64_t)staging->size, f, out_w, out_h))
+   {
+      vulkan_native_box_disable(vk, "could not record the reduction");
+      return false;
+   }
+
+   vk->native.valid[slot] = true;
+   vk->native.index       = (slot + 1) % VULKAN_MAX_SWAPCHAIN_IMAGES;
+   return true;
+}
+
 /* Deliver one native frame as TOP-DOWN BGR24 (positive pitch = width*3).
  * Returns false while the pipeline refills — recording just started, or the
  * native dims changed and the ring has not been re-filled at the new dims.
- * The caller drops the frame and retries on the next one. */
+ * The caller drops the frame and retries on the next one. width x height are
+ * the dims of what the ring holds: the reduced ones when the card reduced the
+ * frame (see vulkan_native_capture_divisor). */
 static bool vulkan_read_native(void *data, uint8_t *buffer,
       unsigned width, unsigned height)
 {
@@ -6644,7 +6760,12 @@ static bool vulkan_read_native(void *data, uint8_t *buffer,
 
    ctx             = &vk->native.scaler;
    out_stride      = (int)(width * 3);
-   ctx->in_stride  = (int)staging->stride;
+   /* A reduced entry holds `width` packed words per row, exactly: its pitch
+    * comes from the reduced width, never from the pitch of the texture, which
+    * is rounded. The orientation rule below is the copy's: the card keeps the
+    * orientation of the image it read. */
+   ctx->in_stride  = vk->native.box_mode
+      ? (int)(width * 4) : (int)staging->stride;
    ctx->out_stride = flip ? -out_stride : out_stride;
    scaler_ctx_scale_direct(ctx,
          flip ? buffer + (size_t)(height - 1) * (size_t)out_stride : buffer,
@@ -7186,6 +7307,8 @@ static void vulkan_native_capture_step(vk_t *vk)
    VkImage core_image        = vk->hw.image->create_info.image;
    VkImageLayout core_layout = vk->hw.image->image_layout;
    VkFormat core_format      = vk->hw.image->create_info.format;
+   /* Asked of the recording once per frame, for both branches. */
+   unsigned f                = recording_capture_reduction(width, height);
 
 #if defined(HAVE_MENU)
    if (   (vk->flags & VK_FLAG_MENU_ENABLE)
@@ -7329,19 +7452,48 @@ static void vulkan_native_capture_step(vk_t *vk)
    }
 #endif
 
-   /* Menu closed: the card may reduce the core's own image. It is asked for
-    * the factor on every frame, and a pair it has not proven is proven here,
-    * in its own submission, before anything is reduced. Nothing reads the
-    * result yet: the frame below is still read back whole. */
+   /* Menu closed: the card may reduce the core's own image. A pair it has not
+    * proven is proven here, in its own submission, before anything is
+    * reduced; once it has, the reduction is recorded into the current entry
+    * of the ring in place of the full copy, and only that is read back. */
+   if (groovy_boxtest_factor_ok(f))
    {
-      unsigned f = recording_capture_reduction(width, height);
-
-      if (groovy_boxtest_factor_ok(f))
+      if (vulkan_native_box_divides(width, height, f))
          vulkan_native_box_consider(vk, width, height, f);
+
+      if (   vulkan_native_box_ready(vk, width, height, f,
+                core_format, &vk->hw.image->create_info)
+          && vulkan_native_box_readback(vk, vk->hw.image->image_view,
+                core_layout, f, width, height))
+         return;
    }
 
    vulkan_native_readback(vk, core_image, core_layout, core_format,
          width, height);
+}
+
+/* crt-bridge: the factor by which vulkan_read_native will have averaged the
+ * capture of a frame of these native dims: the factor the recording asked for
+ * when the card serves it, 1 otherwise. The factor is asked of the recording,
+ * never read here, and it is answered only for a pair the card has already
+ * reproduced (vulkan_native_box_ready, the predicate of the capture step
+ * too): the first frame of a new pair is read at full size and dropped by the
+ * dimension guard of vulkan_read_native, as it is today. */
+static unsigned vulkan_native_capture_divisor(void *data,
+      unsigned width, unsigned height)
+{
+   vk_t *vk = (vk_t*)data;
+
+   if (vk && vulkan_native_capture_active(vk))
+   {
+      unsigned f = recording_capture_reduction(width, height);
+
+      if (vulkan_native_box_ready(vk, width, height, f,
+               vk->hw.image->create_info.format,
+               &vk->hw.image->create_info))
+         return f;
+   }
+   return 1;
 }
 
 static bool vulkan_frame(void *data, const void *frame,
@@ -9485,5 +9637,6 @@ video_driver_t video_vulkan = {
 #ifdef HAVE_GFX_WIDGETS
    vulkan_gfx_widgets_enabled,
 #endif
-   vulkan_read_native /* crt-bridge native-FBO capture */
+   vulkan_read_native, /* crt-bridge native-FBO capture */
+   vulkan_native_capture_divisor /* crt-bridge: the factor the card reduced it by */
 };
