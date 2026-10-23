@@ -48,8 +48,8 @@ static const record_driver_t record_null = {
    NULL, /* finalize */
    "null",
    NULL, /* push_av_info — crt-bridge geometry hook */
-   NULL, /* capture_reduction — crt-bridge reduction hook */
-   NULL, /* capture_note — crt-bridge reduction note hook */
+   NULL, /* capture_reduction -- crt-bridge reduction hook */
+   NULL, /* capture_note -- crt-bridge reduction note hook */
 };
 
 const record_driver_t *record_drivers[] = {
