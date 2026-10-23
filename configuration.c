@@ -2626,6 +2626,7 @@ static struct config_uint_setting *populate_settings_uint(
    SETTING_UINT("video_stream_port",             &settings->uints.video_stream_port, true, RARCH_STREAM_DEFAULT_PORT, false);
    /* CRT bridge settings. */
    SETTING_UINT("groovy_audio",                  &settings->uints.groovy_audio, true, DEFAULT_GROOVY_AUDIO, false);
+   SETTING_UINT("groovy_reduction",              &settings->uints.groovy_reduction, true, DEFAULT_GROOVY_REDUCTION, false);
    SETTING_UINT("groovy_mtu",                    &settings->uints.groovy_mtu, true, DEFAULT_GROOVY_MTU, false);
    SETTING_UINT("video_record_threads",          &settings->uints.video_record_threads, true, DEFAULT_VIDEO_RECORD_THREADS, false);
    SETTING_UINT("video_record_quality",          &settings->uints.video_record_quality, true, RECORD_CONFIG_TYPE_RECORDING_MED_QUALITY, false);

@@ -156,6 +156,7 @@
 #endif
 
 #include "../record/drivers/groovy_audio.h"   /* enum groovy_audio_mode, groovy_audio_mode_name */
+#include "../record/drivers/groovy_reduction.h" /* enum groovy_reduction_mode, groovy_reduction_menu_name */
 
 /* Forward declaration for Win32 native menubar rebuild.
  * Defined in ui/drivers/ui_win32.c. Declared here rather than included
@@ -3077,6 +3078,18 @@ static size_t setting_get_string_representation_groovy_audio(
    if (setting)
       return strlcpy(s, groovy_audio_mode_name(
                (enum groovy_audio_mode)*setting->value.target.unsigned_integer), len);
+   return 0;
+}
+
+/* The words shown for the supersampling reduction are the ones
+ * groovy_reduction_menu_name returns, so the menu and the driver share one
+ * source for "Auto", "Off", "2x", "4x" and "8x". */
+static size_t setting_get_string_representation_groovy_reduction(
+      rarch_setting_t *setting, char *s, size_t len)
+{
+   if (setting)
+      return strlcpy(s, groovy_reduction_menu_name(
+               *setting->value.target.unsigned_integer), len);
    return 0;
 }
 
@@ -17170,6 +17183,25 @@ static bool setting_append_list(
                   general_read_handler,
                   SD_FLAG_NONE
                   );
+            /* Supersampling reduction: Auto, Off, 2x, 4x, 8x. The range is
+             * an input convenience; groovy_reduction_menu_name and
+             * groovy_reduction_mode_from_menu both fall back to Auto for an
+             * index outside it (record/drivers/groovy_reduction.h). */
+            CONFIG_UINT(
+                  list, list_info,
+                  &settings->uints.groovy_reduction,
+                  MENU_ENUM_LABEL_GROOVY_REDUCTION,
+                  MENU_ENUM_LABEL_VALUE_GROOVY_REDUCTION,
+                  DEFAULT_GROOVY_REDUCTION,
+                  &group_info,
+                  &subgroup_info,
+                  parent_group,
+                  general_write_handler,
+                  general_read_handler);
+            (*list)[list_info->index - 1].action_ok = &setting_action_ok_uint;
+            (*list)[list_info->index - 1].get_string_representation =
+                  &setting_get_string_representation_groovy_reduction;
+            menu_settings_list_current_add_range(list, list_info, 0, GROOVY_REDUCTION_X8, 1, true, true);
             /* groovy_followers (the retroarch.cfg key itself) NO LONGER HAS
              * A MENU WIDGET. The single text field could not be cleared
              * from the menu (menu_input_st_string_cb refuses an empty

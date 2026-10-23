@@ -273,6 +273,7 @@ typedef struct settings
       unsigned video_stream_port;
       /* CRT bridge settings */
       unsigned groovy_audio;   /* enum groovy_audio_mode: 0 off, 1 receiver, 2 both */
+      unsigned groovy_reduction; /* enum groovy_reduction_mode: 0 auto, 1 off, 2 = 2x, 3 = 4x, 4 = 8x */
       unsigned groovy_mtu;     /* payload bytes, bounded [GM_MTU_MIN, GM_MTU_MAX] */
       unsigned video_record_quality;
       unsigned video_stream_quality;

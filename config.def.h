@@ -1061,6 +1061,11 @@
  * record/drivers/groovy_khz31.h. */
 #define DEFAULT_GROOVY_31KHZ false
 
+/* 0 == GROOVY_REDUCTION_AUTO. The integer is the index of enum
+ * groovy_reduction_mode (record/drivers/groovy_reduction.h), written here so
+ * the configuration does not include a driver header. */
+#define DEFAULT_GROOVY_REDUCTION 0
+
 /* 1 == GROOVY_AUDIO_RECEIVER (record/drivers/groovy_audio.h). The integer is
  * written here rather than the enum: config.def.h must not depend on any
  * driver header. A test refuses to let the two diverge
