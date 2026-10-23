@@ -330,4 +330,165 @@ static inline struct groovy_reduction_decision groovy_reduction_memo_frame(
     return memo->decision;
 }
 
+/* WHAT THE USER READS. The status line goes to the PC screen and to the log,
+ * never into the image that is sent. A refused frame always says its size,
+ * its cause and what to do about it. Every text that comes from elsewhere (a
+ * setting name, an engine name) is passed as a %s argument, never as part of
+ * a format, and every message is cut to the buffer given, always ending in a
+ * zero byte. */
+
+/* What the status line last said. A zeroed struct says nothing yet. */
+struct groovy_reduction_said
+{
+    unsigned w, h;                       /* rendered size                   */
+    unsigned factor;
+    enum groovy_reduction_path path;
+    bool valid;
+};
+
+/* 1 when the status line is due: the rendered size, the factor or the path
+ * differs from what was last said. Nothing is due for a frame with a side
+ * under GROOVY_REDUCTION_STATUS_MIN_SIDE, and the state is left alone then,
+ * so a start-up image does not make the next real frame look new. */
+static inline int groovy_reduction_status_due(
+        struct groovy_reduction_said *said, unsigned rw, unsigned rh,
+        unsigned factor, enum groovy_reduction_path path)
+{
+    if (rw < GROOVY_REDUCTION_STATUS_MIN_SIDE
+            || rh < GROOVY_REDUCTION_STATUS_MIN_SIDE)
+        return 0;
+    if (said->valid && said->w == rw && said->h == rh
+            && said->factor == factor && said->path == path)
+        return 0;
+    said->w = rw;
+    said->h = rh;
+    said->factor = factor;
+    said->path = path;
+    said->valid = true;
+    return 1;
+}
+
+/* Builds the status line into buf:
+ *   Supersampling reduction: Auto -> 2x (1280x960 -> 640x480), CPU, vulkan
+ * `setting` is the display name of the setting, rw x rh the rendered size,
+ * sw x sh the size sent. A refused frame (factor 0, or path REFUSED) reads
+ *   Supersampling reduction: Off -> refused (1280x960), REFUSED, glcore
+ * A NULL setting or engine reads "?". Returns the length written (cap-1 when
+ * cut), or -1 for an unusable buffer. */
+static inline int groovy_reduction_status_format(char *buf, size_t cap,
+        const char *setting, unsigned factor, unsigned rw, unsigned rh,
+        unsigned sw, unsigned sh, enum groovy_reduction_path path,
+        const char *engine)
+{
+    int n;
+
+    if (!buf || cap == 0u)
+        return -1;
+    buf[0] = '\0';
+    if (!setting)
+        setting = "?";
+    if (!engine)
+        engine = "?";
+
+    if (factor == 0u || path == GROOVY_REDUCTION_PATH_REFUSED)
+        n = snprintf(buf, cap,
+                "Supersampling reduction: %s -> refused (%ux%u), REFUSED, %s",
+                setting, rw, rh, engine);
+    else
+        n = snprintf(buf, cap,
+                "Supersampling reduction: %s -> %ux (%ux%u -> %ux%u), %s, %s",
+                setting, factor, rw, rh, sw, sh,
+                groovy_reduction_path_name(path), engine);
+    if (n < 0)
+    {
+        buf[0] = '\0';
+        return -1;
+    }
+    if ((size_t)n >= cap)
+        return (int)(cap - 1u);           /* cut, always zero-terminated */
+    return n;
+}
+
+/* Builds the message for a refused frame of w x h into buf, from the cause
+ * in `decision.reason` (and the factor the mode asks for). Returns the
+ * length written (cap-1 when cut), 0 with an empty buffer when the decision
+ * is not a refusal, or -1 for an unusable buffer. */
+static inline int groovy_reduction_refusal_format(char *buf, size_t cap,
+        enum groovy_reduction_mode mode,
+        struct groovy_reduction_decision decision, unsigned w, unsigned h)
+{
+    int n = 0;
+    unsigned fixed;
+
+    if (!buf || cap == 0u)
+        return -1;
+    buf[0] = '\0';
+    fixed = groovy_reduction_mode_factor(mode);
+    if (fixed < 2u)
+        fixed = 0u;                       /* Auto and Off pick no factor */
+
+    if (decision.reason == GROOVY_REDUCTION_REFUSED_NO_CLEAN_FACTOR
+            || (decision.reason == GROOVY_REDUCTION_REFUSED_OVERSIZE
+                && fixed == 0u))
+        n = snprintf(buf, cap, "Frame refused: %ux%u "
+                "does not reduce to a native size. Set the core's resolution scale to 1x, or choose a factor.",
+                w, h);
+    else if (decision.reason == GROOVY_REDUCTION_REFUSED_OVERSIZE)
+        n = snprintf(buf, cap, "Frame refused: %ux%u reduced by %u "
+                "is still too large for the receiver. Choose Auto or a larger factor.",
+                w, h, fixed);
+    else if (decision.reason == GROOVY_REDUCTION_REFUSED_NOT_DIVISIBLE)
+        n = snprintf(buf, cap, "Frame refused: %ux%u does not divide by %u. "
+                "Choose Auto or another factor.",
+                w, h, fixed);
+    else if (decision.reason == GROOVY_REDUCTION_REFUSED_PREREDUCED)
+        n = snprintf(buf, cap, "Frame refused: %ux%u arrived already reduced "
+                "by the video driver, which this setting did not ask for. Restart the content.",
+                w, h);
+    else
+        return 0;
+
+    if (n < 0)
+    {
+        buf[0] = '\0';
+        return -1;
+    }
+    if ((size_t)n >= cap)
+        return (int)(cap - 1u);           /* cut, always zero-terminated */
+    return n;
+}
+
+/* Keeps a refused frame from flooding the screen: one message per size, at
+ * most one every GROOVY_REDUCTION_REFUSAL_GAP_NS. A zeroed struct has said
+ * nothing yet. */
+struct groovy_reduction_pacer
+{
+    unsigned w, h;                       /* size of the last message        */
+    uint64_t last_ns;                    /* when it was said                */
+    bool valid;
+};
+
+/* 1 when a refusal message is due for a w x h frame at `now_ns`: nothing has
+ * been said yet, or the size differs from the last one said AND the gap has
+ * elapsed since. The state moves only when the message is due. The time is
+ * an argument; this file never reads a clock. */
+static inline int groovy_reduction_refusal_due(
+        struct groovy_reduction_pacer *pacer, unsigned w, unsigned h,
+        uint64_t now_ns)
+{
+    if (pacer->valid)
+    {
+        if (pacer->w == w && pacer->h == h)
+            return 0;
+        if (now_ns >= pacer->last_ns
+                && now_ns - pacer->last_ns < GROOVY_REDUCTION_REFUSAL_GAP_NS)
+            return 0;
+    }
+    pacer->w = w;
+    pacer->h = h;
+    pacer->last_ns = now_ns;
+    pacer->valid = true;
+    return 1;
+}
+
 #endif /* GROOVY_REDUCTION_H */
