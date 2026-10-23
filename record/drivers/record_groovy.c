@@ -3223,7 +3223,9 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         if (cpu_factor == 0u)
             red_reason = GROOVY_REDUCTION_REFUSED_PREREDUCED;
     }
+    bool red_refused = false;
     if (cpu_factor == 0u) {
+        red_refused = true;
         if (red_reason == GROOVY_REDUCTION_REFUSED_PREREDUCED) {
             static unsigned s_pre_warn_w = 0u, s_pre_warn_h = 0u;
             st->downsample_prereduced_mismatch++;
@@ -3237,9 +3239,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         } else {
             st->reduction_refused[red_reason]++;
         }
-        return true;   /* soft-skip, session alive */
-    }
-    if (cpu_factor > 1u) {
+    } else if (cpu_factor > 1u) {
         if (!groovy_downsample_dims_ok(cap_w, cap_h, cpu_factor)) {
             /* Refuse the frame rather than distort it. Trace limited to
              * dim changes (singleton driver, same rationale as the BLIT
@@ -3253,9 +3253,9 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
                 s_ds_warn_w = cap_w;
                 s_ds_warn_h = cap_h;
             }
-            return true;   /* soft-skip, session alive */
-        }
-        if (st->downsample_gpu && vid->prereduced == 1u) {
+            red_refused = true;
+            red_reason  = GROOVY_REDUCTION_REFUSED_NOT_DIVISIBLE;
+        } else if (st->downsample_gpu && vid->prereduced == 1u) {
             /* "gpu4" was requested but the video driver handed over the full
              * frame: the CPU box does the reduction. The image is right;
              * the cost is the one "gpu4" exists to avoid. */
@@ -3268,8 +3268,57 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
                 s_fb_warn_h = cap_h;
             }
         }
-        send_w = cap_w / cpu_factor;
-        send_h = cap_h / cpu_factor;
+        if (!red_refused) {
+            send_w = cap_w / cpu_factor;
+            send_h = cap_h / cpu_factor;
+        }
+    }
+
+    /* What the user reads. The path is the one really taken: REFUSED for
+     * every refusal, none for factor 1, GPU when the video driver already
+     * reduced by the decided factor, CPU otherwise. The status line goes
+     * out only when the rendered size, the factor or the path changes; the
+     * engine name is read only when the line is said. */
+    {
+        const enum groovy_reduction_path red_path = red_refused
+            ? GROOVY_REDUCTION_PATH_REFUSED
+            : (red.factor <= 1u ? GROOVY_REDUCTION_PATH_NONE
+               : (pre_n == red.factor ? GROOVY_REDUCTION_PATH_GPU
+                                      : GROOVY_REDUCTION_PATH_CPU));
+        const unsigned red_shown = red_refused ? 0u : red.factor;
+
+        if (groovy_reduction_status_due(&st->reduction_said, rend_w, rend_h,
+                                        red_shown, red_path)) {
+            char        line[GROOVY_FORCED_MSG_CAP];
+            const char *engine = video_driver_get_ident();
+
+            groovy_reduction_status_format(line, sizeof line,
+                    groovy_reduction_display_name(st->reduction_mode,
+                                                  st->downsample_gpu),
+                    red_shown, rend_w, rend_h, send_w, send_h, red_path,
+                    engine ? engine : "?");
+            groovy_log_forced(line);
+        }
+    }
+
+    if (red_refused) {
+        /* The message goes to the PC screen and the log, never into the
+         * image, so a black tube always has a visible cause. One message
+         * per size, and at most one every few seconds. */
+        const bool pre = (red_reason == GROOVY_REDUCTION_REFUSED_PREREDUCED);
+        const unsigned msg_w = pre ? cap_w : rend_w;
+        const unsigned msg_h = pre ? cap_h : rend_h;
+
+        if (groovy_reduction_refusal_due(&st->reduction_pacer, msg_w, msg_h,
+                                         groovy_pacing_mono_ns())) {
+            char refusal[GROOVY_FORCED_MSG_CAP];
+
+            groovy_reduction_refusal_format(refusal, sizeof refusal,
+                    st->reduction_mode,
+                    groovy_reduction_make(0u, red_reason), msg_w, msg_h);
+            groovy_log_error(refusal);
+        }
+        return true;   /* soft-skip, session alive */
     }
 
     /* Regime decision and announce. groovy_mode_on_frame (groovy_mode.h)
