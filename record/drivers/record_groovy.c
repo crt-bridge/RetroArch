@@ -153,8 +153,10 @@ static inline void groovy_pacing_log_mute(const char *ev) { (void)ev; }
  * gm_set_mtu. Header-only, same pattern as groovy_compression.h. */
 #include "groovy_mtu.h"
 
-/* Generic CPU supersampling box: reads GROOVY_DOWNSAMPLE and averages
- * n*n blocks. Same pattern as groovy_compression.h above. */
+/* Generic CPU supersampling box: averages n*n blocks, for the factor the
+ * video driver has not already applied. The setting itself is read in
+ * groovy_new (menu value or environment variable) and decided per size by
+ * the rule below. */
 #include "groovy_downsample.h"
 /* Supersampling reduction rule: setting, per-size memory, status line. */
 #include "groovy_reduction.h"
