@@ -5332,7 +5332,7 @@ MSG_HASH(
    )
 MSG_HASH(
    MENU_ENUM_SUBLABEL_GROOVY_REDUCTION,
-   "Auto reduces only an image the core rendered at an integer multiple of its size, and leaves a native image untouched. Off sends the image as rendered and refuses one the receiver cannot show. 2x, 4x and 8x always reduce by that factor. Overridden by the GROOVY_DOWNSAMPLE environment variable. Applies the next time content is loaded."
+   "Auto reduces an image the core rendered at an integer multiple of its size, and an image taller than the receiver takes, by the smallest factor that fits; a native image is left untouched. Off sends the image as rendered and refuses one the receiver cannot show. 2x, 4x and 8x always reduce by that factor. Overridden by the GROOVY_DOWNSAMPLE environment variable. Applies the next time content is loaded."
    )
 MSG_HASH(
    MENU_ENUM_LABEL_VALUE_GROOVY_FOLLOWERS,
