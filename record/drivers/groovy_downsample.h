@@ -21,11 +21,11 @@
  * groovy_downsample_box_rgb888(), the dispatcher record_groovy.c calls,
  * which picks _n2/_n4/_n8 or falls back to the generic reference.
  *
- * The setting lives in the GROOVY_DOWNSAMPLE environment variable rather
- * than in retroarch.cfg: RetroArch rewrites that file on exit from its
- * own internal list of settings, so a key added by hand would disappear
- * from it. The fork already uses this same pattern for GROOVY_AUDIO and
- * for GROOVY_COMPRESSION.
+ * The setting is the "Supersampling reduction" entry of the Recording
+ * menu; the GROOVY_DOWNSAMPLE environment variable overrides it when set.
+ * record_groovy.c reads both, and groovy_reduction.h decides the factor
+ * (including "auto"). gl3.c still reads GROOVY_DOWNSAMPLE itself at init,
+ * for "gpu4" only.
  *
  * "gpu4" is a second way to ask for the same 4x4 reduction. Reading the
  * full-size frame back from the GPU and averaging it on the CPU costs a
