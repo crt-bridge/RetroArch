@@ -5917,17 +5917,69 @@ static bool vulkan_native_capture_active(vk_t *vk)
  * measured. */
 static enum scaler_pix_fmt vulkan_native_scaler_fmt(VkFormat format)
 {
+   /* An sRGB image holds the same bytes in memory as its UNORM twin; the CPU
+    * path reads bytes, so it must map them alike. */
    switch (format)
    {
       case VK_FORMAT_R8G8B8A8_UNORM:
+      case VK_FORMAT_R8G8B8A8_SRGB:
       case VK_FORMAT_A8B8G8R8_UNORM_PACK32:
+      case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
          return SCALER_FMT_ABGR8888;
       case VK_FORMAT_B8G8R8A8_UNORM:
+      case VK_FORMAT_B8G8R8A8_SRGB:
          return SCALER_FMT_ARGB8888;
       default:
          break;
    }
    return SCALER_FMT_ARGB8888;
+}
+
+/* The formats the card may reduce. The card samples the image, and sampling
+ * an sRGB image linearises it, while the CPU box averages the encoded bytes:
+ * those images stay on the CPU, as does any format that is not 8 bits per
+ * channel (the 10-bit one included). */
+static bool vulkan_native_box_format_ok(VkFormat format)
+{
+   switch (format)
+   {
+      case VK_FORMAT_R8G8B8A8_UNORM:
+      case VK_FORMAT_B8G8R8A8_UNORM:
+      case VK_FORMAT_A8B8G8R8_UNORM_PACK32:
+         return true;
+      default:
+         break;
+   }
+   return false;
+}
+
+/* The view of the core's image must read as the image itself: a plain 2D
+ * view of mip level 0 and array layer 0, with identity components. A view
+ * that swaps channels, or starts on another level or layer, would be
+ * sampled differently from the bytes the CPU path copies. */
+static bool vulkan_native_box_view_ok(const VkImageViewCreateInfo *view)
+{
+   if (!view)
+      return false;
+   if (view->viewType != VK_IMAGE_VIEW_TYPE_2D)
+      return false;
+   if (view->subresourceRange.baseMipLevel   != 0)
+      return false;
+   if (view->subresourceRange.baseArrayLayer != 0)
+      return false;
+   if (   view->components.r != VK_COMPONENT_SWIZZLE_IDENTITY
+       && view->components.r != VK_COMPONENT_SWIZZLE_R)
+      return false;
+   if (   view->components.g != VK_COMPONENT_SWIZZLE_IDENTITY
+       && view->components.g != VK_COMPONENT_SWIZZLE_G)
+      return false;
+   if (   view->components.b != VK_COMPONENT_SWIZZLE_IDENTITY
+       && view->components.b != VK_COMPONENT_SWIZZLE_B)
+      return false;
+   if (   view->components.a != VK_COMPONENT_SWIZZLE_IDENTITY
+       && view->components.a != VK_COMPONENT_SWIZZLE_A)
+      return false;
+   return true;
 }
 
 static void vulkan_deinit_native_readback(vk_t *vk)
