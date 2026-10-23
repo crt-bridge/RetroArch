@@ -3257,6 +3257,11 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
     unsigned cpu_factor = 0u;
     if (red.factor != 0u) {
         cpu_factor = groovy_downsample_cpu_factor(red.factor, pre_n);
+        /* Forced to the processor, the video driver is told the factor is 1
+         * and never reduces: a frame that arrives reduced anyway is a
+         * defect to say, not a card path to report as GPU. */
+        if (st->reduction_path_cpu && pre_n > 1u)
+            cpu_factor = 0u;
         if (cpu_factor == 0u)
             red_reason = GROOVY_REDUCTION_REFUSED_PREREDUCED;
     }
