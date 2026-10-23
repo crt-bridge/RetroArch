@@ -170,4 +170,164 @@ static inline struct groovy_reduction_decision groovy_reduction_decide(
             GROOVY_REDUCTION_REFUSED_NO_CLEAN_FACTOR);
 }
 
+/* Where a reduction actually ran, as the status line says it. */
+enum groovy_reduction_path
+{
+    GROOVY_REDUCTION_PATH_NONE = 0,  /* factor 1: nothing to reduce        */
+    GROOVY_REDUCTION_PATH_CPU,       /* the box filter on the processor    */
+    GROOVY_REDUCTION_PATH_GPU,       /* the video driver reduced on the card */
+    GROOVY_REDUCTION_PATH_REFUSED    /* the frame was refused              */
+};
+
+/* Reads the GROOVY_DOWNSAMPLE value. Only "auto", "off", "2", "4", "8" and
+ * "gpu4" are known, spelled exactly: anything else (NULL, empty, another
+ * case, another number) returns 0 and leaves both outputs untouched, so the
+ * caller can warn naming the value and fall back to Auto. Returns 1 when the
+ * value is known. "gpu4" is the 4x setting with *gpu = 1 (the reduction is
+ * asked of the video driver). A NULL output pointer is skipped. */
+static inline int groovy_reduction_parse(const char *s,
+        enum groovy_reduction_mode *mode, int *gpu)
+{
+    enum groovy_reduction_mode m;
+    int g = 0;
+
+    if (!s)
+        return 0;
+    if (!strcmp(s, "auto"))
+        m = GROOVY_REDUCTION_AUTO;
+    else if (!strcmp(s, "off"))
+        m = GROOVY_REDUCTION_OFF;
+    else if (!strcmp(s, "2"))
+        m = GROOVY_REDUCTION_X2;
+    else if (!strcmp(s, "4"))
+        m = GROOVY_REDUCTION_X4;
+    else if (!strcmp(s, "8"))
+        m = GROOVY_REDUCTION_X8;
+    else if (!strcmp(s, "gpu4"))
+    {
+        m = GROOVY_REDUCTION_X4;
+        g = 1;
+    }
+    else
+        return 0;
+
+    if (mode)
+        *mode = m;
+    if (gpu)
+        *gpu = g;
+    return 1;
+}
+
+/* The name the variable and the "[groovy] downsample: factor=" log line
+ * use: auto off 2 4 8 gpu4. An unknown mode is named like Auto. */
+static inline const char *groovy_reduction_name(
+        enum groovy_reduction_mode mode, int gpu)
+{
+    switch (mode)
+    {
+        case GROOVY_REDUCTION_OFF: return "off";
+        case GROOVY_REDUCTION_X2:  return "2";
+        case GROOVY_REDUCTION_X4:  return gpu ? "gpu4" : "4";
+        case GROOVY_REDUCTION_X8:  return "8";
+        case GROOVY_REDUCTION_AUTO:
+        default:                   return "auto";
+    }
+}
+
+/* The first word of the status line: Auto Off 2x 4x 8x gpu4. */
+static inline const char *groovy_reduction_display_name(
+        enum groovy_reduction_mode mode, int gpu)
+{
+    switch (mode)
+    {
+        case GROOVY_REDUCTION_OFF: return "Off";
+        case GROOVY_REDUCTION_X2:  return "2x";
+        case GROOVY_REDUCTION_X4:  return gpu ? "gpu4" : "4x";
+        case GROOVY_REDUCTION_X8:  return "8x";
+        case GROOVY_REDUCTION_AUTO:
+        default:                   return "Auto";
+    }
+}
+
+/* The mode a stored menu index stands for. An index out of range (a
+ * retroarch.cfg edited by hand) reads as Auto. */
+static inline enum groovy_reduction_mode groovy_reduction_mode_from_menu(
+        unsigned v)
+{
+    return (v <= (unsigned)GROOVY_REDUCTION_X8)
+        ? (enum groovy_reduction_mode)v : GROOVY_REDUCTION_AUTO;
+}
+
+/* The words of the menu, plain ASCII (the menu font of the bench is
+ * bitmap): Auto Off 2x 4x 8x. An index out of range shows Auto. */
+static inline const char *groovy_reduction_menu_name(unsigned v)
+{
+    return groovy_reduction_display_name(
+            groovy_reduction_mode_from_menu(v), 0);
+}
+
+/* GPU CPU none REFUSED. */
+static inline const char *groovy_reduction_path_name(
+        enum groovy_reduction_path path)
+{
+    switch (path)
+    {
+        case GROOVY_REDUCTION_PATH_GPU:     return "GPU";
+        case GROOVY_REDUCTION_PATH_CPU:     return "CPU";
+        case GROOVY_REDUCTION_PATH_REFUSED: return "REFUSED";
+        case GROOVY_REDUCTION_PATH_NONE:
+        default:                            return "none";
+    }
+}
+
+/* The decision changes only when the rendered size changes. An open menu is
+ * composed at the size of the last core frame, so the rendered size does not
+ * move, nothing is recomputed and nothing is announced.
+ *
+ * The key is the rendered size. `declare` only stores the size the core
+ * declared as a candidate; it is adopted as the reference at the next change
+ * of rendered size. A declaration that flips while the picture stays the
+ * same size therefore cannot move the factor.
+ *
+ * A zeroed struct is the valid initial state (as a calloc gives it). */
+struct groovy_reduction_memo
+{
+    unsigned key_w, key_h;                /* rendered size of the decision  */
+    struct groovy_reduction_decision decision;
+    unsigned used_rw, used_rh;            /* reference the decision used    */
+    unsigned cand_rw, cand_rh;            /* latest declared, not yet used  */
+    bool valid;
+};
+
+static inline void groovy_reduction_memo_declare(
+        struct groovy_reduction_memo *memo, unsigned rw, unsigned rh)
+{
+    memo->cand_rw = rw;
+    memo->cand_rh = rh;
+}
+
+/* The decision for a rendered w x h frame. *changed (if not NULL) is set to
+ * 1 when the decision was recomputed (first frame, or a new rendered size),
+ * 0 when the remembered one was returned. */
+static inline struct groovy_reduction_decision groovy_reduction_memo_frame(
+        struct groovy_reduction_memo *memo, enum groovy_reduction_mode mode,
+        int hw, unsigned w, unsigned h, int *changed)
+{
+    if (!memo->valid || memo->key_w != w || memo->key_h != h)
+    {
+        memo->used_rw = memo->cand_rw;
+        memo->used_rh = memo->cand_rh;
+        memo->decision = groovy_reduction_decide(mode, hw, w, h,
+                memo->used_rw, memo->used_rh);
+        memo->key_w = w;
+        memo->key_h = h;
+        memo->valid = true;
+        if (changed)
+            *changed = 1;
+    }
+    else if (changed)
+        *changed = 0;
+    return memo->decision;
+}
+
 #endif /* GROOVY_REDUCTION_H */
