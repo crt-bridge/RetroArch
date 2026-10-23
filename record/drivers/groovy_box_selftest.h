@@ -155,4 +155,95 @@ static inline unsigned groovy_boxtest_compare(const uint8_t *gpu_rgba,
     return differ;
 }
 
+/* The most (factor, size) pairs one session remembers as proven. */
+#define GROOVY_BOXTEST_TABLE_CAP   16u
+
+struct groovy_boxtest_pair {
+    unsigned factor;
+    unsigned w;
+    unsigned h;
+};
+
+/* What a session has proven. Each (factor, size) pair is tested once, before
+ * its first reduced frame, and written here when it passed; the table is
+ * bounded so a core that changes size every frame cannot make the test run
+ * every frame. Past the cap the size is left to the CPU, and the caller says
+ * so once. `axis_done` holds, per factor (2, 4, 8), whether the stand-alone
+ * test on the axis size already ran. All zero is the initial state: a calloc,
+ * or a memset, is enough. */
+struct groovy_boxtest_results {
+    unsigned                   count;
+    unsigned char              axis_done[3];
+    struct groovy_boxtest_pair pair[GROOVY_BOXTEST_TABLE_CAP];
+};
+
+/* Index of an admitted factor in a per-factor array (2 -> 0, 4 -> 1, 8 -> 2),
+ * -1 for any other. */
+static inline int groovy_boxtest_factor_index(unsigned n)
+{
+    switch (n) {
+        case 2u: return 0;
+        case 4u: return 1;
+        case 8u: return 2;
+        default: return -1;
+    }
+}
+
+/* 1 when the pair (n, w, h) was proven earlier in this session. */
+static inline int groovy_boxtest_results_has(const struct groovy_boxtest_results *r,
+                                             unsigned n, unsigned w, unsigned h)
+{
+    unsigned i, count;
+
+    if (!r)
+        return 0;
+    count = r->count;
+    if (count > GROOVY_BOXTEST_TABLE_CAP)
+        count = GROOVY_BOXTEST_TABLE_CAP;
+    for (i = 0; i < count; i++)
+        if (r->pair[i].factor == n && r->pair[i].w == w && r->pair[i].h == h)
+            return 1;
+    return 0;
+}
+
+/* Record that the pair (n, w, h) passed. A pair is written once: adding a
+ * pair that is already there succeeds without a second entry. Returns 0, and
+ * writes nothing, when the table is full or the factor is not admitted. */
+static inline int groovy_boxtest_results_add(struct groovy_boxtest_results *r,
+                                             unsigned n, unsigned w, unsigned h)
+{
+    if (!r || !groovy_boxtest_factor_ok(n))
+        return 0;
+    if (groovy_boxtest_results_has(r, n, w, h))
+        return 1;
+    if (r->count >= GROOVY_BOXTEST_TABLE_CAP)
+        return 0;
+    r->pair[r->count].factor = n;
+    r->pair[r->count].w      = w;
+    r->pair[r->count].h      = h;
+    r->count++;
+    return 1;
+}
+
+/* 1 when the stand-alone test on the axis size is still to run for the factor
+ * n: once per factor, and never for a factor that is not admitted. */
+static inline int groovy_boxtest_axis_due(const struct groovy_boxtest_results *r,
+                                          unsigned n)
+{
+    int idx = groovy_boxtest_factor_index(n);
+
+    return r && idx >= 0 && !r->axis_done[idx];
+}
+
+/* Record that the stand-alone test on the axis size ran for the factor n.
+ * A factor that is not admitted changes nothing. */
+static inline void groovy_boxtest_axis_done(struct groovy_boxtest_results *r,
+                                            unsigned n)
+{
+    int idx = groovy_boxtest_factor_index(n);
+
+    if (r && idx >= 0)
+        r->axis_done[idx] = 1;
+}
+
 #endif /* GROOVY_BOX_SELFTEST_H */
