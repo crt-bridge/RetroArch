@@ -246,6 +246,70 @@ static inline int groovy_reduction_path_parse(const char *s, int *cpu)
     return 1;
 }
 
+/* 1 when the card has a reduction pass for this factor: 2, 4 and 8, the
+ * factors the processor box also has an exact function for. Any other factor
+ * (3, 5, 6, 7) is reduced on the processor. */
+static inline int groovy_reduction_card_factor_ok(unsigned factor)
+{
+    return (factor == 2u || factor == 4u || factor == 8u) ? 1 : 0;
+}
+
+/* 1 when the video driver named `engine` (video_driver_get_ident(), spelled
+ * exactly, in lower case) has a reduction pass on the card: OpenGL core and
+ * Vulkan. Every other name, and NULL, has none. Direct3D 12 has none by
+ * design; Direct3D 11 has none until it is proven. */
+static inline int groovy_reduction_engine_has_gpu_path(const char *engine)
+{
+    if (!engine)
+        return 0;
+    return (!strcmp(engine, "glcore") || !strcmp(engine, "vulkan")) ? 1 : 0;
+}
+
+/* Builds into buf the cause of a CPU path, as the status line says it after
+ * CPU. The first cause that applies wins, in this order:
+ *   `forced`  the path was forced to the processor by the user
+ *   !`hw`     the frame is a software one: there is nothing on the card
+ *   `engine`  has no pass on the card: "no GPU path for <engine>"
+ *   `factor`  has no pass on the card: "no GPU path for factor <n>"
+ *   `note`    the video driver's own reason, when it gave one (a failed
+ *             self-test, an image it cannot read), copied as it said it
+ * and nothing otherwise. A NULL engine reads "?". The note and the engine are
+ * only ever data: they are passed as %s, never as part of a format. Returns
+ * the length written (cap-1 when cut), 0 with an empty buffer when there is
+ * no cause to give, or -1 for an unusable buffer. */
+static inline int groovy_reduction_cpu_reason(char *buf, size_t cap,
+        int forced, int hw, const char *engine, unsigned factor,
+        const char *note)
+{
+    int n;
+
+    if (!buf || cap == 0u)
+        return -1;
+    buf[0] = '\0';
+
+    if (forced)
+        n = snprintf(buf, cap, "forced by GROOVY_DOWNSAMPLE_PATH");
+    else if (!hw)
+        n = snprintf(buf, cap, "software frame");
+    else if (!groovy_reduction_engine_has_gpu_path(engine))
+        n = snprintf(buf, cap, "no GPU path for %s", engine ? engine : "?");
+    else if (!groovy_reduction_card_factor_ok(factor))
+        n = snprintf(buf, cap, "no GPU path for factor %u", factor);
+    else if (note && note[0] != '\0')
+        n = snprintf(buf, cap, "%s", note);
+    else
+        return 0;
+
+    if (n < 0)
+    {
+        buf[0] = '\0';
+        return -1;
+    }
+    if ((size_t)n >= cap)
+        return (int)(cap - 1u);           /* cut, always zero-terminated */
+    return n;
+}
+
 /* The name the variable and the "[groovy] downsample: factor=" log line
  * use: auto off 2 4 8 gpu4. An unknown mode is named like Auto. */
 static inline const char *groovy_reduction_name(

@@ -3292,17 +3292,27 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
             }
             red_refused = true;
             red_reason  = GROOVY_REDUCTION_REFUSED_NOT_DIVISIBLE;
-        } else if (st->downsample_gpu && vid->prereduced == 1u) {
-            /* "gpu4" was requested but the video driver handed over the full
-             * frame: the CPU box does the reduction. The image is right;
-             * the cost is the one "gpu4" exists to avoid. */
+        } else if (!st->reduction_path_cpu && st->reduction_hw
+                   && pre_n == 1u
+                   && groovy_reduction_card_factor_ok(red.factor)) {
+            /* A hardware capture at a factor the card has a pass for arrived
+             * at full size, and the path was not forced to the processor: the
+             * CPU box does the reduction. The image is right; the cost is the
+             * one the card exists to avoid. Said once per size, and only on
+             * an engine that has a pass on the card: on any other the
+             * processor is the expected path, and the status line says why. */
             static unsigned s_fb_warn_w = 0u, s_fb_warn_h = 0u;
             if (s_fb_warn_w != cap_w || s_fb_warn_h != cap_h) {
-                RARCH_WARN(
-                    "[groovy] downsample: gpu4 frame %ux%u arrived unreduced -- CPU box used\n",
-                    cap_w, cap_h);
                 s_fb_warn_w = cap_w;
                 s_fb_warn_h = cap_h;
+                if (groovy_reduction_engine_has_gpu_path(
+                            video_driver_get_ident())) {
+                    RARCH_WARN(
+                        "[groovy] downsample: %s frame %ux%u arrived unreduced -- CPU box used\n",
+                        groovy_reduction_name(st->reduction_mode,
+                                              st->downsample_gpu),
+                        cap_w, cap_h);
+                }
             }
         }
         if (!red_refused) {
@@ -3328,11 +3338,19 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
                                         red_shown, red_path)) {
             char        line[GROOVY_FORCED_MSG_CAP];
             const char *engine = video_driver_get_ident();
-            /* Only a CPU path has a cause to say; the forced path is the
-             * one cause known here. */
-            const char *cause  = (red_path == GROOVY_REDUCTION_PATH_CPU
-                                  && st->reduction_path_cpu)
-                ? "forced by GROOVY_DOWNSAMPLE_PATH" : NULL;
+            char        cause_buf[160];
+            /* Only a CPU path has a cause to say. The table is pure
+             * (groovy_reduction.h): forced, software frame, an engine or a
+             * factor without a pass on the card, then the video driver's own
+             * note. No cause known reads as plain CPU. */
+            const char *cause  = NULL;
+
+            if (red_path == GROOVY_REDUCTION_PATH_CPU) {
+                groovy_reduction_cpu_reason(cause_buf, sizeof cause_buf,
+                        st->reduction_path_cpu, st->reduction_hw, engine,
+                        red.factor, st->capture_note);
+                cause = cause_buf;
+            }
 
             groovy_reduction_status_format(line, sizeof line,
                     groovy_reduction_display_name(st->reduction_mode,
