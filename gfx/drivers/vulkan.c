@@ -497,6 +497,7 @@ static INLINE unsigned vulkan_format_to_bpp(VkFormat format)
    switch (format)
    {
       case VK_FORMAT_B8G8R8A8_UNORM:
+      case VK_FORMAT_R8G8B8A8_UNORM:
          return 4;
       case VK_FORMAT_R4G4B4A4_UNORM_PACK16:
       case VK_FORMAT_B4G4R4A4_UNORM_PACK16:
@@ -1476,6 +1477,19 @@ static struct vk_texture vulkan_create_texture(vk_t *vk,
                   : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
                struct vk_texture tmp                = vulkan_create_texture(vk, NULL,
                      width, height, format, initial, NULL, VULKAN_TEXTURE_STAGING);
+
+               /* No staging buffer means no data to copy: the copy below
+                * would read from a null buffer and the image would be
+                * left uninitialised. Give back an empty texture, like
+                * every other failure of this function. */
+               if (tmp.buffer == VK_NULL_HANDLE)
+               {
+                  RARCH_ERR("[Vulkan] Failed to create the staging buffer for a %ux%u texture upload.\n",
+                        width, height);
+                  vulkan_destroy_texture(device, &tex);
+                  memset(&tex, 0, sizeof(tex));
+                  return tex;
+               }
 
                cmd_info.sType                       = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
                cmd_info.pNext                       = NULL;
