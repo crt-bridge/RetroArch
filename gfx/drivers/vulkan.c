@@ -56,6 +56,8 @@
 #endif
 
 #include "../../record/record_driver.h"
+#include "../../record/drivers/groovy_downsample.h"
+#include "../../record/drivers/groovy_box_selftest.h"
 #include "../../retroarch.h"
 #include "../../verbosity.h"
 
@@ -295,6 +297,16 @@ typedef struct vk
       unsigned index;
       bool valid[VULKAN_MAX_SWAPCHAIN_IMAGES];
       bool ready;
+      /* The card's box reduction: the pairs (factor, size) proven in this
+       * session, the last reason told to the recording, the size last logged
+       * as left to the CPU, and whether the card was turned off after a
+       * failed self-test. Kept for the whole session: a resize of the ring
+       * does not clear them. */
+      struct groovy_boxtest_results box_results;
+      char box_note[128];
+      unsigned box_skip_w;
+      unsigned box_skip_h;
+      bool box_disabled;
    } native;
 
    struct
@@ -6114,6 +6126,448 @@ static void vulkan_native_readback(vk_t *vk, VkImage src,
    vk->native.index       = (slot + 1) % VULKAN_MAX_SWAPCHAIN_IMAGES;
 }
 
+/* crt-bridge: the card's box reduction of the native capture.
+ *
+ * The recording is asked, on every frame, by what factor it wants the native
+ * surface averaged (recording_capture_reduction); nothing is read from the
+ * environment here. A compute shader sums FACTOR x FACTOR texels of the core's
+ * image in integers and divides once, as the CPU box does, and writes the
+ * result into a host-visible buffer.
+ *
+ * A pair (factor, size) is trusted only after the card reproduced the CPU box,
+ * byte for byte, on a fixed pseudo-random image of that size (the pattern, the
+ * expected result and the comparison are shared with the OpenGL driver in
+ * groovy_box_selftest.h). The test also runs once per factor on a size whose
+ * width and height differ and are not 4:3, to catch an inversion of the axes.
+ * A failure turns the card off for the session: frames are then read back
+ * unreduced and the recording averages them on the CPU, where it shows. */
+
+/* Tell the recording why the card did not reduce (NULL: it does). Only a
+ * change of text is passed on. */
+static void vulkan_native_box_note(vk_t *vk, const char *note)
+{
+   const char *want = note ? note : "";
+
+   if (strcmp(vk->native.box_note, want) == 0)
+      return;
+   strlcpy(vk->native.box_note, want, sizeof(vk->native.box_note));
+   recording_capture_note(note);
+}
+
+static void vulkan_native_box_disable_note(vk_t *vk, const char *reason,
+      const char *note)
+{
+   vk->native.box_disabled = true;
+   RARCH_ERR("[Vulkan] Native-FBO GPU box disabled: %s -- frames are read back unreduced.\n",
+         reason);
+   vulkan_native_box_note(vk, note);
+}
+
+static void vulkan_native_box_disable(vk_t *vk, const char *reason)
+{
+   char note[128];
+
+   snprintf(note, sizeof(note), "GPU path disabled: %s", reason);
+   vulkan_native_box_disable_note(vk, reason, note);
+}
+
+/* This size stays on the CPU: one line in the log per size, and the reason
+ * told to the recording. Always false, for the caller to return. */
+static bool vulkan_native_box_skip(vk_t *vk,
+      unsigned width, unsigned height, const char *why)
+{
+   if (   vk->native.box_skip_w != width
+       || vk->native.box_skip_h != height)
+   {
+      vk->native.box_skip_w = width;
+      vk->native.box_skip_h = height;
+      RARCH_LOG("[Vulkan] Native-FBO GPU box not used for %ux%u: %s.\n",
+            width, height, why);
+   }
+   vulkan_native_box_note(vk, why);
+   return false;
+}
+
+/* Record the reduction of `view` (an image in `layout`) by the factor f into
+ * `cmd`, outside any render pass, writing out_w x out_h packed RGBA words
+ * into out_buffer, which holds out_bytes. false = nothing was recorded. */
+static bool vulkan_native_box_record(vk_t *vk, VkCommandBuffer cmd,
+      VkImageView view, VkImageLayout layout,
+      VkBuffer out_buffer, uint64_t out_bytes,
+      unsigned f, unsigned out_w, unsigned out_h)
+{
+   VkMemoryBarrier barrier;
+   VkWriteDescriptorSet writes[2];
+   VkDescriptorImageInfo image_info;
+   VkDescriptorBufferInfo buffer_info;
+   struct vk_buffer_range range;
+   VkDescriptorSet set;
+   VkPipeline pipeline;
+   uint32_t ubo[4];
+
+   if (   !groovy_boxtest_factor_ok(f)
+       || !out_w || !out_h
+       || view       == VK_NULL_HANDLE
+       || out_buffer == VK_NULL_HANDLE)
+      return false;
+
+   /* The buffer must hold every word the shader writes. */
+   if (out_bytes < (uint64_t)out_w * (uint64_t)out_h * 4u)
+      return false;
+
+   pipeline = vk->pipelines.native_box[vulkan_native_box_index(f)];
+   if (pipeline == VK_NULL_HANDLE)
+      return false;
+
+   ubo[0] = out_w;
+   ubo[1] = out_h;
+   ubo[2] = 0;
+   ubo[3] = 0;
+   if (!vulkan_buffer_chain_alloc(vk->context, &vk->chain->ubo,
+            sizeof(ubo), &range))
+      return false;
+   memcpy(range.data, ubo, sizeof(ubo));
+
+   set = vulkan_descriptor_manager_alloc(
+         vk->context->device,
+         &vk->chain->descriptor_manager);
+
+   VULKAN_SET_UNIFORM_BUFFER(vk->context->device,
+         set, 0, range.buffer, range.offset, sizeof(ubo));
+
+   image_info.sampler     = vk->samplers.nearest;
+   image_info.imageView   = view;
+   image_info.imageLayout = layout;
+
+   buffer_info.buffer     = out_buffer;
+   buffer_info.offset     = 0;
+   buffer_info.range      = VK_WHOLE_SIZE;
+
+   writes[0].sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+   writes[0].pNext            = NULL;
+   writes[0].dstSet           = set;
+   writes[0].dstBinding       = 1;
+   writes[0].dstArrayElement  = 0;
+   writes[0].descriptorCount  = 1;
+   writes[0].descriptorType   = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+   writes[0].pImageInfo       = &image_info;
+   writes[0].pBufferInfo      = NULL;
+   writes[0].pTexelBufferView = NULL;
+
+   writes[1].sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+   writes[1].pNext            = NULL;
+   writes[1].dstSet           = set;
+   writes[1].dstBinding       = 4;
+   writes[1].dstArrayElement  = 0;
+   writes[1].descriptorCount  = 1;
+   writes[1].descriptorType   = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+   writes[1].pImageInfo       = NULL;
+   writes[1].pBufferInfo      = &buffer_info;
+   writes[1].pTexelBufferView = NULL;
+
+   vkUpdateDescriptorSets(vk->context->device, 2, writes, 0, NULL);
+
+   /* The core's own barrier targets the fragment stage; a compute shader
+    * that reads the image needs one of its own. The layout is left as it is:
+    * the descriptor takes it as it comes. */
+   barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+   barrier.pNext         = NULL;
+   barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+   barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+   vkCmdPipelineBarrier(cmd,
+         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+         1, &barrier, 0, NULL, 0, NULL);
+
+   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+         vk->pipelines.layout, 0, 1, &set, 0, NULL);
+   vkCmdDispatch(cmd, (out_w + 15) / 16, (out_h + 7) / 8, 1);
+
+   /* Make the result visible to the host before it maps the buffer. */
+   barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+   barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+   vkCmdPipelineBarrier(cmd,
+         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+         VK_PIPELINE_STAGE_HOST_BIT, 0,
+         1, &barrier, 0, NULL, 0, NULL);
+   return true;
+}
+
+/* Run the card's reduction by f on the fixed test image of width x height and
+ * compare it, byte for byte, with the CPU box. Any difference, or any Vulkan
+ * error met meanwhile, turns the card off for the session.
+ *
+ * The test runs in its own submission and waits for it, because a result read
+ * back asynchronously would come a frame too late to decide this frame. The
+ * wait is taken under the queue lock, like every upload that waits. */
+static bool vulkan_native_box_self_test(vk_t *vk,
+      unsigned width, unsigned height, unsigned f)
+{
+   unsigned bw                 = width  / f;
+   unsigned bh                 = height / f;
+   size_t npx                  = (size_t)width * (size_t)height;
+   size_t nbox                 = (size_t)bw * (size_t)bh;
+   uint8_t *rgba               = NULL;
+   uint8_t *rgb                = NULL;
+   uint8_t *cpu                = NULL;
+   void *mapped                = NULL;
+   unsigned differ             = 0;
+   unsigned compared           = (unsigned)(nbox * 3);
+   bool ok                     = false;
+   VkResult res                = VK_SUCCESS;
+   VkCommandBuffer cmd         = VK_NULL_HANDLE;
+   VkCommandBufferAllocateInfo cmd_info;
+   VkCommandBufferBeginInfo begin_info;
+   VkSubmitInfo submit_info;
+   struct vk_texture src;
+   struct vk_texture out;
+   char reason[96];
+
+   memset(&src, 0, sizeof(src));
+   memset(&out, 0, sizeof(out));
+
+   if (!groovy_boxtest_fits(width, height, f))
+   {
+      vulkan_native_box_disable(vk, "the self-test image does not fit");
+      goto done;
+   }
+
+   rgba = (uint8_t*)malloc(npx  * 4);
+   rgb  = (uint8_t*)malloc(npx  * 3);
+   cpu  = (uint8_t*)malloc(nbox * 3);
+   if (!rgba || !rgb || !cpu)
+   {
+      vulkan_native_box_disable(vk, "no memory for the self-test");
+      goto done;
+   }
+
+   groovy_boxtest_fill_rgba(rgba, width, height, f);
+   groovy_boxtest_rgba_to_rgb(rgb, rgba, npx);
+   groovy_boxtest_expected(cpu, rgb, width, height, f);
+
+   /* The image goes up through the upload that submits and waits by itself. */
+   src = vulkan_create_texture(vk, NULL, width, height,
+         VK_FORMAT_R8G8B8A8_UNORM, rgba, NULL, VULKAN_TEXTURE_STATIC);
+   if (src.image == VK_NULL_HANDLE || src.view == VK_NULL_HANDLE)
+   {
+      vulkan_native_box_disable(vk, "could not create the self-test image");
+      goto done;
+   }
+
+   out = vulkan_create_texture(vk, NULL, bw, bh,
+         VK_FORMAT_B8G8R8A8_UNORM, NULL, NULL, VULKAN_TEXTURE_READBACK);
+   if (   out.buffer == VK_NULL_HANDLE
+       || out.memory == VK_NULL_HANDLE
+       || (uint64_t)out.size < (uint64_t)nbox * 4u)
+   {
+      vulkan_native_box_disable(vk, "could not create the self-test buffer");
+      goto done;
+   }
+
+   cmd_info.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+   cmd_info.pNext              = NULL;
+   cmd_info.commandPool        = vk->staging_pool;
+   cmd_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+   cmd_info.commandBufferCount = 1;
+   res = vkAllocateCommandBuffers(vk->context->device, &cmd_info, &cmd);
+   if (res != VK_SUCCESS)
+   {
+      cmd = VK_NULL_HANDLE;
+      snprintf(reason, sizeof(reason),
+            "Vulkan error %d allocating the self-test command", (int)res);
+      vulkan_native_box_disable(vk, reason);
+      goto done;
+   }
+
+   begin_info.sType            = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+   begin_info.pNext            = NULL;
+   begin_info.flags            = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+   begin_info.pInheritanceInfo = NULL;
+   vkBeginCommandBuffer(cmd, &begin_info);
+
+   if (!vulkan_native_box_record(vk, cmd, src.view, src.layout,
+            out.buffer, (uint64_t)out.size, f, bw, bh))
+   {
+      vkEndCommandBuffer(cmd);
+      vulkan_native_box_disable(vk, "could not record the self-test");
+      goto done;
+   }
+
+   res = vkEndCommandBuffer(cmd);
+   if (res != VK_SUCCESS)
+   {
+      snprintf(reason, sizeof(reason),
+            "Vulkan error %d recording the self-test", (int)res);
+      vulkan_native_box_disable(vk, reason);
+      goto done;
+   }
+
+   submit_info.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+   submit_info.pNext                = NULL;
+   submit_info.waitSemaphoreCount   = 0;
+   submit_info.pWaitSemaphores      = NULL;
+   submit_info.pWaitDstStageMask    = NULL;
+   submit_info.commandBufferCount   = 1;
+   submit_info.pCommandBuffers      = &cmd;
+   submit_info.signalSemaphoreCount = 0;
+   submit_info.pSignalSemaphores    = NULL;
+
+#ifdef HAVE_THREADS
+   slock_lock(vk->context->queue_lock);
+#endif
+   res = vkQueueSubmit(vk->context->queue, 1, &submit_info, VK_NULL_HANDLE);
+   if (res == VK_SUCCESS)
+      res = vkQueueWaitIdle(vk->context->queue);
+#ifdef HAVE_THREADS
+   slock_unlock(vk->context->queue_lock);
+#endif
+   if (res != VK_SUCCESS)
+   {
+      snprintf(reason, sizeof(reason),
+            "Vulkan error %d during the self-test", (int)res);
+      vulkan_native_box_disable(vk, reason);
+      goto done;
+   }
+
+   res = vkMapMemory(vk->context->device, out.memory,
+         out.offset, out.size, 0, &mapped);
+   if (res != VK_SUCCESS || !mapped)
+   {
+      mapped = NULL;
+      vulkan_native_box_disable(vk, "could not map the self-test buffer");
+      goto done;
+   }
+
+   if (out.flags & VK_TEX_FLAG_NEED_MANUAL_CACHE_MANAGEMENT)
+   {
+      VkMappedMemoryRange range;
+      range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+      range.pNext  = NULL;
+      range.memory = out.memory;
+      range.offset = 0;
+      range.size   = VK_WHOLE_SIZE;
+      vkInvalidateMappedMemoryRanges(vk->context->device, 1, &range);
+   }
+
+   differ = groovy_boxtest_compare((const uint8_t*)mapped, cpu, bw, bh);
+   vkUnmapMemory(vk->context->device, out.memory);
+   mapped = NULL;
+
+   RARCH_LOG("[Vulkan] Native-FBO GPU box self-test: %ux%u -> %ux%u, %u of %u bytes differ from the CPU box.\n",
+         width, height, bw, bh, differ, compared);
+
+   if (differ != 0)
+   {
+      char note[64];
+      snprintf(reason, sizeof(reason),
+            "the self-test found %u bytes that differ from the CPU box",
+            differ);
+      snprintf(note, sizeof(note),
+            "GPU self-test failed: %u bytes differ", differ);
+      vulkan_native_box_disable_note(vk, reason, note);
+   }
+   else
+      ok = true;
+
+done:
+   if (cmd != VK_NULL_HANDLE)
+      vkFreeCommandBuffers(vk->context->device, vk->staging_pool, 1, &cmd);
+   vulkan_destroy_texture(vk->context->device, &out);
+   vulkan_destroy_texture(vk->context->device, &src);
+   free(rgba);
+   free(rgb);
+   free(cpu);
+   return ok;
+}
+
+/* Is the card to reduce this size by f? Tests the pair when the session has
+ * not seen it (the stand-alone test on the axis size first, once per factor),
+ * and remembers the ones that passed. true = the pair reproduced the CPU box in
+ * this session. */
+static bool vulkan_native_box_prove(vk_t *vk,
+      unsigned width, unsigned height, unsigned f)
+{
+   if (!groovy_boxtest_factor_ok(f) || vk->native.box_disabled)
+      return false;
+
+   if (!groovy_boxtest_results_has(&vk->native.box_results,
+            f, width, height))
+   {
+      /* A size the test cannot allocate for, or one the table of proven
+       * pairs has no room for, stays on the CPU. */
+      if (!groovy_boxtest_fits(width, height, f))
+         return vulkan_native_box_skip(vk, width, height,
+               "frame too large for the GPU self-test");
+      if (vk->native.box_results.count >= GROOVY_BOXTEST_TABLE_CAP)
+         return vulkan_native_box_skip(vk, width, height,
+               "GPU self-test table full");
+      /* A pipeline that failed to build leaves its slot empty: the card is
+       * not asked for that factor, the others are unaffected. */
+      if (vk->pipelines.native_box[vulkan_native_box_index(f)]
+            == VK_NULL_HANDLE)
+         return vulkan_native_box_skip(vk, width, height,
+               "no GPU pipeline for this factor");
+
+      /* The first time a factor is used, the stand-alone test on a size
+       * whose width and height differ and are not 4:3 comes first: it
+       * catches an inversion of the axes that the real size, if it is
+       * square or 4:3, would hide. */
+      if (groovy_boxtest_axis_due(&vk->native.box_results, f))
+      {
+         bool axis_ok = vulkan_native_box_self_test(vk,
+               GROOVY_BOXTEST_AXIS_W, GROOVY_BOXTEST_AXIS_H, f);
+
+         groovy_boxtest_axis_done(&vk->native.box_results, f);
+         if (!axis_ok)
+            return false;
+      }
+      if (!vulkan_native_box_self_test(vk, width, height, f))
+         return false;
+      if (!groovy_boxtest_results_add(&vk->native.box_results,
+               f, width, height))
+         return false;
+   }
+
+   vulkan_native_box_note(vk, NULL);
+   return true;
+}
+
+/* The card may reduce the core's image only when the image reads exactly as
+ * the CPU reads it: say why not, once per size, when it does not. Otherwise
+ * prove the pair. */
+static bool vulkan_native_box_consider(vk_t *vk,
+      unsigned width, unsigned height, unsigned f)
+{
+   const VkImageViewCreateInfo *view = &vk->hw.image->create_info;
+   char why[48];
+
+   if (vk->native.box_disabled)
+      return false;
+
+   if (!vulkan_native_box_format_ok(view->format))
+   {
+      switch (view->format)
+      {
+         case VK_FORMAT_R8G8B8A8_SRGB:
+         case VK_FORMAT_B8G8R8A8_SRGB:
+         case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+            snprintf(why, sizeof(why), "sRGB image");
+            break;
+         default:
+            snprintf(why, sizeof(why), "unsupported image format %d",
+                  (int)view->format);
+            break;
+      }
+      return vulkan_native_box_skip(vk, width, height, why);
+   }
+   if (!vulkan_native_box_view_ok(view))
+      return vulkan_native_box_skip(vk, width, height,
+            "unsupported image view");
+
+   return vulkan_native_box_prove(vk, width, height, f);
+}
+
 /* Deliver one native frame as TOP-DOWN BGR24 (positive pitch = width*3).
  * Returns false while the pipeline refills — recording just started, or the
  * native dims changed and the ring has not been re-filled at the new dims.
@@ -6874,6 +7328,17 @@ static void vulkan_native_capture_step(vk_t *vk)
       return;
    }
 #endif
+
+   /* Menu closed: the card may reduce the core's own image. It is asked for
+    * the factor on every frame, and a pair it has not proven is proven here,
+    * in its own submission, before anything is reduced. Nothing reads the
+    * result yet: the frame below is still read back whole. */
+   {
+      unsigned f = recording_capture_reduction(width, height);
+
+      if (groovy_boxtest_factor_ok(f))
+         vulkan_native_box_consider(vk, width, height, f);
+   }
 
    vulkan_native_readback(vk, core_image, core_layout, core_format,
          width, height);
