@@ -405,6 +405,10 @@ struct groovy_receiver {
     uint32_t                saturations;
 };
 
+/* Longest reason, in bytes with its terminating zero, kept from the video
+ * driver: a longer text is cut, never overrun. */
+#define GROOVY_CAPTURE_NOTE_CAP 96
+
 typedef struct {
     gm_handle          *gm;
     uint8_t            *swap_buf;       /* BGR→RGB conversion scratch buffer */
@@ -526,6 +530,7 @@ typedef struct {
     int       reduction_hw;                 /* 1 = hardware capture (a supersampled FBO) */
     int       reduction_from_env;           /* 1 = GROOVY_DOWNSAMPLE chose the mode, 0 = the menu */
     struct groovy_reduction_memo   reduction_memo;   /* decision per rendered size */
+    char      capture_note[GROOVY_CAPTURE_NOTE_CAP]; /* why the video driver did not reduce, as it said it */
     struct groovy_reduction_said   reduction_said;   /* what the status line last said */
     struct groovy_reduction_pacer  reduction_pacer;  /* limits the refusal message */
     uint64_t  reduction_refused[GROOVY_REDUCTION_REFUSED_PREREDUCED + 1]; /* frames refused, per cause */
@@ -4684,6 +4689,24 @@ static unsigned groovy_capture_reduction(void *data, unsigned w, unsigned h)
 }
 
 /* ---------------------------------------------------------------------------
+ * vtable function: groovy_capture_note
+ *
+ * The video driver says why it did not reduce the capture; the status line
+ * will repeat it, so a CPU path always has a visible cause. The text is
+ * copied into a fixed buffer (cut when too long) and is only ever data: it
+ * is never used as a format. A NULL note clears the previous one.
+ * ------------------------------------------------------------------------- */
+static void groovy_capture_note(void *data, const char *note)
+{
+    groovy_state_t *st = (groovy_state_t *)data;
+
+    if (!st)
+        return;
+
+    snprintf(st->capture_note, sizeof st->capture_note, "%s", note ? note : "");
+}
+
+/* ---------------------------------------------------------------------------
  * Vtable registration.
  *
  * Field names use C99 designated initializers. push_av_info is registered
@@ -4708,4 +4731,5 @@ const record_driver_t record_groovy = {
     .ident        = "groovy",
     .push_av_info = groovy_push_av_info,   /* + Plan 03-06 EMT-03 */
     .capture_reduction = groovy_capture_reduction,
+    .capture_note = groovy_capture_note,
 };

@@ -49,6 +49,7 @@ static const record_driver_t record_null = {
    "null",
    NULL, /* push_av_info — crt-bridge geometry hook */
    NULL, /* capture_reduction — crt-bridge reduction hook */
+   NULL, /* capture_note — crt-bridge reduction note hook */
 };
 
 const record_driver_t *record_drivers[] = {
@@ -85,6 +86,16 @@ unsigned recording_capture_reduction(unsigned width, unsigned height)
 
    /* 0 is not a factor: treat it as "no reduction" */
    return (factor > 0) ? factor : 1;
+}
+
+void recording_capture_note(const char *note)
+{
+   if (     !recording_state.driver
+         || !recording_state.data
+         || !recording_state.driver->capture_note)
+      return;
+
+   recording_state.driver->capture_note(recording_state.data, note);
 }
 
 /**

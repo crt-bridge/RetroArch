@@ -125,6 +125,11 @@ typedef struct record_driver
     * (1 = no reduction). NULL-default, as for push_av_info: drivers that
     * omit the trailing members get NULL. */
    unsigned (*capture_reduction)(void *data, unsigned width, unsigned height);
+   /* + crt-bridge: optional note hook. A video driver that did not reduce
+    * the capture says why, in a short text the recording may show; the text
+    * is data and never a format. NULL means no reason. NULL-default, as for
+    * the hooks above. */
+   void (*capture_note)(void *data, const char *note);
 } record_driver_t;
 
 
@@ -181,6 +186,11 @@ recording_state_t *recording_state_get_ptr(void);
  * given rendered size reduced by. 1 when nothing records or the driver has
  * no reduction hook. */
 unsigned recording_capture_reduction(unsigned width, unsigned height);
+
+/* + crt-bridge: pass the active record driver the reason the video driver did
+ * not reduce the capture (NULL = no reason). Does nothing when nothing records
+ * or the driver has no note hook. */
+void recording_capture_note(const char *note);
 
 extern const record_driver_t *record_drivers[];
 
