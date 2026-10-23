@@ -526,7 +526,7 @@ typedef struct {
      * kind are set once at session opening; the memo, the two limiters and
      * the refusal counters are zero at the start (calloc). --- */
     enum groovy_reduction_mode reduction_mode;
-    int       downsample_gpu;               /* 1 = "gpu4": the video driver is asked to do the 4x4 reduction */
+    int       downsample_gpu;               /* 1 = "gpu4", an alias of 4x: only the name of the setting changes */
     int       reduction_hw;                 /* 1 = hardware capture (a supersampled FBO) */
     int       reduction_from_env;           /* 1 = GROOVY_DOWNSAMPLE chose the mode, 0 = the menu */
     int       reduction_path_cpu;           /* 1 = GROOVY_DOWNSAMPLE_PATH=cpu: the processor reduces, the card is not asked */
@@ -1384,10 +1384,10 @@ static void *groovy_new(const struct record_params *params)
         }
 
         /* Supersampling reduction. Read once per session, so a change made
-         * in the menu applies the next time content is loaded. "gpu4" keeps
-         * the card doing the reduction because the video driver reads the
-         * same variable when it starts, before any menu exists; every other
-         * setting reduces on the processor. */
+         * in the menu applies the next time content is loaded. "gpu4" is an
+         * alias of 4x. Who reduces is not decided here: the video driver is
+         * asked for the factor on every frame and reduces when the card can,
+         * the processor otherwise (GROOVY_DOWNSAMPLE_PATH=cpu forces it). */
         env = getenv("GROOVY_DOWNSAMPLE");
         if (groovy_precedence_env_wins(env)) {
             enum groovy_reduction_mode rm = GROOVY_REDUCTION_AUTO;

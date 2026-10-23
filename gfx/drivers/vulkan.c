@@ -6159,7 +6159,12 @@ static void vulkan_native_readback(vk_t *vk, VkImage src,
  * groovy_box_selftest.h). The test also runs once per factor on a size whose
  * width and height differ and are not 4:3, to catch an inversion of the axes.
  * A failure turns the card off for the session: frames are then read back
- * unreduced and the recording averages them on the CPU, where it shows. */
+ * unreduced and the recording averages them on the CPU, where it shows.
+ *
+ * Failure policy: a pipeline that did not build leaves its factor on the CPU
+ * and the other factors on the card ("no GPU pipeline for this factor"); the
+ * OpenGL driver, for a program that did not compile or link, turns the whole
+ * card off. */
 
 /* Tell the recording why the card did not reduce (NULL: it does). Passed on
  * every time the decision is taken, not only when the text changes: a

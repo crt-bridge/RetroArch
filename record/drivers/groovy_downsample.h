@@ -27,15 +27,15 @@
  * (including "auto"). The video driver does not read the variable: it asks
  * the recording for the factor with recording_capture_reduction().
  *
- * "gpu4" is an alias of the 4x4 reduction. Reading the
+ * "gpu4" is an alias of the 4x reduction: only the name differs. Reading the
  * full-size frame back from the GPU and averaging it on the CPU costs a
  * large share of the per-frame budget at 1280x960; a video driver can
- * average the 4x4 blocks on the GPU instead and read back only the native
+ * average the blocks on the GPU instead and read back only the reduced
  * size. The video driver reports, for every frame, the factor by which it
  * already reduced the capture; groovy_downsample_cpu_factor() turns that
  * report and the decided factor into the factor the CPU box still has to
- * apply, so a frame is never reduced twice. If the video driver did not reduce a
- * "gpu4" frame, the CPU box does it (the image stays correct, only slower).
+ * apply, so a frame is never reduced twice. If the video driver did not
+ * reduce a frame, the CPU box does it (the image stays correct, only slower).
  * groovy_downsample_factor_parse() does not know "gpu4" on purpose: it keeps
  * its meaning for every other value, and an older binary reads "gpu4" as
  * "off", which the size check on the wire then reveals.

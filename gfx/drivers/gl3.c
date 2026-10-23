@@ -1661,18 +1661,22 @@ static void gl3_deinit_native_compose(gl3_t *gl)
  * surface averaged (recording_capture_reduction); the factor is never read
  * from the environment here. Reading the full surface back (1280x960 for a
  * 320x240 game at 4x supersampling) and averaging it on the CPU costs a large
- * share of the frame; here the GPU averages each 4x4 block into OUR reduced
- * target and only that target is read back — one sixteenth of the bytes.
- * A pair (factor, size) is reduced on the card only after it reproduced the
- * CPU box in this session.
+ * share of the frame; here the GPU averages each FACTOR x FACTOR block
+ * (FACTOR = 2, 4 or 8) into OUR reduced target and only that target is read
+ * back: 1/(FACTOR * FACTOR) of the bytes. A pair (factor, size) is reduced
+ * on the card only after it reproduced the CPU box in this session.
  *
  * The result must be the CPU box byte for byte (groovy_downsample_box_
- * rgb888_n4: integer sum of sixteen samples, one truncating division by 16).
- * So the shader fetches the sixteen texels one by one with texelFetch,
- * brings each channel back to its exact 8-bit integer, sums in integers and
- * divides once. Bilinear filtering cannot do this: at 4:1 a bilinear tap
- * placed in the middle of a block only reads its central 2x2, and two
- * successive 2:1 bilinear copies round to a byte twice.
+ * rgb888_n2, _n4, _n8: integer sum of FACTOR * FACTOR samples, one
+ * truncating division by FACTOR * FACTOR). So the shader fetches the texels
+ * one by one with texelFetch, brings each channel back to its exact 8-bit
+ * integer, sums in integers and divides once. Bilinear filtering cannot do
+ * this: at 4:1 a bilinear tap placed in the middle of a block only reads its
+ * central 2x2, and two successive 2:1 bilinear copies round to a byte twice.
+ *
+ * Failure policy: a program that does not compile or link turns the whole
+ * card off for the session (gl3_native_box_disable); the Vulkan driver, for a
+ * pipeline that did not build, leaves the other factors on the card.
  *
  * Desktop GL only; under GLES the box is compiled out and the capture is
  * read back unreduced (the recording then reduces it on the CPU). */
@@ -2216,7 +2220,7 @@ static void gl3_pbo_async_readback_native(gl3_t *gl, GLuint src_fbo,
 
    /* Read the (0,0)-(w,h) region of src_fbo — the core's HW FBO when the
     * menu is closed, our compositing target when it is open, or the reduced
-    * box target under gpu4. Never the window back buffer. */
+    * box target when the card reduces. Never the window back buffer. */
    glBindFramebuffer(GL_READ_FRAMEBUFFER, src_fbo);
    glReadPixels(0, 0, (GLsizei)width, (GLsizei)height,
          GL_RGBA, GL_UNSIGNED_BYTE, NULL);
@@ -4779,8 +4783,8 @@ static void gl3_native_capture_step(gl3_t *gl)
             (GLsizei)prev_vp[2], (GLsizei)prev_vp[3]);
 
 #ifndef HAVE_OPENGLES
-      /* gpu4: the composite goes through the same box as play. The box
-       * keeps its source's orientation and 4 divides the height, so the
+      /* The composite goes through the same box as play. The box keeps
+       * its source's orientation and the factor divides the height, so the
        * block grid does not depend on the drawing direction above. */
       if (   gl3_native_box_applies(gl, width, height, f)
           && gl3_native_box_reduce(gl, gl->native_compose_tex,
