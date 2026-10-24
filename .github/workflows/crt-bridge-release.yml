@@ -307,22 +307,45 @@ jobs:
 
           Software receiver (a libretro core for a second computer) -- over Wi-Fi, turn on Padded Session: https://github.com/crt-bridge/libretro-crt-bridge
 
-          Windows binaries are not code-signed.
+          Windows binaries are not code-signed (details below).
+
+          Before you connect a CRT, read the section "Before you connect a CRT" at the top of README.md inside the archive. crt-bridge protects no monitor.
 
           ## What's new in this release
 
-          - Start the emitter and the receivers in any order. A receiver that starts, or restarts, while the emitter is already sending now gets its picture and sound without restarting the emitter. The crt-bridge client started after the emitter shows its first picture in under a second.
-          - A follower that missed a mode change (a new game, a 240p/480i switch, a restarted emitter) gets the right picture back by itself, without restarting it: each mode change is sent to the followers twice more, right after the master. A follower that goes blind during a session is caught up again, and a receiver that has the picture is left alone.
-          - When libgm refuses to open a receiver, the log says which one and why (for example: receiver address failed to resolve); for the master, the reason is also shown on screen. A follower that cannot be opened is reported and left out, and the master starts anyway.
+          Changes since the previous pre-release, v1.22.2-crtbridge.3.
+
+          - 480p to the receiver. With Settings > Recording > Receiver 31 kHz turned on, a picture taller than 280 lines is sent as progressive 480p instead of interlaced 480i. It is Off by default: turn it on only if the master receiver's tube takes 31 kHz, and never towards a MiSTer.
+          - Supersampling reduction you can set. A core that renders at a multiple of its native size is reduced before the picture is sent. Settings > Recording > Supersampling reduction is Auto by default; 2x, 4x, 8x and Off are the other choices. A line on the PC screen says what was done, for example: `Supersampling reduction: Auto -> 2x (1280x864 -> 640x432), GPU, vulkan`
+          - The reduction runs on the graphics card under the `glcore` (OpenGL) and `vulkan` video drivers, instead of on the processor.
+          - No default receiver address. Until you set one, nothing is sent; when you load a game the emitter says so on the PC screen and tells where to set it: Settings > Recording > Groovy Master Address.
 
           ## Known limitations
 
+          - Under the `d3d11` video driver the reduction runs on the processor, and the LRPS2 (PlayStation 2) core renders a black picture. Use `vulkan` or `glcore`.
+          - The `d3d12` video driver has never been checked with any core.
+          - A picture in a 10-bit format (seen once, with the Dolphin core under `vulkan`) may be read as 8-bit and show wrong colours.
+          - PAL (576 lines) is refused: nothing is sent, and the PC screen says so.
+          - The Dreamcast and PlayStation 2 cores skip frames: a few per minute with the Dreamcast core, tens per minute with the PlayStation 2 core in 480p. The Dreamcast picture looked smooth in testing.
+          - The picture reaches the tube about two frames after the emulator renders it.
+          - The crt-bridge client on a Mac, as an extra receiver over Wi-Fi, froze once (picture and sound) during a 480p session while the CRT carried on. Seen once, cause not found.
+          - Auto reduces a Nintendo 64 picture rendered at 4x (GLideN64) by 2, to 480 lines. Choose 4x in Settings > Recording > Supersampling reduction for a 240p picture.
+          - The Linux emitter has only been run towards the software receiver, never towards a CRT receiver.
           - A follower that never sends a status back (the crt-bridge client run with GMC_STATUS=0) is never seen as in sync: the emitter sends it the session opening and the video mode again every 10 seconds for as long as it runs, and its gamepad channel is reset each time. This repeat is also how it recovers a lost mode change, within 10 seconds.
           - The crt-bridge client on a Mac over Wi-Fi, run with the default RetroArch settings, can play crackling sound while its picture is right. The receiver on the CRT is not affected. Not yet explained.
           - L3 and R3 (the stick clicks) do not reach the game: the Groovy input protocol carries ten buttons only.
           - Changing the gamepad on the receiver while it runs breaks input until the receiver service is restarted.
           - An Xbox One / Series X|S controller does not finish its USB initialisation on the receiver: its logo keeps blinking and no input arrives.
           - The Y/X swap in the bundled MiSTer.cfg gamepad profile has only been verified with an Xbox 360 controller.
+
+          ## Windows binaries are not code-signed
+
+          Windows may warn you the first time you run the emitter. Two Windows features are involved.
+
+          - SmartScreen can warn about a program it does not know. The usual way through is More info, then Run anyway.
+          - Smart App Control, if it is on, asks a Microsoft cloud service about a program first. When that service cannot vouch for an unsigned program, Windows blocks it, and there is no exception for a single application: the choices are to turn Smart App Control off in Windows Security, or not to run the emitter.
+
+          A warning is expected for an unsigned program. It does not mean the download was altered, and it does not replace checking it: compare the SHA-256 of your archive with the lines below. In PowerShell: `Get-FileHash -Algorithm SHA256 <archive>`. On Linux: `sha256sum <archive>`.
           EOF
 
           sed -i "s|@VERSION@|$VERSION|g; s|@FORK_COMMIT@|$GITHUB_SHA|g" notes.md
