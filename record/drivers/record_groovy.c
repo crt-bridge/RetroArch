@@ -8,8 +8,9 @@
  * Configuration: receiver_ip[:port] is read from the RetroArch
  * video_record_config (record_config) retroarch.cfg key. MANDATORY —
  * there is no default receiver IP. If that key is absent or empty,
- * groovy_new refuses to start (returns NULL) and RARCH_ERR logs the
- * MAC-resolution recipe. A wrong default used to hang or silently aim UDP
+ * groovy_new refuses to start (returns NULL) and says so on the PC screen
+ * and in the log (groovy_log_error), naming the menu path to the address
+ * field. A wrong default used to hang or silently aim UDP
  * at the wrong machine; an absent one fails in about a second with an
  * exact message. The key
  * "record_config" was chosen over "record_path" because record_path is
@@ -870,7 +871,7 @@ static void lat_hist_percentiles(const uint16_t *hist, unsigned n,
  * parse_receiver_config — extract IP and port from params->config.
  *
  * Accepts formats:
- *   ""            → defaults
+ *   ""            -> refused (no default)
  *   "ip"          → ip + default port
  *   "ip:port"     → explicit ip + port
  *
@@ -1272,10 +1273,21 @@ static void *groovy_new(const struct record_params *params)
          * screen, not the log: the screen text names the menu path to the
          * address (the labels must match the menu strings) and never an
          * address of its own. The log alone also names the config key, for
-         * whoever edits the config file by hand. */
-        groovy_log_error("No receiver address: the bridge is off. Set it in "
-                         "Settings > Recording > Groovy Master Address "
-                         "(ip or ip:port), then load the game again.");
+         * whoever edits the config file by hand. A typed address that
+         * parse_receiver_config rejects (no host before the colon, or 64
+         * characters and more) gets its own wording: telling that person
+         * there is no address would send them looking for the wrong
+         * mistake. Neither text says "bridge": the Groovy Bridge switch sits
+         * right under the address in the same menu. */
+        const bool typed = params && params->config
+              && params->config[0] != '\0';
+        groovy_log_error(typed
+              ? "The receiver address is not usable, nothing is sent. Fix it "
+                "in Settings > Recording > Groovy Master Address "
+                "(ip or ip:port), then load the game again."
+              : "No receiver address is set, nothing is sent. Set it in "
+                "Settings > Recording > Groovy Master Address "
+                "(ip or ip:port), then load the game again.");
         RARCH_ERR("[groovy] Or set video_record_config = \"ip[:port]\" in "
                   "the config file.\n");
         free(st);
