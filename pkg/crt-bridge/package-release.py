@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """package-release -- build, verify and compress a crt-bridge emitter release.
 
-Four subcommands, all stdlib-only (no RetroArch launched, nothing built):
+Five subcommands, all stdlib-only (no RetroArch launched, nothing built):
 
     package-release.py stage --platform {windows,linux} --fork-dir DIR \\
         --libgm-dir DIR --binary PATH --version VER --fork-commit SHA40 \\
@@ -11,9 +11,11 @@ Four subcommands, all stdlib-only (no RetroArch launched, nothing built):
         binary, the platform crt-bridge.cfg template (target left empty),
         a launcher, a substituted README, the "mister" autoconfig profile
         (autoconfig/mister/MiSTer.cfg, so a release user's controller
-        works without hand-editing a config file), LICENSES/ (measured,
-        never a recopied list), and an empty cores/ marker. Nothing else
-        goes in.
+        works without hand-editing a config file), LICENSES/ (the texts of
+        the COMPONENTS table copied from the fork, never typed here, and
+        the licenses of the MinGW runtime DLLs measured from the MSYS2
+        package database), and an empty cores/ marker. Nothing else goes
+        in.
 
     package-release.py check --platform {windows,linux} \\
         (--dir DIR | --archive FILE) [--mingw-bin DIR] [--objdump PATH] \\
@@ -21,9 +23,11 @@ Four subcommands, all stdlib-only (no RetroArch launched, nothing built):
         Verifies a staged directory or a built archive against the same
         rules a public CI run must pass before Sir ever tags a release:
         empty bridge target, no private address/host path, no core, no
-        official branding in file names, every license present, the
-        autoconfig profile with its axis binds, and (on Windows, with
-        --mingw-bin) a closed DLL import set. With --forbid-bench-strings,
+        official branding in file names, every license present, every
+        `Text:` line of LICENSES/NOTICE.txt backed by a non-empty file and
+        every file of LICENSES/ named by one, the autoconfig profile with
+        its axis binds, and (on Windows, with --mingw-bin) a closed DLL
+        import set. With --forbid-bench-strings,
         the executable and every DLL of the kit must also be free of the
         bench-only strings (BENCH_STRINGS) and of private addresses and
         personal paths; this rule is opt-in because a bench binary staged
@@ -35,14 +39,23 @@ Four subcommands, all stdlib-only (no RetroArch launched, nothing built):
         file is accepted, an object file included. A leak is reported by
         rule and position only, never with the string found.
 
+    package-release.py check-notice-objects --obj-dir DIR \\
+        --platform {windows,linux}
+        Reads the object directory of a finished build (obj-unix/release)
+        and fails when a third-party object folder (deps/*, libchdr) has
+        no line in the COMPONENTS table, when a line is seen in a build of
+        the other platform, or when an object that includes a header-only
+        component is there while its line is not. The CI runs it after
+        "Build": the build itself proves the notice lists what it compiled.
+
     package-release.py archive --platform {windows,linux} --dir DIR --out FILE
         Compresses a staged directory: .zip on Windows, .tar.gz on Linux
         (root-owned, 0755 on the executable and the shell launcher, 0644
         elsewhere).
 
-Exit codes: 0 = PASS / success, 1 = findings (check and check-bench-strings
-only), 2 = usage or environment error (bad version string, missing or
-unreadable required input, output already exists).
+Exit codes: 0 = PASS / success, 1 = findings (check, check-bench-strings and
+check-notice-objects only), 2 = usage or environment error (bad version
+string, missing or unreadable required input, output already exists).
 """
 from __future__ import annotations
 
@@ -514,6 +527,36 @@ COMPONENTS = (
         ),
     ),
 )
+
+
+# The objects of a build (paths under obj-unix/release) that include a
+# component with no object folder of its own -- a header-only library, or a
+# library whose source is included by a file of the emitter. They are listed
+# apart from the rows above on purpose: a site must survive the loss of its
+# row, or `check-notice-objects` could not see that the row is missing. Read
+# off the compile lines of the CI log (the file compiled, per job), not
+# recalled.
+#   audio_mixer.c     stb_vorbis, dr_flac, dr_mp3
+#   stb.c             stb_truetype, stb_rect_pack
+#   image_core.c      stb_image
+#   libchdr_flac.c    dr_flac
+#   uint32s_index.c   xxHash
+#   vulkan.c          the Vulkan headers (through vulkan_common.h)
+#   file_path.c       one of the libretro-common files
+INCLUDE_SITES = (
+    ("libretro-common/audio/audio_mixer.o", "stb"),
+    ("libretro-common/audio/audio_mixer.o", "dr_libs"),
+    ("gfx/drivers_font_renderer/stb.o", "stb"),
+    ("cores/libretro-imageviewer/image_core.o", "stb"),
+    ("libretro-common/formats/libchdr/libchdr_flac.o", "dr_libs"),
+    ("input/bsv/uint32s_index.o", "xxHash"),
+    ("gfx/drivers/vulkan.o", "Vulkan headers"),
+    ("libretro-common/file/file_path.o", "libretro-common"),
+)
+
+# Third-party code outside deps/ that the build compiles into its own object
+# folder (the one libretro-common subfolder that is a library of its own).
+EXTRA_OBJECT_DIRS = ("libretro-common/formats/libchdr",)
 
 
 def text_source_paths() -> list:
@@ -1427,6 +1470,157 @@ def cmd_check_bench_strings(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# check-notice-objects
+# ---------------------------------------------------------------------------
+
+
+def table_problems(components: Optional[Sequence] = None, sites: Optional[Sequence] = None) -> list:
+    """What is inconsistent inside the table itself, as human-readable lines
+    (empty when it holds together)."""
+    components = COMPONENTS if components is None else components
+    sites = INCLUDE_SITES if sites is None else sites
+    problems: list = []
+    by_name: dict = {}
+    dests: dict = {}
+    folders: dict = {}
+    for comp in components:
+        if comp.name in by_name:
+            problems.append(f"component {comp.name!r} appears twice")
+        by_name[comp.name] = comp
+        if comp.kind not in ("compiled", "included", "text"):
+            problems.append(f"{comp.name}: unknown kind {comp.kind!r}")
+        if not comp.platforms or not set(comp.platforms) <= {"windows", "linux"}:
+            problems.append(f"{comp.name}: platforms must be a non-empty subset of windows, linux")
+        if comp.kind == "compiled":
+            if not comp.obj_dir:
+                problems.append(f"{comp.name}: a compiled line needs its object folder")
+            elif comp.obj_dir in folders:
+                problems.append(f"{comp.name}: object folder {comp.obj_dir} is also {folders[comp.obj_dir]}'s")
+            else:
+                folders[comp.obj_dir] = comp.name
+        elif comp.obj_dir:
+            problems.append(f"{comp.name}: only a compiled line has an object folder")
+        if not comp.texts:
+            problems.append(f"{comp.name}: no license text")
+        for ts in comp.texts:
+            if "/" in ts.dest or "\\" in ts.dest or not ts.dest:
+                problems.append(f"{comp.name}: {ts.dest!r} is not a bare file name")
+            if ts.dest in dests:
+                problems.append(f"{ts.dest}: two lines ({dests[ts.dest]} and {comp.name}) for one file")
+            dests[ts.dest] = comp.name
+    sited: set = set()
+    for obj, name in sites:
+        comp = by_name.get(name)
+        if comp is None:
+            problems.append(f"include site {obj}: names {name}, which has no line in the table")
+        elif comp.kind != "included":
+            problems.append(f"include site {obj}: {name} is not an `included` line")
+        sited.add(name)
+    for comp in components:
+        if comp.kind == "included" and comp.name not in sited:
+            problems.append(f"{comp.name}: an `included` line with no include site")
+    return problems
+
+
+def _third_party_object_dirs(obj_dir: Path) -> dict:
+    """The third-party object folders of a build that hold at least one `.o`,
+    as {folder: object count}: `deps/<name>` and EXTRA_OBJECT_DIRS, whatever
+    the depth of the objects below."""
+    found: dict = {}
+    for dirpath, _dirs, files in os.walk(obj_dir):
+        count = sum(1 for f in files if f.endswith(".o"))
+        if not count:
+            continue
+        rel = os.path.relpath(dirpath, obj_dir).replace(os.sep, "/")
+        parts = rel.split("/")
+        key = None
+        if parts[0] == "deps" and len(parts) > 1:
+            key = "deps/" + parts[1]
+        else:
+            for extra in EXTRA_OBJECT_DIRS:
+                if rel == extra or rel.startswith(extra + "/"):
+                    key = extra
+        if key:
+            found[key] = found.get(key, 0) + count
+    return found
+
+
+def notice_object_report(
+    obj_dir: Path,
+    platform: str,
+    components: Optional[Sequence] = None,
+    sites: Optional[Sequence] = None,
+) -> tuple:
+    """Compare the objects of a build with the table: (seen lines, findings).
+
+    A third-party object folder with no line in the table, a line seen on a
+    platform it is not for, and an include object whose component has no line
+    are findings. A line of the table that the build did not produce is not:
+    the table says what a build MAY carry. A build in which nothing at all is
+    measured is a finding too, or a wrong --obj-dir would pass."""
+    components = COMPONENTS if components is None else components
+    sites = INCLUDE_SITES if sites is None else sites
+    by_dir = {c.obj_dir: c for c in components if c.kind == "compiled"}
+    by_name = {c.name: c for c in components}
+    seen: list = []
+    findings: list = []
+    folders = _third_party_object_dirs(obj_dir)
+    for key in sorted(folders):
+        comp = by_dir.get(key)
+        if comp is None:
+            findings.append(
+                f"FAIL notice-object {key}: compiled in this build ({folders[key]} objects), "
+                "no line in the component table"
+            )
+        elif platform not in comp.platforms:
+            findings.append(
+                f"FAIL notice-object {key}: {comp.name} is a {'/'.join(comp.platforms)}-only "
+                f"line of the table, seen in a {platform} build"
+            )
+        else:
+            seen.append(f"seen folder {key} ({folders[key]} objects) -> {comp.name}")
+    site_hits = 0
+    for obj, name in sites:
+        if not (obj_dir / obj).is_file():
+            continue
+        site_hits += 1
+        comp = by_name.get(name)
+        if comp is None:
+            findings.append(f"FAIL notice-object {obj}: includes {name}, which has no line in the component table")
+        elif platform not in comp.platforms:
+            findings.append(
+                f"FAIL notice-object {obj}: includes {name}, a {'/'.join(comp.platforms)}-only "
+                f"line of the table, seen in a {platform} build"
+            )
+        else:
+            seen.append(f"seen object {obj} -> {name}")
+    if not folders and not site_hits:
+        findings.append(
+            "FAIL notice-object: nothing measured -- no third-party object folder and no known "
+            "include object under --obj-dir (wrong directory?)"
+        )
+    return seen, findings
+
+
+def cmd_check_notice_objects(args: argparse.Namespace) -> int:
+    obj_dir = Path(args.obj_dir)
+    if not obj_dir.is_dir():
+        print(f"ERROR: --obj-dir not found: {obj_dir}", file=sys.stderr)
+        return 2
+    seen, findings = notice_object_report(obj_dir, args.platform)
+    findings = [f"FAIL table {p}" for p in table_problems()] + findings
+    for line in seen:
+        print(line)
+    for line in findings:
+        print(line)
+    if findings:
+        print(f"FAIL ({len(findings)})")
+        return 1
+    print("PASS")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # archive
 # ---------------------------------------------------------------------------
 
@@ -1506,6 +1700,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_bench.add_argument("--binary", required=True)
     p_bench.add_argument("--dll", action="append")
 
+    p_notice = sub.add_parser("check-notice-objects")
+    p_notice.add_argument("--obj-dir", required=True)
+    p_notice.add_argument("--platform", required=True, choices=["windows", "linux"])
+
     p_archive = sub.add_parser("archive")
     p_archive.add_argument("--platform", required=True, choices=["windows", "linux"])
     p_archive.add_argument("--dir", required=True)
@@ -1519,6 +1717,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_check(args)
     if args.command == "check-bench-strings":
         return cmd_check_bench_strings(args)
+    if args.command == "check-notice-objects":
+        return cmd_check_notice_objects(args)
     if args.command == "archive":
         return cmd_archive(args)
     return 2  # unreachable -- argparse subparsers are required

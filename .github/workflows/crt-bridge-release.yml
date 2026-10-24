@@ -137,6 +137,16 @@ jobs:
         # them found in the executable or in libgm.dll fails the build.
         run: python pkg/crt-bridge/package-release.py check-bench-strings --binary retroarch.exe --dll libgm/libgm.dll
 
+      - name: Check license notice
+        # The build itself proves the notice lists what it compiled: print
+        # the features configure switched on, then compare the third-party
+        # object folders of this build with the component table of
+        # package-release.py (the table NOTICE.txt and LICENSES/ come from).
+        run: |
+          set -euo pipefail
+          grep -E '^HAVE_[A-Z0-9_]+ = 1' config.mk | sort
+          python pkg/crt-bridge/package-release.py check-notice-objects --obj-dir obj-unix/release --platform windows
+
       - name: Package
         run: |
           set -euo pipefail
@@ -223,6 +233,14 @@ jobs:
         # strings lives in package-release.py. libgm is linked statically
         # here, so the executable is the only file to read.
         run: python3 pkg/crt-bridge/package-release.py check-bench-strings --binary retroarch
+
+      - name: Check license notice
+        # Same check as the Windows job: the build itself proves the notice
+        # lists what it compiled.
+        run: |
+          set -euo pipefail
+          grep -E '^HAVE_[A-Z0-9_]+ = 1' config.mk | sort
+          python3 pkg/crt-bridge/package-release.py check-notice-objects --obj-dir obj-unix/release --platform linux
 
       - name: Package
         run: |
