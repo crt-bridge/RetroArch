@@ -1268,14 +1268,16 @@ static void *groovy_new(const struct record_params *params)
     uint16_t port;
     if (!parse_receiver_config(params, ip, sizeof(ip), &port)) {
         /* Refuse to start rather than silently aiming UDP at a stale
-         * default. */
-        RARCH_ERR("[groovy] video_record_config missing or empty -- no "
-                  "default address, the driver refuses to start.\n"
-                  "[groovy] Resolve the receiver's current address by its "
-                  "hardware address, e.g. `ip neigh` on a host of the same "
-                  "network.\n"
-                  "[groovy] Then set video_record_config = \"ip[:port]\" "
-                  "in retroarch.cfg.\n");
+         * default. Whoever launches this for the first time reads the PC
+         * screen, not the log: the screen text names the menu path to the
+         * address (the labels must match the menu strings) and never an
+         * address of its own. The log alone also names the config key, for
+         * whoever edits the config file by hand. */
+        groovy_log_error("No receiver address: the bridge is off. Set it in "
+                         "Settings > Recording > Groovy Master Address "
+                         "(ip or ip:port), then load the game again.");
+        RARCH_ERR("[groovy] Or set video_record_config = \"ip[:port]\" in "
+                  "the config file.\n");
         free(st);
         return NULL;
     }
