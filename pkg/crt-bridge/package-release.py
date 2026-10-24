@@ -56,7 +56,7 @@ import tarfile
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import NamedTuple, Optional, Sequence
 
 # ---------------------------------------------------------------------------
 # Shared regexes and parsers
@@ -229,6 +229,115 @@ KIT_DIRS = {
     "cheats": "cheat files",
     "database/rdb": "content database files",
 }
+
+
+# ---------------------------------------------------------------------------
+# Third-party components and their license texts -- ONE table.
+#
+# One table, so that the notice, the copied texts and the build check cannot
+# drift apart: `stage` copies every text named here from the fork, `check`
+# reads NOTICE.txt back against LICENSES/, and `check-notice-objects` (run by
+# the CI after "Build") compares the object folders of the build with it.
+# No license text is written in this file or in NOTICE.txt: each one is
+# copied from the fork, by the selector of its line, and refused when its
+# marker is missing from what was selected.
+# ---------------------------------------------------------------------------
+
+
+class TextSource(NamedTuple):
+    """One license text copied into LICENSES/.
+
+    dest    file name inside LICENSES/ (a bare name, named by a `Text:` line
+            of NOTICE.txt)
+    source  path of the source file in the fork, '/'-separated
+    select  `file` (the whole file, byte for byte)
+    marker  a string the selected text must contain, or `stage` fails
+    """
+
+    dest: str
+    source: str
+    select: str
+    marker: str
+
+
+class Component(NamedTuple):
+    """One line of the table.
+
+    name       how NOTICE.txt names it (the notice must contain this string)
+    license    SPDX-style identifier(s), as read in the source
+    platforms  the builds that compile it
+    kind       `compiled` (an object folder proves it), `header` (included
+               from a header, proved by INCLUDE_SITES) or `text` (a license
+               text shared by several components, nothing to prove)
+    obj_dir    for `compiled`: the object folder under the build's object
+               directory (obj-unix/release), '/'-separated; else ""
+    texts      the license texts copied for it
+    """
+
+    name: str
+    license: str
+    platforms: tuple
+    kind: str
+    obj_dir: str
+    texts: tuple
+
+
+BOTH = ("windows", "linux")
+
+COMPONENTS = (
+    Component(
+        "Zstandard", "BSD-3-Clause", BOTH, "compiled", "deps/zstd",
+        (
+            TextSource(
+                "zstd-BSD-3-Clause.txt", "deps/zstd/LICENSE", "file",
+                "Redistribution and use in source and binary forms",
+            ),
+        ),
+    ),
+)
+
+
+def text_source_paths() -> list:
+    """Every fork path the table copies a text from (the test kit archives
+    exactly these, read from here and never from a second list)."""
+    return sorted({t.source for c in COMPONENTS for t in c.texts})
+
+
+def _all_texts() -> list:
+    """Every (component, TextSource) pair, each destination once."""
+    out: list = []
+    seen: dict = {}
+    for comp in COMPONENTS:
+        for ts in comp.texts:
+            if ts.dest in seen:
+                if seen[ts.dest] != ts:
+                    raise ValueError(f"two different sources for {ts.dest}")
+                continue
+            seen[ts.dest] = ts
+            out.append((comp, ts))
+    return out
+
+
+class TextError(Exception):
+    """A license text cannot be copied; the message names the table line."""
+
+
+def read_license_text(fork_dir: Path, comp: Component, ts: TextSource) -> bytes:
+    """The bytes of one license text, selected from its source in the fork."""
+    where = f"license text {ts.dest} ({comp.name}, from {ts.source})"
+    src = fork_dir / Path(*ts.source.split("/"))
+    if not src.is_file():
+        raise TextError(f"{where}: source file not found: {src}")
+    data = src.read_bytes()
+    if ts.select == "file":
+        selected = data
+    else:
+        raise TextError(f"{where}: unknown selector {ts.select!r}")
+    if not selected.strip():
+        raise TextError(f"{where}: selected text is empty")
+    if ts.marker.encode("ascii") not in selected:
+        raise TextError(f"{where}: marker {ts.marker!r} not found in the selected text")
+    return selected
 
 
 def _kit_path(subfolder: str, platform: str) -> str:
@@ -607,6 +716,17 @@ def cmd_stage(args: argparse.Namespace) -> int:
     lz4_dst.write_text(block_match.group(0), encoding="utf-8")
     staged.append("LICENSES/lz4-BSD-2-Clause.txt")
 
+    # -- Third-party license texts: every line of COMPONENTS, copied from the
+    # fork. Both kits get every text; NOTICE.txt says in prose which build
+    # compiles which component. --
+    try:
+        for comp, ts in _all_texts():
+            (licenses_dir / ts.dest).write_bytes(read_license_text(fork_dir, comp, ts))
+            staged.append(f"LICENSES/{ts.dest}")
+    except (TextError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
     # -- Windows only: libgm.dll + measured DLL closure + mingw licenses --
     if args.platform == "windows":
         libgm_dll_src = Path(args.libgm_dll) if args.libgm_dll else (libgm_dir / "libgm.dll")
@@ -896,6 +1016,36 @@ def _rule_licenses(root: Path, platform: str) -> list[tuple[str, str]]:
     return findings
 
 
+# A notice entry names a license text with a `Text: <file name>` line.
+NOTICE_TEXT_RE = re.compile(r"^[ \t]*Text:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
+
+
+def _notice_text_names(root: Path) -> Optional[list]:
+    """The file names `LICENSES/NOTICE.txt` announces, or None when there is
+    no readable NOTICE (the `licenses` rule already reports that)."""
+    notice = root / "LICENSES" / "NOTICE.txt"
+    if not notice.is_file():
+        return None
+    return NOTICE_TEXT_RE.findall(notice.read_text(encoding="utf-8", errors="replace"))
+
+
+def _rule_notice_texts(root: Path) -> list[tuple[str, str]]:
+    """Every `Text:` of the notice has its file, not empty, in LICENSES/."""
+    names = _notice_text_names(root)
+    if names is None:
+        return []
+    licenses_dir = root / "LICENSES"
+    findings: list[tuple[str, str]] = []
+    for name in names:
+        if name in (".", "..") or "/" in name or "\\" in name:
+            findings.append(("notice-text", f"{licenses_dir}: Text: {name} is not a bare file name"))
+            continue
+        p = licenses_dir / name
+        if not p.is_file() or p.stat().st_size == 0:
+            findings.append(("notice-text", f"{p}: announced by NOTICE.txt, missing or empty"))
+    return findings
+
+
 def _rule_dll_closure(root: Path, mingw_bin: Path, objdump: str) -> list[tuple[str, str]]:
     findings: list[tuple[str, str]] = []
     binary = root / "crt-bridge-emitter.exe"
@@ -952,6 +1102,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         findings.extend(_rule_bench_strings(root, args.platform))
     findings.extend(_rule_readme(root))
     findings.extend(_rule_licenses(root, args.platform))
+    findings.extend(_rule_notice_texts(root))
     if args.platform == "windows" and args.mingw_bin:
         findings.extend(
             _rule_dll_closure(root, Path(args.mingw_bin), args.objdump or "objdump")

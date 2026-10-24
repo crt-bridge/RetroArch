@@ -17,6 +17,10 @@ each is in this LICENSES/ directory, under the filename listed below.
   License: BSD-2-Clause
   Text: lz4-BSD-2-Clause.txt
 
+- Zstandard
+  License: BSD-3-Clause
+  Text: zstd-BSD-3-Clause.txt
+
 Windows builds only:
 
 - MinGW-w64 runtime DLLs (libstdc++, libgcc_s_seh, libwinpthread, liblzma)
