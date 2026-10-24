@@ -329,8 +329,8 @@ jobs:
 
           {
             printf '\n## SHA-256\n\n'
-            (cd dist && sha256sum "crt-bridge-emitter-$VERSION-windows-x64.zip" \
-                                  "crt-bridge-emitter-$VERSION-linux-x64.tar.gz") | sed 's/^/    /'
+            (cd dist && sha256sum --text "crt-bridge-emitter-$VERSION-windows-x64.zip" \
+                                       "crt-bridge-emitter-$VERSION-linux-x64.tar.gz") | sed 's/^/    /'
           } >> notes.md
 
       - name: Create draft release
