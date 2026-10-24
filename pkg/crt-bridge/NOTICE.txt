@@ -86,13 +86,12 @@ Compiled into the executable, from the deps/ folder of the source tree
 Included into the executable from headers and sources of the source tree
 
 - stb
-  License: public domain, as the headers state. The copy of stb_vorbis.h
-  in the source tree carries no license statement of its own; the other
-  three stb headers (stb_truetype.h, stb_image.h, stb_rect_pack.h) do, and
-  their texts are listed here.
+  License: public domain, as the headers state (stb_truetype.h, stb_image.h,
+  stb_rect_pack.h and stb_vorbis.h; their texts are listed here)
   Text: stb_truetype-public-domain.txt
   Text: stb_image-public-domain.txt
   Text: stb_rect_pack-public-domain.txt
+  Text: stb_vorbis-public-domain.txt
 
 - dr_libs (dr_flac, dr_mp3, and the minimp3 code inside dr_mp3)
   License: public domain or MIT-0 for dr_flac; public domain for dr_mp3;

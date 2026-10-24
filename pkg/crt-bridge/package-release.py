@@ -460,6 +460,10 @@ COMPONENTS = (
                 "first-comment", "public domain",
                 begin="stb_rect_pack.h", end="Sean Barrett 2014",
             ),
+            TextSource(
+                "stb_vorbis-public-domain.txt", "deps/stb/stb_vorbis.h",
+                "first-comment", "Placed in the public domain",
+            ),
         ),
     ),
     Component(
