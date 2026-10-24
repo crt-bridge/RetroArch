@@ -283,10 +283,17 @@ jobs:
           merge-multiple: true
 
       - name: Write release notes
+        # The heredoc delimiter is quoted on purpose: bash then expands
+        # nothing inside the text, so a backtick or a dollar sign written in
+        # the notes (a command name, a PowerShell example) stays text instead
+        # of running as a command in this job. The two values the text needs
+        # arrive as @TOKENS@ replaced by sed below; the ${{ }} expressions are
+        # replaced by Actions before bash starts, from the validated outputs
+        # of the `meta` job.
         run: |
           set -euo pipefail
-          cat > notes.md <<EOF
-          # crt-bridge emitter $VERSION
+          cat > notes.md <<'EOF'
+          # crt-bridge emitter @VERSION@
 
           Based on RetroArch ${{ needs.meta.outputs.base }}. Not affiliated with, or endorsed by, the libretro project.
 
@@ -294,7 +301,7 @@ jobs:
 
           libgm source for this build: https://github.com/crt-bridge/libgm/tree/${{ needs.meta.outputs.libgm_commit }}
 
-          Fork source: https://github.com/crt-bridge/RetroArch/tree/$GITHUB_SHA
+          Fork source: https://github.com/crt-bridge/RetroArch/tree/@FORK_COMMIT@
 
           No libretro core is included.
 
@@ -317,6 +324,14 @@ jobs:
           - An Xbox One / Series X|S controller does not finish its USB initialisation on the receiver: its logo keeps blinking and no input arrives.
           - The Y/X swap in the bundled MiSTer.cfg gamepad profile has only been verified with an Xbox 360 controller.
           EOF
+
+          sed -i "s|@VERSION@|$VERSION|g; s|@FORK_COMMIT@|$GITHUB_SHA|g" notes.md
+
+          {
+            printf '\n## SHA-256\n\n'
+            (cd dist && sha256sum "crt-bridge-emitter-$VERSION-windows-x64.zip" \
+                                  "crt-bridge-emitter-$VERSION-linux-x64.tar.gz") | sed 's/^/    /'
+          } >> notes.md
 
       - name: Create draft release
         env:
