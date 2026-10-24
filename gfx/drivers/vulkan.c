@@ -1191,6 +1191,23 @@ static struct vk_texture vulkan_create_texture(vk_t *vk,
          break;
    }
 
+   /* A format the table of vulkan_format_to_bpp() does not know sizes the
+    * staging buffer at zero bytes, which the driver may or may not
+    * reject (VUID-VkBufferCreateInfo-size-00912). Refuse it before
+    * anything is created, for the buffer paths and for a static upload
+    * (which goes through a staging buffer), and give back an empty
+    * texture like every other failure of this function. */
+   if (     vulkan_format_to_bpp(format) == 0
+         && (     type == VULKAN_TEXTURE_STAGING
+               || type == VULKAN_TEXTURE_READBACK
+               || (type == VULKAN_TEXTURE_STATIC && initial)))
+   {
+      RARCH_ERR("[Vulkan] Refusing a %ux%u texture of format %d: no bytes-per-texel entry for it.\n",
+            width, height, (int)format);
+      memset(&tex, 0, sizeof(tex));
+      return tex;
+   }
+
    if (     (type != VULKAN_TEXTURE_STAGING)
          && (type != VULKAN_TEXTURE_READBACK))
    {
