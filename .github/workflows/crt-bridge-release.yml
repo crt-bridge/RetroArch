@@ -326,8 +326,8 @@ jobs:
           - The `d3d12` video driver has never been checked with any core.
           - A picture in a 10-bit format (seen once, with the Dolphin core under `vulkan`) may be read as 8-bit and show wrong colours.
           - PAL (576 lines) is refused: nothing is sent, and the PC screen says so.
-          - The Dreamcast and PlayStation 2 cores skip frames: a few per minute with the Dreamcast core, tens per minute with the PlayStation 2 core in 480p. The Dreamcast picture looked smooth in testing.
-          - The picture reaches the tube about one frame after the emulator renders it, and up to about two frames in the worst case.
+          - The Dreamcast and PlayStation 2 cores skip frames: a few per minute with the Dreamcast core, tens per minute with the PlayStation 2 core in 480p. The Dreamcast picture looked smooth to the eye in testing.
+          - On the test bench, the picture reaches the tube about one frame after the emulator renders it, and up to about two frames in the worst case.
           - The crt-bridge client on a Mac, as an extra receiver over Wi-Fi, froze once (picture and sound) during a 480p session while the CRT carried on. Seen once, cause not found.
           - Auto reduces a Nintendo 64 picture rendered at 4x (GLideN64) by 2, to 480 lines. Choose 4x in Settings > Recording > Supersampling reduction for a 240p picture.
           - The Linux emitter has only been run towards the software receiver, never towards a CRT receiver.

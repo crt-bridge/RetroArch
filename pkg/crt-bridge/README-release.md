@@ -28,8 +28,8 @@ This is the chain the pre-release was tried on, and nothing else.
 ### CRT safety
 
 - The emitter protects no tube. What a tube receives is decided by the receiver machine and by your settings, and a signal outside what the tube accepts can damage it. Find out what yours takes before you connect it.
-- Most CRT TVs and arcade monitors take 15 kHz only. A 480p picture needs 31 kHz. Receiver 31 kHz is Off by default: turn it on only if the master receiver's tube takes 31 kHz.
-- On the receiver used for testing, the PC's own start-up screen (drawn by its firmware, before any crt-bridge software runs) is a 31 kHz signal. Expect the same from any PC: do not leave a tube that cannot take 31 kHz connected while the receiver machine starts.
+- Many consumer CRT TVs take 15 kHz only. A 480p picture needs 31 kHz. Receiver 31 kHz is Off by default: turn it on only if the master receiver's tube takes 31 kHz.
+- On the receiver used for testing, the PC's own start-up screen (drawn by its firmware, before any crt-bridge software runs) is a 31 kHz signal. Do not leave a tube that cannot take 31 kHz connected while the receiver machine starts.
 
 ## What it does
 
@@ -46,7 +46,7 @@ unchanged.
 3. Launch it: `start-emitter.cmd` on Windows, `./start-emitter.sh` on Linux. Always use one
    of these two, not the binary directly from another folder -- they switch into this folder
    first, which is what keeps everything below inside it.
-4. Tell it where your receiver is. Open the menu (F1 on a keyboard, or hold Down + Y + L + R
+4. Tell it where your receiver is. Open the menu (F1 on a keyboard by default, or hold Down + Y + L + R
    together on a gamepad) and go to Settings > Recording > Groovy Master Address. Type the
    receiver's address as ip or ip:port, for example `192.0.2.20:32100` (the port is 32100 when
    omitted). It is saved when you quit. The same value can be set in a text editor before the
@@ -108,8 +108,7 @@ tampering.
 - Smart App Control, if it is on, asks a Microsoft cloud service about a program first. When
   that service cannot vouch for an unsigned program, Windows blocks it, and there is no
   exception for a single application: you can turn Smart App Control off in Windows Security,
-  or not run the emitter. According to Microsoft's Smart App Control FAQ, recent Windows
-  updates let you turn it back on without reinstalling Windows.
+  or not run the emitter.
 
 To check that your download is the one published, compare its SHA-256 with the lines at the
 end of the release notes (https://github.com/crt-bridge/RetroArch/releases/tag/@VERSION@). In
