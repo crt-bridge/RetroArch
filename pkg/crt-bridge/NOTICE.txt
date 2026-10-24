@@ -2,7 +2,19 @@ crt-bridge emitter -- third-party components and licenses
 ===========================================================
 
 This archive bundles the following components. The full license text for
-each is in this LICENSES/ directory, under the filename listed below.
+each is in this LICENSES/ directory, under the filename listed after
+"Text:" below. Every text was copied from the source tree this build was
+made from (README.md gives the commit), either a license file of the
+component or the notice at the head of one of its source files; none was
+typed or rewritten for this archive. Where a component's own files carry
+their notices in their headers, the text listed is the notice of one
+file, and the other files of that component keep theirs.
+
+Both builds carry every text listed here. A component marked "Windows
+builds only" is compiled into the Windows executable and not into the
+Linux one; its text is joined to both archives all the same.
+
+The emitter, and the libraries it is written with
 
 - crt-bridge emitter, a modified RetroArch
   Copyright (C) 2010-2025 The RetroArch team
@@ -17,12 +29,112 @@ each is in this LICENSES/ directory, under the filename listed below.
   License: BSD-2-Clause
   Text: lz4-BSD-2-Clause.txt
 
+Compiled into the executable, from the deps/ folder of the source tree
+(and from libretro-common/formats/libchdr)
+
+- mbed TLS
+  License: Apache-2.0 (full text: Apache-2.0.txt)
+  Text: mbedtls-notice.txt
+
+- SPIRV-Cross
+  License: Apache-2.0 OR MIT, at the user's choice (full Apache-2.0 text:
+  Apache-2.0.txt)
+  Text: SPIRV-Cross-notice.txt
+
+- glslang
+  License: BSD-3-Clause for most files; MIT for the Khronos headers;
+  Apache-2.0 for a few headers (full text: Apache-2.0.txt); GPL-3.0-or-later
+  with the Bison parser exception for the generated parser (GPL-3.0 text:
+  emitter-GPL-3.0.txt)
+  Text: glslang-BSD-3-Clause.txt
+  Text: glslang-Khronos-MIT.txt
+  Text: glslang-Bison-parser-notice.txt
+  Text: glslang-Bison-exception.txt
+
 - Zstandard
   License: BSD-3-Clause
   Text: zstd-BSD-3-Clause.txt
 
-Windows builds only:
+- libFLAC
+  License: BSD-3-Clause (Xiph.Org)
+  Text: libFLAC-BSD-3-Clause.txt
+
+- zlib
+  License: zlib
+  Text: zlib-license.txt
+
+- LZMA SDK
+  License: public domain, as its source files state
+  Text: LZMA-SDK-public-domain.txt
+
+- libchdr
+  License: BSD-3-Clause
+  Text: libchdr-BSD-3-Clause.txt
+
+- Switchres
+  License: GPL-2.0-or-later (full GPL-2.0 text: GPL-2.0.txt)
+  Text: Switchres-notice.txt
+
+- ibxm
+  License: BSD-3-Clause
+  Text: ibxm-BSD-3-Clause.txt
+
+- yxml
+  License: MIT
+  Text: yxml-MIT.txt
+
+Included into the executable from headers and sources of the source tree
+
+- stb
+  License: public domain, as the headers state. The copy of stb_vorbis.h
+  in the source tree carries no license statement of its own; the other
+  three stb headers (stb_truetype.h, stb_image.h, stb_rect_pack.h) do, and
+  their texts are listed here.
+  Text: stb_truetype-public-domain.txt
+  Text: stb_image-public-domain.txt
+  Text: stb_rect_pack-public-domain.txt
+
+- dr_libs (dr_flac, dr_mp3, and the minimp3 code inside dr_mp3)
+  License: public domain or MIT-0 for dr_flac; public domain for dr_mp3;
+  CC0 for minimp3
+  Text: dr_flac-public-domain-or-MIT-0.txt
+  Text: dr_mp3-public-domain.txt
+  Text: minimp3-CC0.txt
+
+- xxHash
+  License: BSD-2-Clause
+  Text: xxHash-BSD-2-Clause.txt
+
+- Vulkan headers, by the Khronos Group
+  License: Apache-2.0 (full text: Apache-2.0.txt)
+  Text: Vulkan-headers-notice.txt
+
+- libretro-common
+  License: MIT; each of its files carries its own statement, and this
+  text is the one of file_path.c
+  Text: libretro-common-MIT.txt
+
+Windows builds only
+
+- xdelta3
+  License: Apache-2.0 (full text: Apache-2.0.txt)
+  Text: xdelta3-notice.txt
 
 - MinGW-w64 runtime DLLs (libstdc++, libgcc_s_seh, libwinpthread, liblzma)
   Each DLL's license is under mingw-runtime/, one subdirectory per source
   package, copied unmodified from the MSYS2 package database at build time.
+
+Libraries the Linux executable loads from the user's system (SDL2, ALSA,
+PulseAudio, udev, X11, Wayland and the C++ runtime among them) are
+not part of this archive; they come with the user's own installation and
+keep their own licenses.
+
+License texts
+
+The two full texts that the entries above refer to.
+
+- Apache License, Version 2.0
+  Text: Apache-2.0.txt
+
+- GNU General Public License, version 2
+  Text: GPL-2.0.txt

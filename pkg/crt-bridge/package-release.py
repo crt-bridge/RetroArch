@@ -250,14 +250,25 @@ class TextSource(NamedTuple):
     dest    file name inside LICENSES/ (a bare name, named by a `Text:` line
             of NOTICE.txt)
     source  path of the source file in the fork, '/'-separated
-    select  `file` (the whole file, byte for byte)
+    select  `file`          the whole file, byte for byte;
+            `first-comment` the first comment of the file;
+            `last-comment`  the last comment of the file;
+            `comment-with`  the first comment that contains `marker`.
+            A comment is one /* ... */ block or one run of consecutive
+            // lines. Comment texts are written with LF line ends.
     marker  a string the selected text must contain, or `stage` fails
+    begin   optional, comment selectors only: start at the first line that
+            contains this
+    end     optional, comment selectors only: stop after the first line
+            (from `begin` on) that contains this
     """
 
     dest: str
     source: str
     select: str
     marker: str
+    begin: str = ""
+    end: str = ""
 
 
 class Component(NamedTuple):
@@ -266,9 +277,10 @@ class Component(NamedTuple):
     name       how NOTICE.txt names it (the notice must contain this string)
     license    SPDX-style identifier(s), as read in the source
     platforms  the builds that compile it
-    kind       `compiled` (an object folder proves it), `header` (included
-               from a header, proved by INCLUDE_SITES) or `text` (a license
-               text shared by several components, nothing to prove)
+    kind       `compiled` (an object folder proves it), `included` (a header
+               or a source included by a known object, see INCLUDE_SITES) or
+               `text` (a license text shared by several components, nothing
+               to prove)
     obj_dir    for `compiled`: the object folder under the build's object
                directory (obj-unix/release), '/'-separated; else ""
     texts      the license texts copied for it
@@ -284,13 +296,220 @@ class Component(NamedTuple):
 
 BOTH = ("windows", "linux")
 
+# What is listed here was measured on the build of the CI (the object
+# folders `deps/*` and `libretro-common/formats/libchdr` of the Windows and
+# the Linux job), not recalled. The components NOTICE.txt announces besides
+# these -- the emitter, libgm, LZ4, the MinGW runtime DLLs -- are staged by
+# `stage` itself, from other places than the fork's own tree.
 COMPONENTS = (
+    # -- compiled: an object folder under obj-unix/release proves each one --
+    Component(
+        "mbed TLS", "Apache-2.0", BOTH, "compiled", "deps/mbedtls",
+        (
+            TextSource(
+                "mbedtls-notice.txt", "deps/mbedtls/aes.c", "first-comment",
+                "Licensed under the Apache License",
+            ),
+        ),
+    ),
+    Component(
+        "SPIRV-Cross", "Apache-2.0 OR MIT", BOTH, "compiled", "deps/SPIRV-Cross",
+        (
+            TextSource(
+                "SPIRV-Cross-notice.txt", "deps/SPIRV-Cross/spirv_cross.hpp",
+                "first-comment", "Arm Limited",
+            ),
+        ),
+    ),
+    Component(
+        "glslang", "BSD-3-Clause, MIT, Apache-2.0, GPL-3.0-or-later with the Bison exception",
+        BOTH, "compiled", "deps/glslang",
+        (
+            TextSource(
+                "glslang-BSD-3-Clause.txt",
+                "deps/glslang/glslang/glslang/MachineIndependent/ParseHelper.cpp",
+                "first-comment", "Neither the name of 3Dlabs",
+            ),
+            TextSource(
+                "glslang-Khronos-MIT.txt", "deps/glslang/glslang/SPIRV/GLSL.std.450.h",
+                "first-comment", "Permission is hereby granted",
+            ),
+            TextSource(
+                "glslang-Bison-parser-notice.txt",
+                "deps/glslang/glslang/glslang/MachineIndependent/glslang_tab.cpp",
+                "comment-with", "Bison implementation for Yacc-like parsers",
+            ),
+            TextSource(
+                "glslang-Bison-exception.txt",
+                "deps/glslang/glslang/glslang/MachineIndependent/glslang_tab.cpp",
+                "comment-with", "As a special exception",
+            ),
+        ),
+    ),
     Component(
         "Zstandard", "BSD-3-Clause", BOTH, "compiled", "deps/zstd",
         (
             TextSource(
                 "zstd-BSD-3-Clause.txt", "deps/zstd/LICENSE", "file",
                 "Redistribution and use in source and binary forms",
+            ),
+        ),
+    ),
+    Component(
+        "libFLAC", "BSD-3-Clause", BOTH, "compiled", "deps/libFLAC",
+        (
+            TextSource(
+                "libFLAC-BSD-3-Clause.txt", "deps/libFLAC/COPYING.Xiph", "file",
+                "Xiph.Org Foundation",
+            ),
+        ),
+    ),
+    Component(
+        "zlib", "Zlib", BOTH, "compiled", "deps/libz",
+        (
+            TextSource(
+                "zlib-license.txt", "libretro-common/include/compat/zlib/zlib.h",
+                "first-comment", "This software is provided 'as-is'",
+            ),
+        ),
+    ),
+    Component(
+        "LZMA SDK", "public domain", BOTH, "compiled", "deps/7zip",
+        (
+            TextSource(
+                "LZMA-SDK-public-domain.txt", "deps/7zip/LzmaDec.c", "first-comment",
+                "Public domain",
+            ),
+        ),
+    ),
+    Component(
+        "libchdr", "BSD-3-Clause", BOTH, "compiled", "libretro-common/formats/libchdr",
+        (
+            TextSource(
+                "libchdr-BSD-3-Clause.txt", "libretro-common/formats/libchdr/libchdr_chd.c",
+                "first-comment", "Neither the name 'MAME'",
+            ),
+        ),
+    ),
+    Component(
+        "Switchres", "GPL-2.0-or-later", BOTH, "compiled", "deps/switchres",
+        (
+            TextSource(
+                "Switchres-notice.txt", "deps/switchres/display.cpp", "first-comment",
+                "GPL-2.0+",
+            ),
+        ),
+    ),
+    Component(
+        "ibxm", "BSD-3-Clause", BOTH, "compiled", "deps/ibxm",
+        (
+            TextSource(
+                "ibxm-BSD-3-Clause.txt", "deps/ibxm/licence.txt", "file", "Martin Cameron",
+            ),
+        ),
+    ),
+    Component(
+        "yxml", "MIT", BOTH, "compiled", "deps/yxml",
+        (
+            TextSource(
+                "yxml-MIT.txt", "deps/yxml/yxml.c", "comment-with", "Yoran Heling",
+            ),
+        ),
+    ),
+    # xdelta3 is compiled by the Windows build only (the Linux job of the CI
+    # does not build deps/xdelta3); its text still ships in both kits.
+    Component(
+        "xdelta3", "Apache-2.0", ("windows",), "compiled", "deps/xdelta3",
+        (
+            TextSource(
+                "xdelta3-notice.txt", "deps/xdelta3/xdelta3.c", "first-comment",
+                "Joshua MacDonald", end="limitations under the License.",
+            ),
+        ),
+    ),
+    # -- included: header-only libraries and sources the build includes into
+    # a known object (INCLUDE_SITES names the objects) --
+    Component(
+        "stb", "public domain", BOTH, "included", "",
+        (
+            TextSource(
+                "stb_truetype-public-domain.txt", "deps/stb/stb_truetype.h",
+                "first-comment", "This software is in the public domain",
+                begin="LICENSE", end="as you see fit.",
+            ),
+            TextSource(
+                "stb_image-public-domain.txt", "deps/stb/stb_image.h",
+                "first-comment", "This software is in the public domain",
+                begin="License:", end="however you want.",
+            ),
+            TextSource(
+                "stb_rect_pack-public-domain.txt", "deps/stb/stb_rect_pack.h",
+                "first-comment", "public domain",
+                begin="stb_rect_pack.h", end="Sean Barrett 2014",
+            ),
+        ),
+    ),
+    Component(
+        "dr_libs", "public domain or MIT-0", BOTH, "included", "",
+        (
+            TextSource(
+                "dr_flac-public-domain-or-MIT-0.txt", "deps/dr/dr_flac.h",
+                "last-comment", "ALTERNATIVE 1",
+            ),
+            TextSource(
+                "dr_mp3-public-domain.txt", "deps/dr/dr_mp3.h", "comment-with",
+                "free and unencumbered software",
+            ),
+            TextSource(
+                "minimp3-CC0.txt", "deps/dr/dr_mp3.h", "comment-with",
+                "publicdomain/zero",
+            ),
+        ),
+    ),
+    Component(
+        "xxHash", "BSD-2-Clause", BOTH, "included", "",
+        (
+            TextSource(
+                "xxHash-BSD-2-Clause.txt", "deps/xxHash/LICENSE", "file",
+                "BSD 2-Clause License",
+            ),
+        ),
+    ),
+    Component(
+        "Vulkan headers", "Apache-2.0", BOTH, "included", "",
+        (
+            TextSource(
+                "Vulkan-headers-notice.txt", "gfx/include/vulkan/vulkan_core.h",
+                "first-comment", "Apache License",
+            ),
+        ),
+    ),
+    Component(
+        "libretro-common", "MIT", BOTH, "included", "",
+        (
+            TextSource(
+                "libretro-common-MIT.txt", "libretro-common/file/file_path.c",
+                "first-comment", "Permission is hereby granted",
+            ),
+        ),
+    ),
+    # -- text: full license texts that components above refer to. The Apache
+    # text is the one in SPIRV-Cross's LICENSE (the copy under its LICENSES/
+    # folder is reflowed); the GPL-2.0 text is the COPYING of Zstandard. --
+    Component(
+        "Apache-2.0 text", "Apache-2.0", BOTH, "text", "",
+        (
+            TextSource(
+                "Apache-2.0.txt", "deps/SPIRV-Cross/LICENSE", "file",
+                "Version 2.0, January 2004",
+            ),
+        ),
+    ),
+    Component(
+        "GPL-2.0 text", "GPL-2.0", BOTH, "text", "",
+        (
+            TextSource(
+                "GPL-2.0.txt", "deps/zstd/COPYING", "file", "Version 2, June 1991",
             ),
         ),
     ),
@@ -322,6 +541,44 @@ class TextError(Exception):
     """A license text cannot be copied; the message names the table line."""
 
 
+# A comment of a C or C++ source: one /* ... */ block, or one run of
+# consecutive lines that start with //.
+_COMMENT_RE = re.compile(r"/\*.*?\*/|(?:^[ \t]*//[^\n]*(?:\n|\Z))+", re.DOTALL | re.MULTILINE)
+
+
+def _select_comment(data: bytes, ts: TextSource) -> bytes:
+    """The comment (or the part of it) a comment selector designates, as
+    bytes with LF line ends. latin-1 maps every byte to one character and
+    back, so a source with non-ASCII bytes is copied without change."""
+    text = data.decode("latin-1").replace("\r\n", "\n").replace("\r", "\n")
+    units = [m.group(0).rstrip("\n") for m in _COMMENT_RE.finditer(text)]
+    if not units:
+        raise TextError("no comment found in the source")
+    if ts.select == "first-comment":
+        unit = units[0]
+    elif ts.select == "last-comment":
+        unit = units[-1]
+    else:
+        matching = [u for u in units if ts.marker in u]
+        if not matching:
+            raise TextError(f"no comment contains the marker {ts.marker!r}")
+        unit = matching[0]
+    lines = unit.split("\n")
+    first = 0
+    if ts.begin:
+        hits = [i for i, ln in enumerate(lines) if ts.begin in ln]
+        if not hits:
+            raise TextError(f"begin {ts.begin!r} not found in the comment")
+        first = hits[0]
+    last = len(lines) - 1
+    if ts.end:
+        hits = [i for i in range(first, len(lines)) if ts.end in lines[i]]
+        if not hits:
+            raise TextError(f"end {ts.end!r} not found in the comment")
+        last = hits[0]
+    return ("\n".join(lines[first:last + 1]) + "\n").encode("latin-1")
+
+
 def read_license_text(fork_dir: Path, comp: Component, ts: TextSource) -> bytes:
     """The bytes of one license text, selected from its source in the fork."""
     where = f"license text {ts.dest} ({comp.name}, from {ts.source})"
@@ -330,7 +587,14 @@ def read_license_text(fork_dir: Path, comp: Component, ts: TextSource) -> bytes:
         raise TextError(f"{where}: source file not found: {src}")
     data = src.read_bytes()
     if ts.select == "file":
+        if ts.begin or ts.end:
+            raise TextError(f"{where}: begin/end need a comment selector")
         selected = data
+    elif ts.select in ("first-comment", "last-comment", "comment-with"):
+        try:
+            selected = _select_comment(data, ts)
+        except TextError as exc:
+            raise TextError(f"{where}: {exc}") from None
     else:
         raise TextError(f"{where}: unknown selector {ts.select!r}")
     if not selected.strip():
@@ -1046,6 +1310,25 @@ def _rule_notice_texts(root: Path) -> list[tuple[str, str]]:
     return findings
 
 
+def _rule_notice_orphans(root: Path) -> list[tuple[str, str]]:
+    """No file of LICENSES/ that the notice does not name. NOTICE.txt itself
+    and mingw-runtime/ (one folder per MSYS2 package, copied as a whole and
+    described in the notice by one sentence) are the only exceptions."""
+    names = _notice_text_names(root)
+    if names is None:
+        return []
+    licenses_dir = root / "LICENSES"
+    named = set(names)
+    findings: list[tuple[str, str]] = []
+    for member in sorted(_iter_members(licenses_dir)):
+        rel = _relative_to(member, licenses_dir).as_posix()
+        if rel == "NOTICE.txt" or rel.startswith("mingw-runtime/"):
+            continue
+        if rel not in named:
+            findings.append(("notice-orphan", f"{member}: in LICENSES/ but named by no Text: line of NOTICE.txt"))
+    return findings
+
+
 def _rule_dll_closure(root: Path, mingw_bin: Path, objdump: str) -> list[tuple[str, str]]:
     findings: list[tuple[str, str]] = []
     binary = root / "crt-bridge-emitter.exe"
@@ -1103,6 +1386,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     findings.extend(_rule_readme(root))
     findings.extend(_rule_licenses(root, args.platform))
     findings.extend(_rule_notice_texts(root))
+    findings.extend(_rule_notice_orphans(root))
     if args.platform == "windows" and args.mingw_bin:
         findings.extend(
             _rule_dll_closure(root, Path(args.mingw_bin), args.objdump or "objdump")
