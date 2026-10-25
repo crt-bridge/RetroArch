@@ -6030,6 +6030,32 @@ static bool vulkan_native_box_view_ok(const VkImageViewCreateInfo *view)
    return true;
 }
 
+/* Wait until the card has run every frame already submitted, before a change
+ * of dims destroys the native ring or the compose surface.
+ *
+ * Both are written by the command buffers of the frames still in flight: when
+ * a frame begins, only the fence of the frame index about to be reused has
+ * been waited for, so the frames before it may still be executing. And
+ * vulkan_destroy_texture frees at once (vkDestroyBuffer, vkFreeMemory), with
+ * no deferred list. Freeing what one of those frames still writes is a page
+ * fault on the card: the device is lost (VK_ERROR_DEVICE_LOST).
+ *
+ * The GPU box self-test drains the queue the same way on the first frame of a
+ * size not yet proven, just before the ring is rebuilt, which hid the fault;
+ * a return to a size already proven skips the test, and nothing drained the
+ * queue any more. The cost is paid once per change of dims, a frame that is
+ * dropped anyway. Under the queue lock, like the self-test. */
+static void vulkan_native_wait_in_flight(vk_t *vk)
+{
+#ifdef HAVE_THREADS
+   slock_lock(vk->context->queue_lock);
+#endif
+   vkQueueWaitIdle(vk->context->queue);
+#ifdef HAVE_THREADS
+   slock_unlock(vk->context->queue_lock);
+#endif
+}
+
 static void vulkan_deinit_native_readback(vk_t *vk)
 {
    int i;
@@ -6054,8 +6080,19 @@ static void vulkan_deinit_native_readback(vk_t *vk)
 static bool vulkan_init_native_readback(vk_t *vk,
       unsigned width, unsigned height, VkFormat src_format, bool reduced)
 {
+   int i;
+
    /* Tear the previous ring down and invalidate every in-flight readback:
-    * their content carries the previous dims. */
+    * their content carries the previous dims. The frames still in flight
+    * write its buffers: they must be done before the buffers are freed. */
+   for (i = 0; i < VULKAN_MAX_SWAPCHAIN_IMAGES; i++)
+   {
+      if (vk->native.staging[i].memory != VK_NULL_HANDLE)
+      {
+         vulkan_native_wait_in_flight(vk);
+         break;
+      }
+   }
    vulkan_deinit_native_readback(vk);
 
    if (!width || !height)
@@ -7314,6 +7351,10 @@ static bool vulkan_native_compose_target(vk_t *vk,
        && vk->native.compose_h     == height)
       return true;
 
+   /* The frames still in flight blit into the surface, draw on it and read
+    * it: they must be done before it is freed. */
+   if (vk->native.compose.image != VK_NULL_HANDLE)
+      vulkan_native_wait_in_flight(vk);
    vulkan_deinit_native_compose(vk);
 
    if (!width || !height)
