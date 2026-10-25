@@ -51,8 +51,8 @@ unchanged.
    receiver's address as ip or ip:port, for example `192.0.2.20:32100` (the port is 32100 when
    omitted). It is saved when you quit. The same value can be set in a text editor before the
    first launch: open `crt-bridge.cfg` and put it in `video_record_config`.
-5. Load a core, then a game, from the menu (Load Core, then Load Content). Load the game
-   again if you set the address after loading it.
+5. Load a core, then a game, from the menu (Load Core, then Load Content). If you set the
+   address after loading the game, close it (Close Content) and load it again.
 
 There is no default address. Until you set one, nothing is sent, and loading a game shows a
 message on the PC screen that says where to set it.
