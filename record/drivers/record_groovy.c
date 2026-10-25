@@ -1284,10 +1284,10 @@ static void *groovy_new(const struct record_params *params)
         groovy_log_error(typed
               ? "The receiver address is not usable, nothing is sent. Fix it "
                 "in Settings > Recording > Groovy Master Address "
-                "(ip or ip:port), then load the game again."
+                "(ip or ip:port), then close the game and load it again."
               : "No receiver address is set, nothing is sent. Set it in "
                 "Settings > Recording > Groovy Master Address "
-                "(ip or ip:port), then load the game again.");
+                "(ip or ip:port), then close the game and load it again.");
         RARCH_ERR("[groovy] Or set video_record_config = \"ip[:port]\" in "
                   "the config file.\n");
         free(st);
