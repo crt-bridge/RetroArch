@@ -320,6 +320,9 @@ typedef struct vk
        * width * 4 bytes. Part of the ring's key with width and height: it is
        * rebuilt, and every entry invalidated, when any of the three changes. */
       bool box_mode;
+      /* vulkan_native_wait_in_flight has said once that the wait failed:
+       * a lost device fails it at every change of dims, one line is enough. */
+      bool wait_failed_logged;
    } native;
 
    struct
@@ -6073,13 +6076,24 @@ static bool vulkan_native_box_view_ok(const VkImageViewCreateInfo *view)
  * capture step refers to the ring or to the compose surface. */
 static void vulkan_native_wait_in_flight(vk_t *vk)
 {
+   VkResult res;
 #ifdef HAVE_THREADS
    slock_lock(vk->context->queue_lock);
 #endif
-   vkQueueWaitIdle(vk->context->queue);
+   res = vkQueueWaitIdle(vk->context->queue);
 #ifdef HAVE_THREADS
    slock_unlock(vk->context->queue_lock);
 #endif
+   /* A lost device returns at once (VK_ERROR_DEVICE_LOST): destroying the
+    * objects afterwards is still allowed, but say it, once, here where it
+    * would otherwise pass in silence. */
+   if (res != VK_SUCCESS && !vk->native.wait_failed_logged)
+   {
+      vk->native.wait_failed_logged = true;
+      RARCH_ERR("[Vulkan] Waiting for the frames in flight failed: %d%s.\n",
+            (int)res,
+            res == VK_ERROR_DEVICE_LOST ? " (VK_ERROR_DEVICE_LOST)" : "");
+   }
 }
 
 static void vulkan_deinit_native_readback(vk_t *vk)
