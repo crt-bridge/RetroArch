@@ -195,6 +195,14 @@ struct vk_per_frame
    struct vk_buffer_chain vbo;         /* uint64_t alignment */
    struct vk_buffer_chain ubo;
    struct vk_descriptor_manager descriptor_manager;
+   /* crt-bridge: the sets of the native box pass, and only those. A set of
+    * this manager is the only one that ever holds a buffer of the native
+    * ring (binding 4) or the view of the compose surface (binding 1), and it
+    * is bound only by vulkan_native_box_record, which writes every binding
+    * it holds first. A set of descriptor_manager above, which a draw rewrites
+    * only on bindings 0 and 1, can no longer keep one of them bound in the
+    * frame's command buffer when a change of dims destroys it. */
+   struct vk_descriptor_manager box_descriptor_manager;
 
    VkCommandPool cmd_pool; /* ptr alignment */
    VkCommandBuffer cmd;    /* ptr alignment */
@@ -4045,9 +4053,14 @@ static void vulkan_deinit_descriptor_pool(vk_t *vk)
 {
    int i;
    for (i = 0; i < (int) vk->num_swapchain_images; i++)
+   {
       vulkan_destroy_descriptor_manager(
             vk->context->device,
             &vk->swapchain[i].descriptor_manager);
+      vulkan_destroy_descriptor_manager(
+            vk->context->device,
+            &vk->swapchain[i].box_descriptor_manager);
+   }
 }
 
 static void vulkan_init_textures(vk_t *vk)
@@ -5193,6 +5206,10 @@ static void *vulkan_init(const video_info_t *video,
             vulkan_create_descriptor_manager(
                   vk->context->device,
                   pool_sizes, 4, vk->pipelines.set_layout);
+         vk->swapchain[i].box_descriptor_manager =
+            vulkan_create_descriptor_manager(
+                  vk->context->device,
+                  pool_sizes, 4, vk->pipelines.set_layout);
          vk->swapchain[i].vbo                =
             vulkan_buffer_chain_init(
                VULKAN_BUFFER_BLOCK_SIZE, 16,
@@ -5325,6 +5342,10 @@ static void vulkan_check_swapchain(vk_t *vk)
          VkCommandBufferAllocateInfo info;
 
          vk->swapchain[i].descriptor_manager =
+            vulkan_create_descriptor_manager(
+                  vk->context->device,
+                  pool_sizes, 4, vk->pipelines.set_layout);
+         vk->swapchain[i].box_descriptor_manager =
             vulkan_create_descriptor_manager(
                   vk->context->device,
                   pool_sizes, 4, vk->pipelines.set_layout);
@@ -6044,7 +6065,12 @@ static bool vulkan_native_box_view_ok(const VkImageViewCreateInfo *view)
  * size not yet proven, just before the ring is rebuilt, which hid the fault;
  * a return to a size already proven skips the test, and nothing drained the
  * queue any more. The cost is paid once per change of dims, a frame that is
- * dropped anyway. Under the queue lock, like the self-test. */
+ * dropped anyway. Under the queue lock, like the self-test.
+ *
+ * The wait covers the frames already submitted, not the frame being
+ * recorded: no wait can. That one is kept valid by the box pass's own
+ * descriptor sets (box_descriptor_manager): nothing bound in it before the
+ * capture step refers to the ring or to the compose surface. */
 static void vulkan_native_wait_in_flight(vk_t *vk)
 {
 #ifdef HAVE_THREADS
@@ -6321,9 +6347,11 @@ static bool vulkan_native_box_record(vk_t *vk, VkCommandBuffer cmd,
       return false;
    memcpy(range.data, ubo, sizeof(ubo));
 
+   /* From the box pass's own manager, never from the one the draws share:
+    * see box_descriptor_manager in struct vk_per_frame. */
    set = vulkan_descriptor_manager_alloc(
          vk->context->device,
-         &vk->chain->descriptor_manager);
+         &vk->chain->box_descriptor_manager);
 
    VULKAN_SET_UNIFORM_BUFFER(vk->context->device,
          set, 0, range.buffer, range.offset, sizeof(ubo));
@@ -7755,6 +7783,9 @@ static bool vulkan_frame(void *data, const void *frame,
 
    manager->current = manager->head;
    manager->count = 0;
+
+   chain->box_descriptor_manager.current = chain->box_descriptor_manager.head;
+   chain->box_descriptor_manager.count   = 0;
 
    buff_chain_vbo->current = buff_chain_vbo->head;
    buff_chain_vbo->offset  = 0;
