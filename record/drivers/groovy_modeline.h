@@ -1,6 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* groovy_modeline.h — shared compute_modeline_from_dims logic.
  *
+ * NO LONGER FEEDS THE WIRE. The driver announces the pinned modelines of
+ * groovy_announce.h (groovy_announce_pinned) and calls nothing from this
+ * header; the function below stays only while a test still reads it, and
+ * goes with that test. What follows describes what it computes, not what
+ * the receiver is told.
+ *
  * Shared between:
  *   - emitter/retroarch/src/record_groovy.c (runtime path)
  *   - libgm/test/groovy_test_bridge.c (unit-test path)

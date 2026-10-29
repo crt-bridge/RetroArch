@@ -1029,13 +1029,14 @@ static void groovy_announce_note(const groovy_state_t *st, struct groovy_receive
  * APPLIED outright, on the step, at every CMD_SWITCHRES. The servo then
  * only works on the crystal's residual drift (+/-500 ppm authority).
  *
- * The modeline that goes out on the wire is the receiver's own pinned
- * modeline for the regime (groovy_announce_pinned, groovy_announce.h), so
- * the cadence the tube receives is the one of that modeline, not the
- * CORE's fps. The RECEIVER's constants are copied into groovy_servo.h,
- * indexed by the regime: the one the caller announced (groovy_mode_of on
- * the announced cache), which is also what the modeline on the wire was
- * taken from.
+ * The cadence is READ from the modeline that goes out on the wire
+ * (groovy_announce_cadence_hz, groovy_announce.h): the clock brought back to
+ * a whole number of kHz, as the receiver programs it, over the totals, doubled
+ * when interlaced (fields). The receiver serves that modeline as received,
+ * so this is the cadence the tube is given, and it is not the CORE's fps:
+ * the wire carries the receiver's own pinned modeline, not a clock derived
+ * from the core. For the three pinned modes it equals the constants copied
+ * into groovy_servo.h (a test checks it).
  *
  * Placed here (ahead of groovy_new, not just above groovy_switchres_all):
  * groovy_new calls this function right at session opening to apply the
@@ -1045,13 +1046,18 @@ static void groovy_announce_note(const groovy_state_t *st, struct groovy_receive
  * reason. The two CALL SITES stay exactly as designed (in
  * groovy_switchres_all and at opening); only the DEFINITION's location
  * changes. */
-static void groovy_servo_apply_ff(groovy_state_t *st, enum groovy_mode mode)
+static void groovy_servo_apply_ff(groovy_state_t *st, const gm_modeline *m)
 {
     settings_t *cfg = config_get_ptr();
     const double vrr = cfg ? (double)cfg->floats.video_refresh_rate : 0.0;
-    const double cad = groovy_servo_regime_cadence_hz(mode);
+    const double cad = groovy_announce_cadence_hz(m);
     const double ff  = groovy_servo_ff_ppm(cad, vrr);
     const double per = (cad > 0.0) ? (1.0e9 / cad) : 0.0;
+    char         label[16];
+    /* The name of the mode as the log has always carried it: lines, then
+     * i or p. */
+    snprintf(label, sizeof label, "%u%c", (unsigned)m->v_active,
+             m->interlace ? 'i' : 'p');
     if (!(vrr > 0.0) && !st->servo_vrr_trace) {
         RARCH_WARN("[groovy-servo] video_refresh_rate unreadable (%.6f): "
                    "feed-forward at 0 ppm, term 1.0. Never a hardcoded value.\n", vrr);
@@ -1059,7 +1065,7 @@ static void groovy_servo_apply_ff(groovy_state_t *st, enum groovy_mode mode)
     }
     RARCH_LOG("[groovy-servo] feed-forward: mode=%s cadence=%.6fHz vrr=%.6fHz "
               "ff=%+.1fppm period=%.5fms\n",
-              groovy_servo_regime_label(mode), cad, vrr, ff, per * 1e-6);
+              label, cad, vrr, ff, per * 1e-6);
     groovy_servo_set_feed_forward(&st->servo, ff, per);
 }
 
@@ -2157,7 +2163,11 @@ static void *groovy_new(const struct record_params *params)
      * groovy_mode_of(&st->av_cache) reads 240p (av_cache.valid == false)
      * until the first frame's groovy_mode_on_frame call announces (reason
      * FIRST) -- matches the daemon's own boot default. */
-    groovy_servo_apply_ff(st, GROOVY_MODE_240P_SUPER_RES);   /* initial feed-forward, 240p */
+    {
+        gm_modeline initial;
+        groovy_announce_pinned(GROOVY_MODE_240P_SUPER_RES, &initial);
+        groovy_servo_apply_ff(st, &initial);   /* initial feed-forward, 240p */
+    }
 
     /* Diagnostic: log all record_params dims to understand the FB pipeline.
      * out_width/out_height = desired output resolution, fb_width/fb_height =
@@ -2856,7 +2866,7 @@ static bool groovy_switchres_all(groovy_state_t *st, const gm_modeline *m)
      * call this setter directly -- adding it there would be a strict no-op
      * (see groovy_servo.h), with no benefit, and would multiply the sites
      * to re-check. */
-    groovy_servo_apply_ff(st, groovy_mode_of(&st->av_cache));
+    groovy_servo_apply_ff(st, m);
 
     /* What the receivers were last told: groovy_push_video compares the next
      * announce against it and does not repeat an identical one. */
@@ -3454,30 +3464,44 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
     if (mode_action == GROOVY_MODE_ANNOUNCE) {
         gm_modeline mode;
         groovy_announce_pinned(groovy_mode_of(&st->av_cache), &mode);
-        (void)groovy_switchres_all(st, &mode);
-        switch (st->mode_state.last_reason) {
-        case GROOVY_MODE_REASON_FIRST:
-            RARCH_LOG("[groovy-mode] first announce %s at %ux%u\n",
+        /* The wire carries the modeline of the regime, not the native size:
+         * a size change inside the same regime announces the very modeline
+         * that is already there. The cache and the composition change, the
+         * wire does not, and no CMD_SWITCHRES is sent. The first announce,
+         * a regime switch and the re-announce paths still send. */
+        if (groovy_announce_is_repeat(st->announced_valid, &st->announced_mode,
+                                      &mode, st->mode_state.last_reason)) {
+            RARCH_LOG("[groovy-mode] resize %s at %ux%u (%s): same mode, no CMD_SWITCHRES\n",
                       groovy_mode_name(groovy_mode_of(&st->av_cache)),
-                      st->av_cache.width, st->av_cache.height);
-            break;
-        case GROOVY_MODE_REASON_SWITCH:
-            RARCH_LOG("[groovy-mode] switch %s -> %s at %ux%u\n",
-                      groovy_mode_name(was_mode), groovy_mode_name(groovy_mode_of(&st->av_cache)),
-                      st->av_cache.width, st->av_cache.height);
-            break;
-        case GROOVY_MODE_REASON_DECLARED:
-            RARCH_LOG("[groovy-mode] resize %s at %ux%u (declared size, no wait)\n",
-                      groovy_mode_name(groovy_mode_of(&st->av_cache)),
-                      st->av_cache.width, st->av_cache.height);
-            break;
-        case GROOVY_MODE_REASON_SETTLED:
-            RARCH_LOG("[groovy-mode] resize %s at %ux%u (settled)\n",
-                      groovy_mode_name(groovy_mode_of(&st->av_cache)),
-                      st->av_cache.width, st->av_cache.height);
-            break;
-        default:
-            break;
+                      st->av_cache.width, st->av_cache.height,
+                      st->mode_state.last_reason == GROOVY_MODE_REASON_DECLARED
+                          ? "declared size" : "settled");
+        } else {
+            (void)groovy_switchres_all(st, &mode);
+            switch (st->mode_state.last_reason) {
+            case GROOVY_MODE_REASON_FIRST:
+                RARCH_LOG("[groovy-mode] first announce %s at %ux%u\n",
+                          groovy_mode_name(groovy_mode_of(&st->av_cache)),
+                          st->av_cache.width, st->av_cache.height);
+                break;
+            case GROOVY_MODE_REASON_SWITCH:
+                RARCH_LOG("[groovy-mode] switch %s -> %s at %ux%u\n",
+                          groovy_mode_name(was_mode), groovy_mode_name(groovy_mode_of(&st->av_cache)),
+                          st->av_cache.width, st->av_cache.height);
+                break;
+            case GROOVY_MODE_REASON_DECLARED:
+                RARCH_LOG("[groovy-mode] resize %s at %ux%u (declared size, no wait)\n",
+                          groovy_mode_name(groovy_mode_of(&st->av_cache)),
+                          st->av_cache.width, st->av_cache.height);
+                break;
+            case GROOVY_MODE_REASON_SETTLED:
+                RARCH_LOG("[groovy-mode] resize %s at %ux%u (settled)\n",
+                          groovy_mode_name(groovy_mode_of(&st->av_cache)),
+                          st->av_cache.width, st->av_cache.height);
+                break;
+            default:
+                break;
+            }
         }
     }
 

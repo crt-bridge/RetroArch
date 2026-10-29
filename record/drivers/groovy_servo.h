@@ -280,8 +280,8 @@ typedef struct {
     groovy_servo_sample_t   window[GROOVY_SERVO_WINDOW]; /* the one-second window */
 } groovy_servo_state_t;
 
-/* Cadence of a RECEIVER mode, in fields per second. h_total/v_total zero
- * -> 0.0 (neutral fallback).
+/* Cadence of a mode, in fields per second when interlaced, frames per second
+ * otherwise. h_total/v_total zero -> 0.0 (neutral fallback).
  *
  * Proof of the factor of 2 under interlace: v_total under interlace
  * counts the lines of the FULL frame (both fields), not of one field.
@@ -292,23 +292,21 @@ typedef struct {
  * the one that matters here (one core frame per field), is double
  * that: 59.8076 Hz.
  *
- * GAP BETWEEN DESIGN NOTES AND CODE (flagged, not resolved here): this
- * function applies to the RECEIVER's modelines, COPIED into constants
- * -- NOT to the modeline that the emitter sets in CMD_SWITCHRES. Two
- * reasons, verified in the code:
- *   (1) the receiver only opens the wire's modeline in legacy_modeset;
- *       receiver/blit.c::blit_runtime_modeset delegates to
- *       blit_regime_toggle and applies the two FIXED entries of
- *       receiver/modelines.h on the production path
- *       (legacy_modeset == 0) -- CMD_SWITCHRES only selects the
- *       REGIME;
- *   (2) even if it could, the quotient would yield the CORE's cadence,
- *       not the receiver's: groovy_modeline.h computes
- *       pclock_mhz = h_total * v_total * fps / 1e6 (fps = the core's
- *       native cadence), so pclock/(h_total*v_total) returns that same
- *       fps -- a circular calculation that would cancel RetroArch's
- *       skew instead of locking the core to the tube.
- * Do not "simplify" this later by reading the wire's modeline.
+ * WHERE THE FEED-FORWARD READS ITS CADENCE: on the modeline the emitter
+ * announces (groovy_announce_cadence_hz, groovy_announce.h), clock brought
+ * back to a whole number of kHz. That is now sound for two reasons. The
+ * receiver serves the modeline it is announced as received (after its
+ * guard), so the cadence of the announced modeline is the cadence the tube
+ * is given. And the clock on the wire is no longer derived from the core's
+ * rate (an emitter that set pclock = h_total * v_total * core_fps would get
+ * the core's rate back from the quotient, and the servo would cancel the
+ * skew of RetroArch instead of locking the core to the tube): it is the
+ * receiver's own clock, so the quotient is the tube's rate.
+ *
+ * The constants below stay: they are the receiver's modelines copied, the
+ * startup [groovy-servo] settings line prints the feed-forward of each, and
+ * a test requires the cadence read on the announced modeline of each pinned
+ * mode to equal them (to the six decimals they are written with).
  * ------------------------------------------------------------------------- */
 static inline double groovy_servo_cadence_hz(double pclock_hz, unsigned h_total,
                                              unsigned v_total, int interlace)

@@ -27,6 +27,7 @@
 #ifndef GROOVY_ANNOUNCE_H
 #define GROOVY_ANNOUNCE_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>   /* memset */
 
@@ -146,6 +147,39 @@ static inline double groovy_announce_cadence_hz(const gm_modeline *m)
     lines = (double)m->h_total * (double)m->v_total;
     rate  = (khz * 1000.0) / lines;
     return m->interlace ? rate * 2.0 : rate;
+}
+
+/* groovy_announce_modelines_equal -- the same modeline field for field (the
+ * clock compared as whole kHz, which is how it is programmed). */
+static inline bool groovy_announce_modelines_equal(const gm_modeline *a, const gm_modeline *b)
+{
+    return (uint32_t)(a->pclock_mhz * 1000.0 + 0.5) == (uint32_t)(b->pclock_mhz * 1000.0 + 0.5)
+        && a->h_active == b->h_active && a->h_begin == b->h_begin
+        && a->h_end    == b->h_end    && a->h_total == b->h_total
+        && a->v_active == b->v_active && a->v_begin == b->v_begin
+        && a->v_end    == b->v_end    && a->v_total == b->v_total
+        && a->interlace == b->interlace;
+}
+
+/* groovy_announce_is_repeat -- would announcing `next` only repeat what the
+ * receivers were last told?
+ *
+ * Yes, and nothing needs to go out, when something was announced before
+ * (`have_last`), the reason is a size change inside the same regime (a size
+ * the core declared, or one that settled) and the modeline is the one
+ * already on the wire. That is every size change of the pinned modes: the
+ * wire carries the modeline of the regime, not the native size, so the
+ * announce would be a copy of the last one. The first announce, a regime
+ * switch and both re-announce paths are never repeats. */
+static inline bool groovy_announce_is_repeat(bool have_last, const gm_modeline *last,
+                                             const gm_modeline *next,
+                                             enum groovy_mode_reason reason)
+{
+    if (!have_last || !last || !next)
+        return false;
+    if (reason != GROOVY_MODE_REASON_DECLARED && reason != GROOVY_MODE_REASON_SETTLED)
+        return false;
+    return groovy_announce_modelines_equal(last, next);
 }
 
 #endif /* GROOVY_ANNOUNCE_H */
