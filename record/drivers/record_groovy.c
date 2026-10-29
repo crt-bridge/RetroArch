@@ -64,9 +64,10 @@
  * groovy_push_video, on every rendered frame that groovy_mode_on_frame
  * (groovy_mode.h) decides should announce -- never from groovy_push_av_info,
  * which only records the core's declared size as a HINT (registered in the
- * record_driver_t vtable; the hook site lives in runloop.c). Modeline
- * computation is shared with the unit-test bridge via
- * #include "groovy_modeline.h". Defensive checks (width=0 → reject) are
+ * record_driver_t vtable; the hook site lives in runloop.c). The modeline
+ * itself comes from groovy_announce_modeline (groovy_announce.h), shared with
+ * the unit-test bridge: the pinned modeline of the regime, or the mode of the
+ * session -- never computed from the native size. Defensive checks (width=0 → reject) are
  * implemented in groovy_push_av_info per STRIDE T-3-12 (bad av_info); the
  * regime decision itself (dedupe, oscillation guard) lives in groovy_mode.h,
  * shared by both this driver and the test bridge.
@@ -110,9 +111,9 @@
  * injected by the Makefile.common HAVE_GROOVY block (patch hunk 3). */
 #include <gm.h>
 
-/* Shared modeline computation (Plan 03-06). Must follow gm.h so the
- * gm_modeline type is visible. The header is also included by the unit-test
- * bridge (libgm/test/groovy_test_bridge.c) to exercise the same math. */
+/* Fall-back definitions of the libretro geometry structures, for the
+ * consumers that do not pull in libretro.h (the unit-test bridge). Nothing
+ * here computes a modeline any more. Must follow gm.h. */
 #include "groovy_modeline.h"
 
 /* The pinned modelines and groovy_announce_modeline(), the one function that
@@ -4105,6 +4106,15 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
     if (wire_w != st->announced_mode.h_active || wire_h != st->announced_mode.v_active)
         return true;   /* never a BLIT of another size than the last announce */
 
+    /* Does the wire carry FIELDS? Judged on the modeline last announced --
+     * interlaced or not -- and not on the name of the regime: the 480i pinned
+     * mode is interlaced, and so is a mode of the session such as the PAL
+     * 576i. This one predicate decides the cut into fields, the one-field-
+     * per-frame lever and the parity injection. The name of the regime keeps
+     * its other meaning (the injected skip below is a 240p fault). */
+    const bool fields_on_wire = groovy_announce_wire_has_fields(st->announced_valid,
+                                                               &st->announced_mode);
+
     /* Witness of what actually goes out on the wire — after every guard, so
      * only frames really emitted get sampled: it is the composed picture,
      * the one handed to libgm. No effect when GROOVY_DUMP_FRAME_PATH is
@@ -4167,13 +4177,13 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
 #ifdef HAVE_GROOVY_BENCH
     if (st->inject_n > 0u) {
         const uint64_t inj_elapsed = groovy_inject_elapsed_ns(st, emit_t0);
-        const bool     is_480i_fpf = (split_mode == GROOVY_MODE_480I
-                                      && st->field_mode == GROOVY_FIELD_PER_FRAME);
+        const bool     is_fields_fpf = (fields_on_wire
+                                        && st->field_mode == GROOVY_FIELD_PER_FRAME);
         const int      skip_i = groovy_inject_pending(st->inject_items,
                 st->inject_n, GROOVY_INJECT_SKIP, inj_elapsed);
 
         groovy_inject_parity_observe(&st->inject_parity,
-                                     is_480i_fpf ? 1 : 0, st->frame_id);
+                                     is_fields_fpf ? 1 : 0, st->frame_id);
 
         /* The injected skip is a 240p fault: it stays tied to the 240p regime
          * and does not fire on a 480p full frame. */
@@ -4189,7 +4199,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
 
             if (parity_i >= 0
                 && groovy_inject_parity_eligible(&st->inject_parity,
-                        is_480i_fpf ? 1 : 0, st->frame_id)) {
+                        is_fields_fpf ? 1 : 0, st->frame_id)) {
                 groovy_inject_note_fired(st, &st->inject_items[parity_i],
                                          st->frame_id, emit_t0);
                 groovy_inject_parity_fired(&st->inject_parity);
@@ -4239,10 +4249,10 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         /* Injected fault above: nothing is sent for this frame. */
     } else if (groovy_skip_should_skip(st->skip_every, st->frame_id)) {
         st->skipped_frames++;
-    /* Phase 3.2 regime-aware emit: split_mode is the
-     * regime of the announce the dims guard above just verified matches
+    /* Emit by what the wire carries: fields_on_wire is read from the
+     * modeline of the announce the dims guard above just verified matches
      * THIS frame -- never a separately tracked state. */
-    } else if (split_mode == GROOVY_MODE_480I
+    } else if (fields_on_wire
                && st->field_mode == GROOVY_FIELD_PER_FRAME) {
         /* GroovyMAME path: ONE half-frame per rendered frame, as a
          * half-height CMD_BLIT_VSYNC (0x06), under consecutive frame_ids.
@@ -4279,9 +4289,10 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         if (ok)
             st->fields_sent[field]++;
         emit_ok = ok;
-    } else if (split_mode == GROOVY_MODE_480I) {
+    } else if (fields_on_wire) {
         /* Split the composed picture (wire_w × wire_h × 3 RGB888, the whole
-         * mode: 480 lines) into two field buffers.
+         * mode: 480 lines in 480i, 576 in a PAL 576i of the session) into two
+         * field buffers.
          * Field 0 = rows 0, 2, 4, ... (h/2 rows). Field 1 = rows 1, 3, 5, ...
          * Per-row size = wire_w * 3 bytes. Total per field = wire_w * (wire_h/2) * 3.
          *
@@ -4313,9 +4324,10 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         free(fld1);
         emit_ok = ok;
     } else {
-        /* GROOVY_MODE_240P_SUPER_RES and GROOVY_MODE_480P: progressive, the
-         * full frame in one CMD_BLIT_VSYNC. The announced modeline (240p or
-         * 480p) is the same for every receiver; the frame is not split. */
+        /* GROOVY_MODE_240P_SUPER_RES, GROOVY_MODE_480P and a progressive
+         * GROOVY_MODE_SESSION: progressive, the full frame in one
+         * CMD_BLIT_VSYNC. The announced modeline is the same for every
+         * receiver; the frame is not split. */
         emit_ok = groovy_fan_out(st, GROOVY_EMIT_FULL, vsync_target, 0u,
                                  frame, NULL, wire_bytes);
         fan_out_done = true;
