@@ -4076,13 +4076,15 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         const size_t   mode_bytes = (size_t)mode_w * (size_t)mode_h * 3u;
         unsigned       kx = 1u;
         unsigned       ky = 1u;
+        int            by_env = 0;   /* GROOVY_MODE imposes the mode announced */
 
         /* The factors: those of the session, brought back to what fits,
          * in the regime of the session; the receiver's own rule (the one it
          * used to apply) in the pinned modes. */
-        if (split_mode == GROOVY_MODE_SESSION)
+        if (split_mode == GROOVY_MODE_SESSION) {
             groovy_session_factors(&st->session, send_w, send_h, &kx, &ky);
-        else
+            by_env = 1;
+        } else
             kx = groovy_compose_factor_pinned(send_w, send_h, mode_w, mode_h);
 
         /* [groovy-conv] compose: the cost of this composition alone, one
@@ -4115,9 +4117,8 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
          * wire carries. The reason is the launcher's own only when it
          * describes the mode announced. */
         if (groovy_announce_status_due(&st->mode_said, &st->announced_mode,
-                                       kx, ky, split_mode == GROOVY_MODE_SESSION ? 1 : 0)) {
+                                       kx, ky, by_env)) {
             char      line[GROOVY_FORCED_MSG_CAP];
-            const int by_env = (split_mode == GROOVY_MODE_SESSION) ? 1 : 0;
 
             groovy_announce_status_format(line, sizeof line, &st->announced_mode,
                     kx, ky, by_env,
