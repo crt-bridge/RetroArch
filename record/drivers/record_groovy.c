@@ -107,6 +107,12 @@
  * bridge (libgm/test/groovy_test_bridge.c) to exercise the same math. */
 #include "groovy_modeline.h"
 
+/* The pinned modelines and groovy_announce_pinned(), the one function that
+ * builds a CMD_SWITCHRES announcement. All three announcement sites below
+ * call it; the unit-test bridge calls it too. Follows gm.h and
+ * groovy_mode.h (pulled in by groovy_modeline.h above). */
+#include "groovy_announce.h"
+
 /* The anonymous "[groovy_pacing] ack_lost" line from groovy_pacing.h's
  * default stderr fallback is silenced here -- the driver now prints its
  * own NAMED line instead ("[groovy_pacing] ack_back target=%s role=%s" /
@@ -1005,16 +1011,13 @@ static void groovy_announce_note(const groovy_state_t *st, struct groovy_receive
  * APPLIED outright, on the step, at every CMD_SWITCHRES. The servo then
  * only works on the crystal's residual drift (+/-500 ppm authority).
  *
- * WARNING: the source of the timings is NOT the modeline that goes out on
- * the wire. Outside legacy_modeset, the receiver ignores the wire
- * modeline (receiver/blit.c, blit_runtime_modeset delegates to
- * blit_regime_toggle and the timings come from the two fixed entries of
- * receiver/modelines.h), and compute_modeline_from_dims sets pclock =
- * h_total * v_total * the CORE's fps -- dividing back out would recover
- * the core's cadence, not the tube's. The RECEIVER's constants are
- * therefore copied into groovy_servo.h, indexed by the regime: the one
- * the caller announced (groovy_mode_of on the announced cache), which is
- * also what the modeline on the wire was computed from.
+ * The modeline that goes out on the wire is the receiver's own pinned
+ * modeline for the regime (groovy_announce_pinned, groovy_announce.h), so
+ * the cadence the tube receives is the one of that modeline, not the
+ * CORE's fps. The RECEIVER's constants are copied into groovy_servo.h,
+ * indexed by the regime: the one the caller announced (groovy_mode_of on
+ * the announced cache), which is also what the modeline on the wire was
+ * taken from.
  *
  * Placed here (ahead of groovy_new, not just above groovy_switchres_all):
  * groovy_new calls this function right at session opening to apply the
@@ -2703,12 +2706,11 @@ static void groovy_reannounce_emit(groovy_state_t *st, struct groovy_receiver *r
         return;
     }
 
-    /* interlace is no longer set here: compute_modeline_from_dims derives
-     * it from the regime passed in, groovy_mode_of(&st->av_cache) -- a
-     * re-announce always reapplies the regime already in the cache, never a
-     * separately-tracked one. */
-    compute_modeline_from_dims(st->av_cache.width, st->av_cache.height, st->av_cache.fps,
-                               groovy_mode_of(&st->av_cache), &mode);
+    /* The modeline, interlace included, is the pinned one of the regime in
+     * the cache, groovy_mode_of(&st->av_cache): a re-announce always
+     * reapplies the regime already announced, never a separately-tracked
+     * one. */
+    groovy_announce_pinned(groovy_mode_of(&st->av_cache), &mode);
     {
         const int      rc_sw  = gm_send_switchres(rx->gm, &mode);
         const int      wsa_sw = gm_last_announce_error(rx->gm);
@@ -2789,10 +2791,9 @@ static void groovy_reannounce_flush_deferred(groovy_state_t *st, struct groovy_r
                             GROOVY_ANNOUNCE_NOT_READY, 0, groovy_pacing_mono_ns());
         return;
     }
-    /* interlace: same rationale as groovy_reannounce_emit above -- derived
-     * inside compute_modeline_from_dims, never set separately here. */
-    compute_modeline_from_dims(st->av_cache.width, st->av_cache.height, st->av_cache.fps,
-                               groovy_mode_of(&st->av_cache), &mode);
+    /* Same rationale as groovy_reannounce_emit above -- the pinned modeline
+     * of the announced regime, interlace included. */
+    groovy_announce_pinned(groovy_mode_of(&st->av_cache), &mode);
     {
         const int      rc_sw  = gm_send_switchres(rx->gm, &mode);
         const int      wsa_sw = gm_last_announce_error(rx->gm);
@@ -3406,7 +3407,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
      * and the core's declared-size hint, and against the oscillation
      * guard. was_mode/was_frozen are read BEFORE the call so the freeze/
      * resume transition traces below can name what changed. The announce
-     * itself -- compute_modeline_from_dims + groovy_switchres_all -- happens
+     * itself -- groovy_announce_pinned + groovy_switchres_all -- happens
      * HERE, in the same call, BEFORE the BLIT-vs-SWITCHRES dims guard and
      * this frame's own blit further down: this is what keeps the wire fed
      * at session opening and at every regime switch, without a settle
@@ -3428,8 +3429,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
 
     if (mode_action == GROOVY_MODE_ANNOUNCE) {
         gm_modeline mode;
-        compute_modeline_from_dims(st->av_cache.width, st->av_cache.height, st->av_cache.fps,
-                                   groovy_mode_of(&st->av_cache), &mode);
+        groovy_announce_pinned(groovy_mode_of(&st->av_cache), &mode);
         (void)groovy_switchres_all(st, &mode);
         switch (st->mode_state.last_reason) {
         case GROOVY_MODE_REASON_FIRST:
