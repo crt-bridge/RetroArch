@@ -34,7 +34,13 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-enum groovy_mode { GROOVY_MODE_240P_SUPER_RES = 0, GROOVY_MODE_480I = 1, GROOVY_MODE_480P = 2 };   /* moved from record_groovy.h */
+#include "groovy_session.h"
+
+/* The fourth regime is the mode of the session (groovy_session.h): the
+ * modeline the launcher chose, announced as given. The other three are the
+ * receiver's pinned modes, the path of fall-back and the default path. */
+enum groovy_mode { GROOVY_MODE_240P_SUPER_RES = 0, GROOVY_MODE_480I = 1, GROOVY_MODE_480P = 2,
+                   GROOVY_MODE_SESSION = 3 };   /* moved from record_groovy.h */
 
 #define GROOVY_MODE_480I_ABOVE_LINES   280u                 /* 480i threshold */
 #define GROOVY_DIM_HYSTERESIS_FRAMES   15u                  /* moved from record_groovy.c */
@@ -80,6 +86,7 @@ struct groovy_mode_state {
     uint64_t frozen_drops;   /* frames refused: contrary to the frozen regime */
     uint64_t dims_drops;     /* frames refused: size != announced, same regime */
     bool     khz31;          /* session policy: the receiver takes 31 kHz (zero = off) */
+    const struct groovy_session_mode *session;   /* the mode of the session; NULL = none (zero = none) */
 };
 /* A zeroed struct (calloc) is the valid initial state. */
 
@@ -99,6 +106,19 @@ static inline enum groovy_mode groovy_mode_classify_policy(unsigned h, bool khz3
     return groovy_mode_classify(h);
 }
 
+/* groovy_mode_wanted — the regime a picture of w x h asks for. With a valid
+ * mode of the session, every picture is asked in the session (first slice:
+ * the rule of place comes next); without one, groovy_mode_classify_policy,
+ * unchanged. */
+static inline enum groovy_mode groovy_mode_wanted(const struct groovy_mode_state *ms,
+                                                  unsigned w, unsigned h)
+{
+    (void)w;
+    if (ms->session && ms->session->valid)
+        return GROOVY_MODE_SESSION;
+    return groovy_mode_classify_policy(h, ms->khz31);
+}
+
 /* groovy_mode_of — the regime of the last announced cache is the
  * ONLY source the field-splitter, the modeline and the servo derive from.
  * It is the regime that was announced (the cache field), never a
@@ -116,6 +136,7 @@ static inline const char *groovy_mode_name(enum groovy_mode m)
     switch (m) {
     case GROOVY_MODE_480I: return "480i";
     case GROOVY_MODE_480P: return "480p";
+    case GROOVY_MODE_SESSION: return "session";
     default:               return "240p_super_res";
     }
 }
@@ -228,7 +249,7 @@ static inline enum groovy_mode_action groovy_mode_announce(struct groovy_mode_st
 static inline enum groovy_mode_action groovy_mode_on_frame(struct groovy_mode_state *ms,
         groovy_av_cache_t *cache, unsigned w, unsigned h, double fps, uint64_t now_ns)
 {
-    enum groovy_mode wanted = groovy_mode_classify_policy(h, ms->khz31);
+    enum groovy_mode wanted = groovy_mode_wanted(ms, w, h);
 
     groovy_mode_note_request(ms, wanted, now_ns);
 

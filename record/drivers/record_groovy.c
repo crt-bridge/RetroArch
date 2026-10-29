@@ -115,10 +115,11 @@
  * bridge (libgm/test/groovy_test_bridge.c) to exercise the same math. */
 #include "groovy_modeline.h"
 
-/* The pinned modelines and groovy_announce_pinned(), the one function that
- * builds a CMD_SWITCHRES announcement. All three announcement sites below
- * call it; the unit-test bridge calls it too. Follows gm.h and
- * groovy_mode.h (pulled in by groovy_modeline.h above). */
+/* The pinned modelines and groovy_announce_modeline(), the one function that
+ * builds a CMD_SWITCHRES announcement: the pinned modeline of the regime, or
+ * the mode of the session (groovy_session.h, read from GROOVY_MODE). All
+ * three announcement sites below call it; the unit-test bridge calls it too.
+ * Follows gm.h and groovy_mode.h (pulled in by groovy_modeline.h above). */
 #include "groovy_announce.h"
 
 /* The picture at the size of the announced mode: the receiver serves the
@@ -562,6 +563,10 @@ typedef struct {
     size_t    compose_cap;
     gm_modeline announced_mode;            /* the modeline last sent by groovy_switchres_all */
     bool      announced_valid;             /* false until the first announce of the session */
+    /* The mode of the session (GROOVY_MODE, groovy_session.h): read once at
+     * session opening, never touched afterwards. valid false = none: the
+     * pinned modes of the receiver are announced, as always. */
+    struct groovy_session_mode session;
     uint64_t  downsample_dims_mismatch;     /* frames rejected, never distorted */
     uint64_t  downsample_prereduced_mismatch; /* frames already reduced by the video driver, not expected */
     uint64_t  downsample_ns_total;          /* box cost, read every 600 */
@@ -1034,8 +1039,9 @@ static void groovy_announce_note(const groovy_state_t *st, struct groovy_receive
  * a whole number of kHz, as the receiver programs it, over the totals, doubled
  * when interlaced (fields). The receiver serves that modeline as received,
  * so this is the cadence the tube is given, and it is not the CORE's fps:
- * the wire carries the receiver's own pinned modeline, not a clock derived
- * from the core. For the three pinned modes it equals the constants copied
+ * the wire carries the receiver's own pinned modeline, or the mode of the
+ * session, not a clock derived from the core. For the three pinned modes it
+ * equals the constants copied
  * into groovy_servo.h (a test checks it).
  *
  * Placed here (ahead of groovy_new, not just above groovy_switchres_all):
@@ -1422,6 +1428,40 @@ static void *groovy_new(const struct record_params *params)
                 k = (cfg && cfg->bools.groovy_31khz) ? 1 : 0;
             }
             st->mode_state.khz31 = (k != 0);
+        }
+
+        /* The mode of the session: GROOVY_MODE, read ONCE, here, strictly
+         * (groovy_session.h). There is no menu counterpart: the launcher
+         * chooses and hands the modeline over. An empty variable is not a
+         * variable that is set (same rule as every other one here): the
+         * emitter behaves as without it. A value that is not understood is
+         * refused AS A WHOLE, said on the screen and in the log, and the
+         * pinned modes of the receiver are announced -- never a mode half
+         * read. The mode_state keeps a pointer to the session only when it
+         * was read in full. */
+        env = getenv("GROOVY_MODE");
+        if (groovy_precedence_env_wins(env)) {
+            char why[96];
+
+            if (groovy_session_parse(env, &st->session, why, sizeof why) != 0) {
+                snprintf(msg, sizeof msg,
+                         "GROOVY_MODE not understood (%s): the receiver's own "
+                         "pair of modes is announced instead", why);
+                groovy_log_error(msg);
+            } else if (st->session.valid) {
+                RARCH_LOG("[groovy] GROOVY_MODE read: clock=%u kHz "
+                          "h=%u/%u/%u/%u v=%u/%u/%u/%u scan=%c "
+                          "factors=%ux%u crop=%u lines %u columns\n",
+                          (unsigned)st->session.khz,
+                          (unsigned)st->session.h_active, (unsigned)st->session.h_begin,
+                          (unsigned)st->session.h_end, (unsigned)st->session.h_total,
+                          (unsigned)st->session.v_active, (unsigned)st->session.v_begin,
+                          (unsigned)st->session.v_end, (unsigned)st->session.v_total,
+                          st->session.interlace ? 'i' : 'p',
+                          (unsigned)st->session.kx, (unsigned)st->session.ky,
+                          (unsigned)st->session.crop_lines, (unsigned)st->session.crop_cols);
+                st->mode_state.session = &st->session;
+            }
         }
 
         /* Supersampling reduction. Read once per session, so a change made
@@ -2735,11 +2775,11 @@ static void groovy_reannounce_emit(groovy_state_t *st, struct groovy_receiver *r
         return;
     }
 
-    /* The modeline, interlace included, is the pinned one of the regime in
-     * the cache, groovy_mode_of(&st->av_cache): a re-announce always
-     * reapplies the regime already announced, never a separately-tracked
-     * one. */
-    groovy_announce_pinned(groovy_mode_of(&st->av_cache), &mode);
+    /* The modeline, interlace included, is the one of the regime in the
+     * cache, groovy_mode_of(&st->av_cache) -- the pinned modeline of the
+     * receiver, or the mode of the session: a re-announce always reapplies
+     * the regime already announced, never a separately-tracked one. */
+    groovy_announce_modeline(groovy_mode_of(&st->av_cache), &st->session, &mode);
     {
         const int      rc_sw  = gm_send_switchres(rx->gm, &mode);
         const int      wsa_sw = gm_last_announce_error(rx->gm);
@@ -2820,9 +2860,9 @@ static void groovy_reannounce_flush_deferred(groovy_state_t *st, struct groovy_r
                             GROOVY_ANNOUNCE_NOT_READY, 0, groovy_pacing_mono_ns());
         return;
     }
-    /* Same rationale as groovy_reannounce_emit above -- the pinned modeline
-     * of the announced regime, interlace included. */
-    groovy_announce_pinned(groovy_mode_of(&st->av_cache), &mode);
+    /* Same rationale as groovy_reannounce_emit above -- the modeline of the
+     * announced regime, interlace included. */
+    groovy_announce_modeline(groovy_mode_of(&st->av_cache), &st->session, &mode);
     {
         const int      rc_sw  = gm_send_switchres(rx->gm, &mode);
         const int      wsa_sw = gm_last_announce_error(rx->gm);
@@ -3463,7 +3503,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
 
     if (mode_action == GROOVY_MODE_ANNOUNCE) {
         gm_modeline mode;
-        groovy_announce_pinned(groovy_mode_of(&st->av_cache), &mode);
+        groovy_announce_modeline(groovy_mode_of(&st->av_cache), &st->session, &mode);
         /* The wire carries the modeline of the regime, not the native size:
          * a size change inside the same regime announces the very modeline
          * that is already there. The cache and the composition change, the
@@ -3997,7 +4037,16 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         const unsigned mode_w = st->announced_mode.h_active;
         const unsigned mode_h = st->announced_mode.v_active;
         const size_t   mode_bytes = (size_t)mode_w * (size_t)mode_h * 3u;
-        const unsigned kx = groovy_compose_factor_pinned(send_w, send_h, mode_w, mode_h);
+        unsigned       kx = 1u;
+        unsigned       ky = 1u;
+
+        /* The factors: those of the session, brought back to what fits,
+         * in the regime of the session; the receiver's own rule (the one it
+         * used to apply) in the pinned modes. */
+        if (split_mode == GROOVY_MODE_SESSION)
+            groovy_session_factors(&st->session, send_w, send_h, &kx, &ky);
+        else
+            kx = groovy_compose_factor_pinned(send_w, send_h, mode_w, mode_h);
 
         /* [groovy-conv] compose: the cost of this composition alone, one
          * line per 600 frames, next to the input-conversion line of the
@@ -4018,8 +4067,10 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
             cmp_t0 = groovy_pacing_mono_ns();
 #endif /* HAVE_GROOVY_BENCH */
 
-        if (!st->announced_valid || mode_bytes == 0u)
-            return true;   /* nothing announced: soft-skip, session alive */
+        if (!st->announced_valid || mode_bytes == 0u
+            || mode_bytes > GROOVY_SESSION_MAX_FRAME_BYTES)
+            return true;   /* nothing announced, or a mode past the receiver's
+                            * capacity (never allocated): soft-skip, session alive */
         if (mode_bytes > st->compose_cap) {
             uint8_t *grown = (uint8_t *)realloc(st->compose_buf, mode_bytes);
             if (!grown)
@@ -4028,7 +4079,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
             st->compose_cap = mode_bytes;
         }
         if (!groovy_compose_frame(st->compose_buf, mode_w, mode_h, frame,
-                                  send_w, send_h, kx, 1u))
+                                  send_w, send_h, kx, ky))
             return true;   /* unusable mode: soft-skip */
         frame      = st->compose_buf;
         wire_w     = mode_w;

@@ -16,7 +16,9 @@
  *
  * The three announcement sites of the driver (first announce and regime
  * switch, re-announce, deferred re-announce) and the unit-test bridge all go
- * through groovy_announce_pinned(): no site builds a modeline of its own.
+ * through groovy_announce_modeline(): no site builds a modeline of its own.
+ * It gives the pinned modeline of the regime, or, in the regime of the
+ * session, the modeline the launcher chose (groovy_session.h).
  *
  * Positions are CUMULATIVE (start of sync, end of sync, total), as on the
  * wire, not widths.
@@ -130,6 +132,36 @@ static inline void groovy_announce_pinned(enum groovy_mode m, gm_modeline *out)
     out->pclock_mhz = (double)khz / 1000.0;
 }
 
+/* groovy_announce_modeline -- THE function that builds a CMD_SWITCHRES
+ * announcement, for the regime `m` and the mode of the session `sm`.
+ *
+ * In the regime of the session (GROOVY_MODE_SESSION, with a valid session)
+ * the modeline is the one the launcher gave, copied field for field: clock
+ * `khz / 1000.0` MHz, the eight positions, the scan. Any other regime gives
+ * the pinned modeline of the receiver (groovy_announce_pinned). Nothing is
+ * derived from the native size of the picture, and nothing here judges the
+ * ranges of the tube: the receiver's guard does. Pure function. */
+static inline void groovy_announce_modeline(enum groovy_mode m,
+                                            const struct groovy_session_mode *sm,
+                                            gm_modeline *out)
+{
+    if (m != GROOVY_MODE_SESSION || !sm || !sm->valid) {
+        groovy_announce_pinned(m, out);
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    out->h_active  = (uint16_t)sm->h_active;
+    out->h_begin   = (uint16_t)sm->h_begin;
+    out->h_end     = (uint16_t)sm->h_end;
+    out->h_total   = (uint16_t)sm->h_total;
+    out->v_active  = (uint16_t)sm->v_active;
+    out->v_begin   = (uint16_t)sm->v_begin;
+    out->v_end     = (uint16_t)sm->v_end;
+    out->v_total   = (uint16_t)sm->v_total;
+    out->interlace = (uint8_t)(sm->interlace ? 1u : 0u);
+    out->pclock_mhz = (double)sm->khz / 1000.0;
+}
+
 /* groovy_announce_cadence_hz -- the rate the tube is given by `m`: frames per
  * second, or FIELDS per second when the modeline is interlaced. Computed on
  * the clock brought back to a whole number of kHz, because that is the clock
@@ -180,6 +212,18 @@ static inline bool groovy_announce_is_repeat(bool have_last, const gm_modeline *
     if (reason != GROOVY_MODE_REASON_DECLARED && reason != GROOVY_MODE_REASON_SETTLED)
         return false;
     return groovy_announce_modelines_equal(last, next);
+}
+
+/* groovy_announce_wire_has_fields -- does the wire carry FIELDS? It does when
+ * the modeline last announced is interlaced: two half-height pictures per
+ * frame, whatever the regime that announced it. The single predicate for
+ * cutting a picture into fields, for the one-field-per-frame lever and for
+ * the parity injection; it replaces a comparison to the name of the regime
+ * 480i, which stood for it while the 480i was the only interlaced mode. */
+static inline bool groovy_announce_wire_has_fields(bool announced_valid,
+                                                   const gm_modeline *announced)
+{
+    return announced_valid && announced && announced->interlace != 0u;
 }
 
 #endif /* GROOVY_ANNOUNCE_H */
