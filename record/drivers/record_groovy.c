@@ -554,6 +554,7 @@ typedef struct {
     int       reduction_from_env;           /* 1 = GROOVY_DOWNSAMPLE chose the mode, 0 = the menu */
     int       reduction_path_cpu;           /* 1 = GROOVY_DOWNSAMPLE_PATH=cpu: the processor reduces, the card is not asked */
     struct groovy_reduction_memo   reduction_memo;   /* decision per rendered size */
+    struct groovy_reduction_limits reduction_window; /* the window of the mode of the session, read by the memo (reduction_memo.window) only when the session was read in full */
     char      capture_note[GROOVY_CAPTURE_NOTE_CAP]; /* why the video driver did not reduce, as it said it */
     struct groovy_reduction_said   reduction_said;   /* what the status line last said */
     struct groovy_reduction_pacer  reduction_pacer;  /* limits the refusal message */
@@ -1472,6 +1473,14 @@ static void *groovy_new(const struct record_params *params)
                           (unsigned)st->session.kx, (unsigned)st->session.ky,
                           (unsigned)st->session.crop_lines, (unsigned)st->session.crop_cols);
                 st->mode_state.session = &st->session;
+                /* The reduction no longer refuses a picture that the mode of
+                 * the session can show: its window, bounded by the capacity
+                 * of the receiver, is what the decision per size asks. */
+                st->reduction_window = groovy_reduction_limits_make(
+                        st->session.h_active, st->session.v_active,
+                        st->session.crop_cols, st->session.crop_lines,
+                        GROOVY_SESSION_MAX_FRAME_BYTES);
+                st->reduction_memo.window = &st->reduction_window;
             }
         }
 
@@ -4933,8 +4942,9 @@ static bool groovy_push_av_info(void *data, const struct retro_system_av_info *a
      * decision on that base. */
     groovy_reduction_memo_declare(&st->reduction_memo, gw, gh);
     {
-        const struct groovy_reduction_decision hint = groovy_reduction_decide(
-                st->reduction_mode, st->reduction_hw, gw, gh, gw, gh);
+        const struct groovy_reduction_decision hint = groovy_reduction_decide_window(
+                st->reduction_mode, st->reduction_hw, gw, gh, gw, gh,
+                st->reduction_memo.window);
         if (hint.factor == 0u) {
             RARCH_WARN("[groovy] downsample (av_info): %ux%u refused by the setting -- no announcement\n",
                        gw, gh);

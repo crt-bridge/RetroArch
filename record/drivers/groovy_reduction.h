@@ -20,10 +20,20 @@
  * never reduces and refuses what the receiver cannot serve; a fixed factor
  * refuses an image it does not divide, or that it does not make fit.
  *
- * THE RECEIVER LIMITS are copied from the receiver's own source, because
- * nothing on the wire carries them: it refuses a mode taller than 480 lines
- * or larger than 1280*480*4 bytes of slot buffer (3 bytes per pixel on the
- * wire). A test reads the receiver header and fails if the copy drifts.
+ * THE RECEIVER LIMITS. Nothing on the wire carries them, so the emitter keeps
+ * its own. For the pair of modes pinned in the receiver (the path of the
+ * announcements that have always been made) they are the old ones, copied
+ * from the receiver's source: 480 lines, 1280*480*4 bytes of slot buffer
+ * (3 bytes per pixel on the wire). A test reads the receiver header and fails
+ * if that copy drifts.
+ *
+ * With a mode of the session (the modeline the launcher chose) the limit of
+ * the receiver is no longer a constant: it is the mode announced. A picture
+ * also fits when it takes place in the window of that mode, the lines and the
+ * columns of the mode plus the crop the session allows, and no larger than
+ * the capacity the receiver deduces from the file of the tube (a copy, which
+ * a test checks against the receiver's own code). Without a session the
+ * window is absent and every decision is the one of before, bit for bit.
  *
  * WHERE THE REDUCTION RUNS is not decided here. A later change may move a
  * reduction onto the card; the decision stays in this file either way.
@@ -48,6 +58,18 @@
 #define GROOVY_REDUCTION_STATUS_MIN_SIDE 16u
 /* Least time between two refusal messages, in nanoseconds (5 s). */
 #define GROOVY_REDUCTION_REFUSAL_GAP_NS UINT64_C(5000000000)
+
+/* The window of the mode of the session: the largest picture, in columns and
+ * lines, that takes place in the mode announced (its size plus the crop the
+ * session allows), and the capacity of the receiver in bytes (3 per pixel).
+ * A picture fits it when it is within both sides and within the capacity. An
+ * absent window (a NULL pointer) is the absence of a session. */
+struct groovy_reduction_limits
+{
+    unsigned max_w;
+    unsigned max_h;
+    unsigned max_bytes;
+};
 
 /* The menu index: 0 Auto, 1 Off, 2 = 2x, 3 = 4x, 4 = 8x. */
 enum groovy_reduction_mode
@@ -90,6 +112,36 @@ static inline int groovy_reduction_fits(unsigned w, unsigned h)
             <= (uint64_t)GROOVY_REDUCTION_MAX_BYTES) ? 1 : 0;
 }
 
+/* The window of a mode of the session from its active size, the crop of
+ * columns and of lines it allows, and the capacity of the receiver. The sums
+ * saturate at the largest unsigned value: a hostile crop never wraps. */
+static inline struct groovy_reduction_limits groovy_reduction_limits_make(
+        unsigned h_active, unsigned v_active, unsigned crop_cols,
+        unsigned crop_lines, unsigned max_bytes)
+{
+    struct groovy_reduction_limits lim;
+    const uint64_t w = (uint64_t)h_active + (uint64_t)crop_cols;
+    const uint64_t h = (uint64_t)v_active + (uint64_t)crop_lines;
+
+    lim.max_w = (w > 0xFFFFFFFFu) ? 0xFFFFFFFFu : (unsigned)w;
+    lim.max_h = (h > 0xFFFFFFFFu) ? 0xFFFFFFFFu : (unsigned)h;
+    lim.max_bytes = max_bytes;
+    return lim;
+}
+
+/* 1 if a w x h frame fits the pair of modes pinned in the receiver OR, when
+ * `win` is not NULL, the window of the mode of the session; 0 otherwise. With
+ * a NULL window this is groovy_reduction_fits, exactly. 64-bit arithmetic. */
+static inline int groovy_reduction_fits_window(unsigned w, unsigned h,
+        const struct groovy_reduction_limits *win)
+{
+    if (groovy_reduction_fits(w, h))
+        return 1;
+    if (!win || w == 0u || h == 0u || w > win->max_w || h > win->max_h)
+        return 0;
+    return ((uint64_t)w * (uint64_t)h * 3u <= (uint64_t)win->max_bytes) ? 1 : 0;
+}
+
 /* The factor a mode asks for: Auto 0 (decided per frame), Off 1, then 2, 4
  * and 8. An unknown value is read as Auto. */
 static inline unsigned groovy_reduction_mode_factor(
@@ -117,15 +169,19 @@ static inline struct groovy_reduction_decision groovy_reduction_make(
 
 /* Decides the factor for a rendered w x h frame. `hw` is non-zero for a
  * hardware capture (a supersampled FBO); rw x rh is the size the core
- * declared, 0 x 0 when it declared nothing. */
-static inline struct groovy_reduction_decision groovy_reduction_decide(
+ * declared, 0 x 0 when it declared nothing. `win` is the window of the mode
+ * of the session, or NULL without one: the question "does it fit?" then looks
+ * at the window as well as at the pair of modes pinned in the receiver, and
+ * every other rule is unchanged. */
+static inline struct groovy_reduction_decision groovy_reduction_decide_window(
         enum groovy_reduction_mode mode, int hw,
-        unsigned w, unsigned h, unsigned rw, unsigned rh)
+        unsigned w, unsigned h, unsigned rw, unsigned rh,
+        const struct groovy_reduction_limits *win)
 {
     unsigned n, k;
 
     if (mode == GROOVY_REDUCTION_OFF)
-        return groovy_reduction_fits(w, h)
+        return groovy_reduction_fits_window(w, h, win)
             ? groovy_reduction_make(1u, GROOVY_REDUCTION_NATIVE)
             : groovy_reduction_make(0u, GROOVY_REDUCTION_REFUSED_OVERSIZE);
 
@@ -135,14 +191,14 @@ static inline struct groovy_reduction_decision groovy_reduction_decide(
         if (w % n != 0u || h % n != 0u)
             return groovy_reduction_make(0u,
                     GROOVY_REDUCTION_REFUSED_NOT_DIVISIBLE);
-        return groovy_reduction_fits(w / n, h / n)
+        return groovy_reduction_fits_window(w / n, h / n, win)
             ? groovy_reduction_make(n, GROOVY_REDUCTION_FIXED)
             : groovy_reduction_make(0u, GROOVY_REDUCTION_REFUSED_OVERSIZE);
     }
 
     /* Auto. A software core sends its native size. */
     if (!hw)
-        return groovy_reduction_fits(w, h)
+        return groovy_reduction_fits_window(w, h, win)
             ? groovy_reduction_make(1u, GROOVY_REDUCTION_SOFTWARE_CORE)
             : groovy_reduction_make(0u, GROOVY_REDUCTION_REFUSED_OVERSIZE);
 
@@ -153,21 +209,29 @@ static inline struct groovy_reduction_decision groovy_reduction_decide(
     {
         k = h / rh;
         if (k >= 2u && k <= GROOVY_REDUCTION_MAX_FACTOR
-                && groovy_reduction_fits(w / k, h / k))
+                && groovy_reduction_fits_window(w / k, h / k, win))
             return groovy_reduction_make(k, GROOVY_REDUCTION_DECLARED_RATIO);
     }
 
     /* No such ratio: an image that fits goes out untouched. */
-    if (groovy_reduction_fits(w, h))
+    if (groovy_reduction_fits_window(w, h, win))
         return groovy_reduction_make(1u, GROOVY_REDUCTION_NATIVE);
 
     /* Too large for the receiver: the smallest clean factor. */
     for (k = 2u; k <= GROOVY_REDUCTION_MAX_FACTOR; k++)
-        if (w % k == 0u && h % k == 0u && groovy_reduction_fits(w / k, h / k))
+        if (w % k == 0u && h % k == 0u && groovy_reduction_fits_window(w / k, h / k, win))
             return groovy_reduction_make(k, GROOVY_REDUCTION_CEILING);
 
     return groovy_reduction_make(0u,
             GROOVY_REDUCTION_REFUSED_NO_CLEAN_FACTOR);
+}
+
+/* The same decision without a mode of the session: the one of before. */
+static inline struct groovy_reduction_decision groovy_reduction_decide(
+        enum groovy_reduction_mode mode, int hw,
+        unsigned w, unsigned h, unsigned rw, unsigned rh)
+{
+    return groovy_reduction_decide_window(mode, hw, w, h, rw, rh, NULL);
 }
 
 /* Where a reduction actually ran, as the status line says it. */
@@ -389,6 +453,10 @@ struct groovy_reduction_memo
     unsigned used_rw, used_rh;            /* reference the decision used    */
     unsigned cand_rw, cand_rh;            /* latest declared, not yet used  */
     bool valid;
+    /* The window of the mode of the session, or NULL (the zeroed state: no
+     * session). Set once, when the session is read in full; the decision per
+     * size reads it, so the driver and the video driver agree. */
+    const struct groovy_reduction_limits *window;
 };
 
 static inline void groovy_reduction_memo_declare(
@@ -409,8 +477,8 @@ static inline struct groovy_reduction_decision groovy_reduction_memo_frame(
     {
         memo->used_rw = memo->cand_rw;
         memo->used_rh = memo->cand_rh;
-        memo->decision = groovy_reduction_decide(mode, hw, w, h,
-                memo->used_rw, memo->used_rh);
+        memo->decision = groovy_reduction_decide_window(mode, hw, w, h,
+                memo->used_rw, memo->used_rh, memo->window);
         memo->key_w = w;
         memo->key_h = h;
         memo->valid = true;
