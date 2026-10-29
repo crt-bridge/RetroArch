@@ -3994,11 +3994,29 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
     unsigned wire_h = 0u;
     size_t   wire_bytes = 0u;
     {
-        retro_time_t cmp_t0 = groovy_frametime_on()
-            ? cpu_features_get_time_usec() : 0;
         const unsigned mode_w = st->announced_mode.h_active;
         const unsigned mode_h = st->announced_mode.v_active;
         const size_t   mode_bytes = (size_t)mode_w * (size_t)mode_h * 3u;
+        const unsigned kx = groovy_compose_factor_pinned(send_w, send_h, mode_w, mode_h);
+
+        /* [groovy-conv] compose: the cost of this composition alone, one
+         * line per 600 frames, next to the input-conversion line of the
+         * same family. Silent unless GROOVY_FRAMETIME=1 (read once), the
+         * same switch as the main-loop timing: when off, no clock is read
+         * here. Bench build only: a release build composes and reads
+         * neither the variable nor the clock. */
+#ifdef HAVE_GROOVY_BENCH
+        static int      cmp_on = -1;
+        static uint64_t cmp_ns_total, cmp_ns_max;
+        static unsigned cmp_samples;
+        uint64_t        cmp_t0 = 0u;
+        if (cmp_on < 0) {
+            const char *env = getenv("GROOVY_FRAMETIME");
+            cmp_on = (env && env[0] == '1') ? 1 : 0;
+        }
+        if (cmp_on)
+            cmp_t0 = groovy_pacing_mono_ns();
+#endif /* HAVE_GROOVY_BENCH */
 
         if (!st->announced_valid || mode_bytes == 0u)
             return true;   /* nothing announced: soft-skip, session alive */
@@ -4010,18 +4028,28 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
             st->compose_cap = mode_bytes;
         }
         if (!groovy_compose_frame(st->compose_buf, mode_w, mode_h, frame,
-                                  send_w, send_h,
-                                  groovy_compose_factor_pinned(send_w, send_h,
-                                                               mode_w, mode_h),
-                                  1u))
+                                  send_w, send_h, kx, 1u))
             return true;   /* unusable mode: soft-skip */
         frame      = st->compose_buf;
         wire_w     = mode_w;
         wire_h     = mode_h;
         wire_bytes = mode_bytes;
-        if (cmp_t0)
-            groovy_frametime_add(GROOVY_FT_COMPOSE,
-                                 cpu_features_get_time_usec() - cmp_t0);
+#ifdef HAVE_GROOVY_BENCH
+        if (cmp_on) {
+            const uint64_t cmp_ns = groovy_pacing_mono_ns() - cmp_t0;
+            cmp_ns_total += cmp_ns;
+            if (cmp_ns > cmp_ns_max) cmp_ns_max = cmp_ns;
+            if (++cmp_samples >= 600u) {
+                RARCH_LOG("[groovy-conv] compose %ux%u -> %ux%u factor=%u n=%u average=%.1f us worst=%.1f us\n",
+                          send_w, send_h, mode_w, mode_h, kx, cmp_samples,
+                          (double)cmp_ns_total / (double)cmp_samples / 1000.0,
+                          (double)cmp_ns_max / 1000.0);
+                cmp_ns_total = 0u;
+                cmp_ns_max   = 0u;
+                cmp_samples  = 0u;
+            }
+        }
+#endif /* HAVE_GROOVY_BENCH */
     }
     if (wire_w != st->announced_mode.h_active || wire_h != st->announced_mode.v_active)
         return true;   /* never a BLIT of another size than the last announce */
