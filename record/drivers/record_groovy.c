@@ -568,6 +568,15 @@ typedef struct {
      * session opening, never touched afterwards. valid false = none: the
      * pinned modes of the receiver are announced, as always. */
     struct groovy_session_mode session;
+    /* The reason the launcher gave for its choice (GROOVY_MODE_REASON, read
+     * once, printable ASCII, groovy_announce.h) and what the status line of
+     * the mode last said. mode_reason_set false = none was read. A
+     * GROOVY_MODE that was set but refused is remembered, so the line does
+     * not give the reason of a mode it does not announce. */
+    char      mode_reason[GROOVY_MODE_REASON_MAX + 1u];
+    bool      mode_reason_set;
+    bool      session_refused;
+    struct groovy_announce_said mode_said;
     uint64_t  downsample_dims_mismatch;     /* frames rejected, never distorted */
     uint64_t  downsample_prereduced_mismatch; /* frames already reduced by the video driver, not expected */
     uint64_t  downsample_ns_total;          /* box cost, read every 600 */
@@ -1445,6 +1454,7 @@ static void *groovy_new(const struct record_params *params)
             char why[96];
 
             if (groovy_session_parse(env, &st->session, why, sizeof why) != 0) {
+                st->session_refused = true;
                 snprintf(msg, sizeof msg,
                          "GROOVY_MODE not understood (%s): the receiver's own "
                          "pair of modes is announced instead", why);
@@ -1463,6 +1473,23 @@ static void *groovy_new(const struct record_params *params)
                           (unsigned)st->session.crop_lines, (unsigned)st->session.crop_cols);
                 st->mode_state.session = &st->session;
             }
+        }
+
+        /* The reason of the launcher's choice, shown on the status line of
+         * the mode. It is text from the environment shown on the screen, so
+         * it is read as a whole or not at all: printable ASCII, 120 bytes at
+         * most. A value outside that form is ignored, said once in the log,
+         * and the line keeps the default reason of its case. An empty
+         * variable is not a variable that is set. */
+        env = getenv("GROOVY_MODE_REASON");
+        if (groovy_precedence_env_wins(env)) {
+            if (groovy_announce_reason_parse(env, st->mode_reason,
+                                             sizeof st->mode_reason) == 0)
+                st->mode_reason_set = true;
+            else
+                RARCH_WARN("[groovy] GROOVY_MODE_REASON ignored: not printable "
+                           "ASCII, or longer than %u bytes\n",
+                           (unsigned)GROOVY_MODE_REASON_MAX);
         }
 
         /* Supersampling reduction. Read once per session, so a change made
@@ -4072,6 +4099,24 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
             || mode_bytes > GROOVY_SESSION_MAX_FRAME_BYTES)
             return true;   /* nothing announced, or a mode past the receiver's
                             * capacity (never allocated): soft-skip, session alive */
+
+        /* The status line of the mode: the modeline announced, its scale and
+         * what imposes it. Said when one of them changes, never per picture;
+         * the values are those of the announced modeline, the same ones the
+         * wire carries. The reason is the launcher's own only when it
+         * describes the mode announced. */
+        if (groovy_announce_status_due(&st->mode_said, &st->announced_mode,
+                                       kx, ky, split_mode == GROOVY_MODE_SESSION ? 1 : 0)) {
+            char      line[GROOVY_FORCED_MSG_CAP];
+            const int by_env = (split_mode == GROOVY_MODE_SESSION) ? 1 : 0;
+
+            groovy_announce_status_format(line, sizeof line, &st->announced_mode,
+                    kx, ky, by_env,
+                    groovy_announce_status_reason(by_env, st->session.valid ? 1 : 0,
+                            st->session_refused ? 1 : 0, st->mode_reason_set ? 1 : 0,
+                            st->mode_reason));
+            groovy_log_forced(line);
+        }
         if (mode_bytes > st->compose_cap) {
             uint8_t *grown = (uint8_t *)realloc(st->compose_buf, mode_bytes);
             if (!grown)

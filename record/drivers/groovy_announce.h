@@ -30,8 +30,10 @@
 #define GROOVY_ANNOUNCE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
-#include <string.h>   /* memset */
+#include <stdio.h>    /* snprintf */
+#include <string.h>   /* memset, memcpy */
 
 #ifndef GM_H
 #error "groovy_announce.h must be included AFTER gm.h"
@@ -224,6 +226,177 @@ static inline bool groovy_announce_wire_has_fields(bool announced_valid,
                                                    const gm_modeline *announced)
 {
     return announced_valid && announced && announced->interlace != 0u;
+}
+
+/* ---------------------------------------------------------------------------
+ * The status line of the mode. One line, on the screen of the PC and in the
+ * log (groovy_log_forced in the driver), said when the mode announced or its
+ * scale changes, never once per picture:
+ *
+ *   mode: <H> kHz <V> Hz <lines><p|i> <width> x<kx>[/<ky>] (<what imposes it>) -- <reason>
+ *
+ * Every number is computed on the modeline really announced (the clock in
+ * whole kHz, as the receiver programs it): the line says what the wire
+ * carries, never what was asked. H and V have two decimals; V is a rate per
+ * FIELD when the mode is interlaced. What imposes the mode is GROOVY_MODE
+ * (the variable wins) or the pair of modes pinned in the receiver.
+ *
+ * The reason comes from GROOVY_MODE_REASON: printable ASCII only (0x20 to
+ * 0x7E), 120 bytes at most. The text is shown on the screen, so a value
+ * outside that form is not shown at all.
+ * ------------------------------------------------------------------------- */
+
+#define GROOVY_MODE_REASON_MAX 120u
+
+/* Said when no reason was read and the receiver's own modes are announced. */
+#define GROOVY_ANNOUNCE_REASON_PINNED "receiver pinned mode, no GROOVY_MODE"
+/* Said when GROOVY_MODE imposes the mode and no reason came with it. */
+#define GROOVY_ANNOUNCE_REASON_NONE   "GROOVY_MODE given, no reason given"
+
+/* groovy_announce_reason_parse -- read a GROOVY_MODE_REASON value into `dst`.
+ *
+ *   0  : read, copied whole into dst (zero-terminated);
+ *   -1 : absent, empty, or refused (a byte outside 0x20..0x7E, more than 120
+ *        bytes, or a destination too small for it); dst is left empty.
+ * The caller tells "empty" from "refused" by testing the variable itself
+ * (a set, non-empty variable that returns -1 was refused). The text is read
+ * byte by byte and never past the 121st. */
+static inline int groovy_announce_reason_parse(const char *s, char *dst, size_t cap)
+{
+    size_t i;
+
+    if (!dst || cap == 0u)
+        return -1;
+    dst[0] = '\0';
+    if (!s || s[0] == '\0')
+        return -1;
+    for (i = 0u; s[i] != '\0'; i++) {
+        const unsigned char c = (unsigned char)s[i];
+
+        if (i >= GROOVY_MODE_REASON_MAX || c < 0x20u || c > 0x7Eu)
+            return -1;
+    }
+    if (i + 1u > cap)
+        return -1;
+    memcpy(dst, s, i + 1u);
+    return 0;
+}
+
+/* What the status line last said. A zeroed struct says nothing yet. */
+struct groovy_announce_said {
+    gm_modeline mode;
+    unsigned    kx, ky;
+    int         by_env;
+    bool        valid;
+};
+
+/* groovy_announce_status_due -- 1 when the line is due: the modeline
+ * announced, a scale or what imposes the mode differs from what was last
+ * said (or nothing was said yet). The state moves only when the line is due,
+ * so a picture after a picture of the same mode says nothing. */
+static inline int groovy_announce_status_due(struct groovy_announce_said *said,
+                                             const gm_modeline *m,
+                                             unsigned kx, unsigned ky, int by_env)
+{
+    if (!said || !m)
+        return 0;
+    if (said->valid && said->kx == kx && said->ky == ky
+        && said->by_env == (by_env ? 1 : 0)
+        && groovy_announce_modelines_equal(&said->mode, m))
+        return 0;
+    said->mode   = *m;
+    said->kx     = kx;
+    said->ky     = ky;
+    said->by_env = by_env ? 1 : 0;
+    said->valid  = true;
+    return 1;
+}
+
+/* groovy_announce_status_reason -- the reason the line may give. The
+ * launcher's reason (GROOVY_MODE_REASON) describes the mode it chose, so it is
+ * given only when that mode is the one announced, or when no mode was handed
+ * over at all (the launcher then explains why the receiver's own modes stay).
+ *
+ *   by_env           the mode announced is the one of GROOVY_MODE: the
+ *                    reason read, or NULL (the default of the case);
+ *   session_refused  GROOVY_MODE was set but not understood: never the
+ *                    reason of a mode that was not announced;
+ *   session_valid    GROOVY_MODE was read but this picture does not take
+ *                    place in it, so the receiver's own modes are announced;
+ *   otherwise        no GROOVY_MODE: the reason read, or NULL.
+ * Pure; the strings returned are constants, the reason is returned as given. */
+static inline const char *groovy_announce_status_reason(int by_env,
+                                                        int session_valid,
+                                                        int session_refused,
+                                                        int reason_set,
+                                                        const char *reason)
+{
+    if (by_env)
+        return reason_set ? reason : NULL;
+    if (session_refused)
+        return "GROOVY_MODE refused, see the message above";
+    if (session_valid)
+        return "picture outside the window of GROOVY_MODE";
+    return reason_set ? reason : NULL;
+}
+
+/* groovy_announce_status_format -- build the line into `dst`. `by_env`
+ * non-zero: GROOVY_MODE imposes the mode; zero: the pair pinned in the
+ * receiver. `reason` is shown as it is (passed as %s, never as a format); a
+ * NULL or empty reason reads as the default of the case. Integer arithmetic
+ * only, so the text does not depend on the locale. Returns the length written
+ * (cap-1 when cut, always zero-terminated), or -1 for an unusable argument. */
+static inline int groovy_announce_status_format(char *dst, size_t cap,
+                                                const gm_modeline *m,
+                                                unsigned kx, unsigned ky,
+                                                int by_env, const char *reason)
+{
+    uint64_t khz = 0u;
+    uint64_t h_centi = 0u;      /* kHz x 100 */
+    uint64_t v_centi = 0u;      /* Hz x 100 */
+    char     scale[32];
+    int      n;
+
+    if (!dst || cap == 0u)
+        return -1;
+    dst[0] = '\0';
+    if (!m)
+        return -1;
+
+    if (m->pclock_mhz > 0.0 && m->pclock_mhz < 4000.0)
+        khz = (uint64_t)(m->pclock_mhz * 1000.0 + 0.5);
+    if (m->h_total != 0u) {
+        h_centi = (khz * 100u + (uint64_t)m->h_total / 2u) / (uint64_t)m->h_total;
+        if (m->v_total != 0u) {
+            const uint64_t den = (uint64_t)m->h_total * (uint64_t)m->v_total;
+
+            v_centi = (khz * 100000u * (m->interlace ? 2u : 1u) + den / 2u) / den;
+        }
+    }
+    if (h_centi > 0xFFFFFFFFull) h_centi = 0xFFFFFFFFull;
+    if (v_centi > 0xFFFFFFFFull) v_centi = 0xFFFFFFFFull;
+
+    if (ky > 1u)
+        snprintf(scale, sizeof scale, "x%u/%u", kx, ky);
+    else
+        snprintf(scale, sizeof scale, "x%u", kx);
+
+    if (!reason || reason[0] == '\0')
+        reason = by_env ? GROOVY_ANNOUNCE_REASON_NONE : GROOVY_ANNOUNCE_REASON_PINNED;
+
+    n = snprintf(dst, cap, "mode: %u.%02u kHz %u.%02u Hz %u%c %u %s (%s) -- %s",
+                 (unsigned)(h_centi / 100u), (unsigned)(h_centi % 100u),
+                 (unsigned)(v_centi / 100u), (unsigned)(v_centi % 100u),
+                 (unsigned)m->v_active, m->interlace ? 'i' : 'p',
+                 (unsigned)m->h_active, scale,
+                 by_env ? "GROOVY_MODE" : "receiver pinned mode", reason);
+    if (n < 0) {
+        dst[0] = '\0';
+        return -1;
+    }
+    if ((size_t)n >= cap)
+        return (int)(cap - 1u);
+    return n;
 }
 
 #endif /* GROOVY_ANNOUNCE_H */
