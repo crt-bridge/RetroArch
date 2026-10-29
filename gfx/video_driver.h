@@ -1326,6 +1326,9 @@ enum groovy_frametime_slot
    GROOVY_FT_WORK,     /* core time minus the audio flush of the same
                         * iteration: the loop's own work, without the
                         * audio sync wait */
+   GROOVY_FT_COMPOSE,  /* the bridge laying the native picture into the
+                        * announced mode (inside the push slot, not added
+                        * to it) */
    GROOVY_FT_COUNT
 };
 #ifdef HAVE_GROOVY_BENCH

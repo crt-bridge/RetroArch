@@ -31,6 +31,14 @@
  *     validation).
  *   - BGR24 → RGB888 in-place swap mandatory before gm_send_blit.
  *
+ * The picture leaves at the size of the announced mode: the receiver serves
+ * the mode it is announced as received, so after the conversion and the
+ * reduction groovy_compose_frame (groovy_compose.h) lays the native picture
+ * into the width x lines of the last CMD_SWITCHRES, the way the receiver
+ * used to. The frame witness (GROOVY_DUMP_FRAME_PATH) therefore writes the
+ * COMPOSED picture, which is the one handed to libgm. The dims guard still
+ * judges the NATIVE size against the announced cache.
+ *
  * Audio started as a no-op here (video-only): groovy_push_audio returned
  * true immediately without emitting CMD_AUDIO. Compression started raw and
  * uncompressed only (compression = 0); both grew real support later in
@@ -112,6 +120,12 @@
  * call it; the unit-test bridge calls it too. Follows gm.h and
  * groovy_mode.h (pulled in by groovy_modeline.h above). */
 #include "groovy_announce.h"
+
+/* The picture at the size of the announced mode: the receiver serves the
+ * mode it is announced as received, so the emitter lays the native picture
+ * into it (groovy_compose_frame) before anything leaves. Pure, header only;
+ * the unit-test bridge includes it too. */
+#include "groovy_compose.h"
 
 /* The anonymous "[groovy_pacing] ack_lost" line from groovy_pacing.h's
  * default stderr fallback is silenced here -- the driver now prints its
@@ -544,6 +558,10 @@ typedef struct {
     uint64_t  reduction_refused[GROOVY_REDUCTION_REFUSED_PREREDUCED + 1]; /* frames refused, per cause */
     uint8_t  *down_buf;                    /* box destination, allocated as needed */
     size_t    down_cap;
+    uint8_t  *compose_buf;                 /* the picture at the size of the announced mode, grown once */
+    size_t    compose_cap;
+    gm_modeline announced_mode;            /* the modeline last sent by groovy_switchres_all */
+    bool      announced_valid;             /* false until the first announce of the session */
     uint64_t  downsample_dims_mismatch;     /* frames rejected, never distorted */
     uint64_t  downsample_prereduced_mismatch; /* frames already reduced by the video driver, not expected */
     uint64_t  downsample_ns_total;          /* box cost, read every 600 */
@@ -2208,6 +2226,7 @@ static void groovy_free(void *data)
 
     free(st->swap_buf);
     free(st->down_buf);
+    free(st->compose_buf);
     free(st->audio_buf);
     /* Lever b6: the calloc in groovy_new already zeroed the structure, so no
      * explicit initialization is needed at open time -- only this release,
@@ -2838,6 +2857,11 @@ static bool groovy_switchres_all(groovy_state_t *st, const gm_modeline *m)
      * (see groovy_servo.h), with no benefit, and would multiply the sites
      * to re-check. */
     groovy_servo_apply_ff(st, groovy_mode_of(&st->av_cache));
+
+    /* What the receivers were last told: groovy_push_video compares the next
+     * announce against it and does not repeat an identical one. */
+    st->announced_mode  = *m;
+    st->announced_valid = true;
 
     for (unsigned i = 0u; i < st->n_rx; i++) {
         if (st->rx[i].switchres_deferred) {
@@ -3929,11 +3953,61 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
      * tracked "current mode". */
     const enum groovy_mode split_mode = groovy_mode_of(&st->av_cache);
 
+    /* The picture at the size of the announced mode. The receiver serves the
+     * mode it was announced as received and no longer stretches the picture
+     * into it: the emitter lays the native picture (send_w x send_h, which
+     * the guard above just matched against the cache) into the mode of the
+     * last CMD_SWITCHRES, the way the receiver used to -- factor, centring,
+     * cut at the bottom and on the right. After the conversion and the
+     * reduction, before the split into fields, the duplicate comparison of
+     * libgm and the witness below, which all see this picture.
+     *
+     * The guard above works on the NATIVE size and keeps its role. This
+     * picture has, by construction, the size of the last announced mode, and
+     * the check just before the send makes sure of it: a BLIT of any other
+     * size than the last CMD_SWITCHRES is never sent. */
+    unsigned wire_w = 0u;
+    unsigned wire_h = 0u;
+    size_t   wire_bytes = 0u;
+    {
+        retro_time_t cmp_t0 = groovy_frametime_on()
+            ? cpu_features_get_time_usec() : 0;
+        const unsigned mode_w = st->announced_mode.h_active;
+        const unsigned mode_h = st->announced_mode.v_active;
+        const size_t   mode_bytes = (size_t)mode_w * (size_t)mode_h * 3u;
+
+        if (!st->announced_valid || mode_bytes == 0u)
+            return true;   /* nothing announced: soft-skip, session alive */
+        if (mode_bytes > st->compose_cap) {
+            uint8_t *grown = (uint8_t *)realloc(st->compose_buf, mode_bytes);
+            if (!grown)
+                return false;   /* soft error: drop frame, keep session alive */
+            st->compose_buf = grown;
+            st->compose_cap = mode_bytes;
+        }
+        if (!groovy_compose_frame(st->compose_buf, mode_w, mode_h, frame,
+                                  send_w, send_h,
+                                  groovy_compose_factor_pinned(send_w, send_h,
+                                                               mode_w, mode_h),
+                                  1u))
+            return true;   /* unusable mode: soft-skip */
+        frame      = st->compose_buf;
+        wire_w     = mode_w;
+        wire_h     = mode_h;
+        wire_bytes = mode_bytes;
+        if (cmp_t0)
+            groovy_frametime_add(GROOVY_FT_COMPOSE,
+                                 cpu_features_get_time_usec() - cmp_t0);
+    }
+    if (wire_w != st->announced_mode.h_active || wire_h != st->announced_mode.v_active)
+        return true;   /* never a BLIT of another size than the last announce */
+
     /* Witness of what actually goes out on the wire — after every guard, so
-     * only frames really emitted get sampled. No effect when
-     * GROOVY_DUMP_FRAME_PATH is absent. Bench build only. */
+     * only frames really emitted get sampled: it is the composed picture,
+     * the one handed to libgm. No effect when GROOVY_DUMP_FRAME_PATH is
+     * absent. Bench build only. */
 #ifdef HAVE_GROOVY_BENCH
-    groovy_dump_frame_ppm(frame, send_w, send_h);
+    groovy_dump_frame_ppm(frame, wire_w, wire_h);
 #endif
 
     /* Timer for the emission path — brackets the gm_send_blit* calls below,
@@ -4081,8 +4155,8 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
          * up on the two previous fields: that would break the continuity
          * GroovyMAME expects. */
         uint8_t field = groovy_field_for_frame(&st->rx[0].ack_state, st->frame_id);
-        size_t row_bytes   = (size_t)send_w * 3U;
-        size_t half_h      = (size_t)(send_h / 2U);
+        size_t row_bytes   = (size_t)wire_w * 3U;
+        size_t half_h      = (size_t)(wire_h / 2U);
         size_t field_bytes = row_bytes * half_h;
 
         uint8_t *fld = (uint8_t *)malloc(field_bytes);
@@ -4103,9 +4177,10 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
             st->fields_sent[field]++;
         emit_ok = ok;
     } else if (split_mode == GROOVY_MODE_480I) {
-        /* Split swap_buf (send_w × send_h × 3 RGB888) into two field buffers.
+        /* Split the composed picture (wire_w × wire_h × 3 RGB888, the whole
+         * mode: 480 lines) into two field buffers.
          * Field 0 = rows 0, 2, 4, ... (h/2 rows). Field 1 = rows 1, 3, 5, ...
-         * Per-row size = send_w * 3 bytes. Total per field = send_w * (send_h/2) * 3.
+         * Per-row size = wire_w * 3 bytes. Total per field = wire_w * (wire_h/2) * 3.
          *
          * Optimisation note: this allocates two small buffers per 480i frame.
          * If push_video shows allocation pressure during HIL, the cleaner path
@@ -4115,8 +4190,8 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
          * (record_groovy is video_threaded=false per EMT-05) and 480i frame
          * dimensions are bounded.
          */
-        size_t row_bytes = (size_t)send_w * 3U;
-        size_t half_h = (size_t)(send_h / 2U);
+        size_t row_bytes = (size_t)wire_w * 3U;
+        size_t half_h = (size_t)(wire_h / 2U);
         size_t field_bytes = row_bytes * half_h;
 
         uint8_t *fld0 = (uint8_t *)malloc(field_bytes);
@@ -4139,7 +4214,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
          * full frame in one CMD_BLIT_VSYNC. The announced modeline (240p or
          * 480p) is the same for every receiver; the frame is not split. */
         emit_ok = groovy_fan_out(st, GROOVY_EMIT_FULL, vsync_target, 0u,
-                                 frame, NULL, need);
+                                 frame, NULL, wire_bytes);
         fan_out_done = true;
     }
 
