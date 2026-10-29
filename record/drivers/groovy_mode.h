@@ -106,15 +106,15 @@ static inline enum groovy_mode groovy_mode_classify_policy(unsigned h, bool khz3
     return groovy_mode_classify(h);
 }
 
-/* groovy_mode_wanted — the regime a picture of w x h asks for. With a valid
- * mode of the session, every picture is asked in the session (first slice:
- * the rule of place comes next); without one, groovy_mode_classify_policy,
- * unchanged. */
+/* groovy_mode_wanted — the regime a picture of w x h asks for. In the mode of
+ * the session when the picture takes place in it (groovy_session_fits: its
+ * lines and columns do not exceed those of the mode plus the crop the session
+ * allows); otherwise the rule of before, groovy_mode_classify_policy,
+ * unchanged. Without a session nothing fits, and the rule is the only one. */
 static inline enum groovy_mode groovy_mode_wanted(const struct groovy_mode_state *ms,
                                                   unsigned w, unsigned h)
 {
-    (void)w;
-    if (ms->session && ms->session->valid)
+    if (groovy_session_fits(ms->session, w, h))
         return GROOVY_MODE_SESSION;
     return groovy_mode_classify_policy(h, ms->khz31);
 }
