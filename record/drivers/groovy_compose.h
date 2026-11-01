@@ -19,8 +19,9 @@
  *
  * `groovy_compose_factor_pinned` is a COPY of `xscale_pick` (the public fork
  * includes nothing from the receiver). A test compiles the receiver's header
- * on every run and requires both to agree on a whole grid of sizes. Do not
- * change one alone.
+ * on every run and requires both to agree on a whole grid of sizes (with no
+ * declared aspect), and to differ only on the portrait cells when the aspect
+ * says the screen is not a portrait. Do not change one alone.
  *
  * `groovy_compose_frame` also takes a vertical factor, 1 on the path of the
  * pinned modes; above 1 every source line is repeated that many times.
@@ -46,16 +47,32 @@
  * not fit 32 bits is refused (the picture is then left black). */
 #define GROOVY_COMPOSE_MAX_BYTES              0xFFFFFFFFull
 
+/* A declared screen proportion is usable when it is a finite number above
+ * zero (NaN and infinity fail the test). Anything else counts as absent. */
+#define GROOVY_COMPOSE_ASPECT_USABLE(a)       ((a) > 0.0f && (a) < 1.0e6f)
+
 /* groovy_compose_factor_pinned -- the horizontal factor, a whole number >= 1
  * that never goes beyond what fits in `mode_w`. Copy of `xscale_pick`
  * (receiver/xscale.h), which takes signed ints: a size above INT32_MAX reads
- * as negative there and gives 1, so it does here. */
+ * as negative there and gives 1, so it does here.
+ *
+ * One deliberate difference from the receiver: `aspect` is the screen
+ * proportion the core declares (`geometry.aspect_ratio`). The receiver only
+ * has the pixel size and takes every picture taller than wide (200 columns or
+ * more) for a portrait screen. A core that declares a screen at least as wide
+ * as tall (aspect >= 1: Sonic 2 in 480i, 320x448, declares 1.306) is not a
+ * portrait, whatever its pixel size: it keeps the whole factor that fits. A
+ * declared portrait (aspect < 1: the DS, 0.667) and an absent, zero,
+ * negative, NaN or infinite aspect keep the receiver's rule, so a call with
+ * aspect 0 is `xscale_pick` exactly. */
 static inline unsigned groovy_compose_factor_pinned(unsigned src_w, unsigned src_h,
-                                                    unsigned mode_w, unsigned mode_h)
+                                                    unsigned mode_w, unsigned mode_h,
+                                                    float aspect)
 {
     unsigned fit;
     double   want;
     unsigned k;
+    int      portrait;
 
     if (src_w == 0u || mode_w == 0u || src_w > 0x7FFFFFFFu || mode_w > 0x7FFFFFFFu)
         return 1u;
@@ -64,8 +81,9 @@ static inline unsigned groovy_compose_factor_pinned(unsigned src_w, unsigned src
         return 1u;
     if (src_h == 0u || mode_h == 0u || src_h > 0x7FFFFFFFu || mode_h > 0x7FFFFFFFu)
         return fit;
-    if (src_h > GROOVY_COMPOSE_SQUARE_PIXEL_MAX_LINES
-        && !(src_h > src_w && src_w >= GROOVY_COMPOSE_PORTRAIT_MIN_WIDTH))
+    portrait = src_h > src_w && src_w >= GROOVY_COMPOSE_PORTRAIT_MIN_WIDTH
+               && !(GROOVY_COMPOSE_ASPECT_USABLE(aspect) && aspect >= 1.0f);
+    if (src_h > GROOVY_COMPOSE_SQUARE_PIXEL_MAX_LINES && !portrait)
         return fit;
 
     /* square pixels: wanted width = mode_w x (src_h / mode_h) x (src_w / src_h) / (4/3) */

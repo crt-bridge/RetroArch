@@ -632,6 +632,11 @@ typedef struct {
      * GROOVY_FOLLOWERS_LEN_MAX plus the terminating zero, same as
      * settings->arrays.groovy_followers. */
     char followers_src[513];
+
+    /* The screen proportion the core last declared (geometry.aspect_ratio),
+     * 0 until it declares one. Read by the horizontal factor of the pinned
+     * modes: a declared landscape screen is never taken for a portrait. */
+    float declared_aspect;
 } groovy_state_t;
 
 /* GROOVY_DIM_HYSTERESIS_FRAMES moved to groovy_mode.h: same
@@ -4085,7 +4090,8 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
             groovy_session_factors(&st->session, send_w, send_h, &kx, &ky);
             by_env = 1;
         } else
-            kx = groovy_compose_factor_pinned(send_w, send_h, mode_w, mode_h);
+            kx = groovy_compose_factor_pinned(send_w, send_h, mode_w, mode_h,
+                                              st->declared_aspect);
 
         /* [groovy-conv] compose: the cost of this composition alone, one
          * line per 600 frames, next to the input-conversion line of the
@@ -4909,6 +4915,8 @@ static bool groovy_push_av_info(void *data, const struct retro_system_av_info *a
     groovy_state_t *st = (groovy_state_t *)data;
     if (!st || !st->gm || !av)
         return false;
+
+    st->declared_aspect = av->geometry.aspect_ratio;
 
     /* Diagnostic log on EVERY call — provides direct HIL evidence for the
      * next run so we can confirm the hypothesis empirically.
