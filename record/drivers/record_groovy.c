@@ -866,16 +866,18 @@ static void groovy_dump_frame_ppm(const uint8_t *wire,
         free(row);
         return;
     }
-    fprintf(f, "P6\n%u %u\n255\n", width, height);
-    for (y = 0u; y < (size_t)height; y++) {
+    if (fprintf(f, "P6\n%u %u\n255\n", width, height) < 0)
+        written = false;
+    for (y = 0u; written && y < (size_t)height; y++) {
         groovy_dump_row_ppm(row, wire + y * row_bytes, (size_t)width);
-        if (fwrite(row, 1u, row_bytes, f) != row_bytes) {
+        if (fwrite(row, 1u, row_bytes, f) != row_bytes)
             written = false;
-            break;
-        }
     }
     free(row);
-    fclose(f);
+    /* The buffered rows reach the disk at fclose: a full disk shows up
+     * here, not in fwrite. */
+    if (fclose(f) != 0)
+        written = false;
     if (!written) {
         (void)remove(tmp);   /* a short write leaves no file to be renamed */
         return;
