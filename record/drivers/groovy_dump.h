@@ -16,6 +16,14 @@
  * draws with a stale geometry (SwanStation never emits SET_GEOMETRY
  * after loading) and so cannot serve as a referee.
  *
+ * BYTE ORDER. The wire carries B, G, R for each pixel (upstream order);
+ * the witness file is a standard PPM P6, which is R, G, B. The file is
+ * therefore written from the wire frame through groovy_dump_row_ppm()
+ * below, one row at a time: a yellow pixel is 00 FF FF on the wire and
+ * FF FF 00 in the file, so any PPM reader shows the real colours, and
+ * the file stays comparable byte for byte to the picture a sink
+ * rebuilds from the wire in the same P6 order.
+ *
  * THREE VARIABLES, read once by record_groovy.c:
  *   GROOVY_DUMP_FRAME_PATH      file path; absent = witness off.
  *   GROOVY_DUMP_FRAME_INTERVAL  one frame kept out of every N, 60 by default (~1/s).
@@ -86,6 +94,28 @@ static inline unsigned groovy_dump_interval_parse(const char *s)
 static inline int groovy_dump_seq_parse(const char *s)
 {
     return (s && s[0] == '1' && s[1] == '\0') ? 1 : 0;
+}
+
+/* Puts one wire row (B, G, R per pixel) in the order a PPM P6 wants (R, G,
+ * B): dst[3x+0] = src[3x+2], dst[3x+1] = src[3x+1], dst[3x+2] = src[3x+0].
+ *
+ * `width` is in PIXELS; exactly width*3 bytes are read from src and
+ * written to dst, nothing beyond. src and dst must NOT overlap (the
+ * witness converts into a one-row scratch buffer, so the frame handed
+ * to libgm is never touched). A null pointer or a zero width does
+ * nothing. Pure: no I/O, no state. */
+static inline void groovy_dump_row_ppm(uint8_t *dst, const uint8_t *src,
+                                       size_t width)
+{
+    size_t x;
+
+    if (!dst || !src)
+        return;
+    for (x = 0; x < width; ++x) {
+        dst[3u * x + 0u] = src[3u * x + 2u];
+        dst[3u * x + 1u] = src[3u * x + 1u];
+        dst[3u * x + 2u] = src[3u * x + 0u];
+    }
 }
 
 /* Returns in dst the witness file name for frame `counter`.

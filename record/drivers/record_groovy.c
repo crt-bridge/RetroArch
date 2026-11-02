@@ -29,14 +29,17 @@
  *     (0x07 = CMD_BLIT_FIELD_VSYNC for interlaced — libgm's minimal viable
  *     implementation sends 0x06 only, consistent with the daemon's own
  *     validation).
- *   - BGR24 → RGB888 in-place swap mandatory before gm_send_blit.
+ *   - The wire carries the three bytes of a pixel in the order B, G, R
+ *     (upstream order): the BGR24 readback goes to gm_send_blit with no
+ *     byte swapped. The frame witness is the exception, see below.
  *
  * The picture leaves at the size of the announced mode: the receiver serves
  * the mode it is announced as received, so after the conversion and the
  * reduction groovy_compose_frame (groovy_compose.h) lays the native picture
  * into the width x lines of the last CMD_SWITCHRES, the way the receiver
  * used to. The frame witness (GROOVY_DUMP_FRAME_PATH) therefore writes the
- * COMPOSED picture, which is the one handed to libgm. The dims guard still
+ * COMPOSED picture, which is the one handed to libgm, written as a standard
+ * PPM (R, G, B) from the wire order (groovy_dump_row_ppm). The dims guard still
  * judges the NATIVE size against the announced cache.
  *
  * Audio started as a no-op here (video-only): groovy_push_audio returned
@@ -85,7 +88,7 @@
  *   toggle.
  *
  * STRIDE compliance:
- *   T-3-02 — BGR24 swap in bgr24_to_rgb888 (mandatory, verifiable via test)
+ *   T-3-02 — wire byte order B, G, R in the converters (verifiable via test)
  *   T-3-09 — swap_buf realloc with NULL-check; frame dropped on alloc fail
  *   T-3-10 — parse_receiver_config uses snprintf(out_ip, ip_cap, ...) — safe
  *   T-3-11 — vid->is_dupe honored (skip duplicate frames)
@@ -434,7 +437,7 @@ struct groovy_receiver {
 
 typedef struct {
     gm_handle          *gm;
-    uint8_t            *swap_buf;       /* BGR→RGB conversion scratch buffer */
+    uint8_t            *swap_buf;       /* converted frame scratch buffer (wire order B, G, R) */
     size_t              swap_cap;       /* current capacity in bytes */
     uint32_t            frame_id;       /* monotonic frame counter (per driver instance) */
     /* ++ on EVERY pass through the { vsync_target ... } block of
@@ -806,7 +809,11 @@ static bool        s_dump_resolved = false;
 static uint32_t    s_dump_counter  = 0u;
 static int         s_dump_seq      = 0;
 
-static void groovy_dump_frame_ppm(const uint8_t *rgb888,
+/* `wire` is the frame handed to libgm: three bytes per pixel in the wire
+ * order B, G, R. The file is a standard PPM P6 (R, G, B), written one row
+ * at a time through groovy_dump_row_ppm() and a one-row scratch buffer;
+ * `wire` itself is never modified. */
+static void groovy_dump_frame_ppm(const uint8_t *wire,
                                   unsigned width, unsigned height)
 {
     char     out[1024];
@@ -814,6 +821,9 @@ static void groovy_dump_frame_ppm(const uint8_t *rgb888,
     FILE    *f;
     int      n;
     uint32_t idx;
+    uint8_t *row;
+    size_t   row_bytes, y;
+    bool     written = true;
 
     if (!s_dump_resolved) {
         s_dump_resolved = true;
@@ -839,12 +849,32 @@ static void groovy_dump_frame_ppm(const uint8_t *rgb888,
     if (n <= 0 || n >= (int)sizeof(tmp))
         return;
 
-    f = fopen(tmp, "wb");
-    if (!f)
+    /* The scratch row comes first: if it cannot be had there is no witness
+     * for this frame, and no file is opened, so never one half written. */
+    row_bytes = (size_t)width * 3u;
+    row       = (uint8_t *)malloc(row_bytes);
+    if (!row)
         return;
+
+    f = fopen(tmp, "wb");
+    if (!f) {
+        free(row);
+        return;
+    }
     fprintf(f, "P6\n%u %u\n255\n", width, height);
-    (void)fwrite(rgb888, 1u, (size_t)width * (size_t)height * 3u, f);
+    for (y = 0u; y < (size_t)height; y++) {
+        groovy_dump_row_ppm(row, wire + y * row_bytes, (size_t)width);
+        if (fwrite(row, 1u, row_bytes, f) != row_bytes) {
+            written = false;
+            break;
+        }
+    }
+    free(row);
     fclose(f);
+    if (!written) {
+        (void)remove(tmp);   /* a short write leaves no file to be renamed */
+        return;
+    }
 
     /* rename() refuses to overwrite on Windows: remove the target first.
      * Also true in SEQUENCE mode, and that's not an oversight: nothing is
@@ -3227,7 +3257,8 @@ static int groovy_servo_freeze_current(void)
  * Protocol:
  *   1. Skip duplicate frames (vid->is_dupe == true — T-3-11 defense).
  *   2. Grow the swap buffer if needed (T-3-09: realloc with NULL-check).
- *   3. Swap BGR→RGB via bgr24_to_rgb888 (T-3-02).
+ *   3. Convert to the wire order B, G, R via bgr24_to_rgb888 (T-3-02);
+ *      BGR24 is already in that order, so its bytes pass through.
  *   4. Emit CMD_BLIT_VSYNC via gm_send_blit.
  *
  * Returns true on success, false on irrecoverable error. RetroArch
@@ -3325,7 +3356,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
 
     /* Fast-forward guard (quick-260712-aye). In fastmotion, the core runs unbridled and
      * push_video fires much faster than the display refresh. Each emit =
-     * readback swap + ~150-300 sendto calls (BLIT chunks); flooding the
+     * readback conversion + ~150-300 sendto calls (BLIT chunks); flooding the
      * daemon past ~60 fps corrupts the CRT image AND the sendto cost throttles
      * the fast-forward it should be speeding up. Silent drop if less than 1
      * mode period has elapsed since the last emit — the core keeps its full
@@ -3609,7 +3640,8 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
      * record_driver.c:302-394 selection. RGB565 (2 bytes/px), BGR24 (3
      * bytes/px), or ARGB8888 (4 bytes/px) — pre-cached in st->pix_fmt at init.
      *
-     * Daemon expects packed RGB888. Each helper handles the source-stride
+     * Daemon expects packed wire pixels, three bytes each in the order
+     * B, G, R (upstream order). Each helper handles the source-stride
      * distinction internally; bgr24/xrgb path crop to top-left send_w x send_h
      * (per Bug C fix block above). RGB565 is record_driver.c's default for
      * any core whose libretro pixel format isn't XRGB8888 — i.e. every 16-bit
