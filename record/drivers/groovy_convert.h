@@ -5,6 +5,13 @@
  * includes it to run, and the test bridge libgm/test/groovy_test_bridge.c
  * includes it to exercise it outside RetroArch.
  *
+ * Byte order on the wire. "RGB888" is the name of the Groovy wire format;
+ * its three bytes per pixel are in memory order B, G, R, exactly as upstream
+ * writes them (GroovyMAME copies its buffer as BGR24, and the MiSTer core
+ * reads word64[0 +: 24] with byte 0 as the blue). A yellow pixel (R 255,
+ * G 255, B 0) is therefore 00 FF FF on the wire, a red one 00 00 FF, a blue
+ * one FF 00 00. Every converter below writes dst[0]=B, dst[1]=G, dst[2]=R.
+ *
  * The three *_box functions are the converters
  * record_groovy.c used before, body unchanged: a ratio box filter that
  * computes, for EVERY output pixel, its source box with 64-bit divisions
@@ -13,8 +20,9 @@
  * stays: measured in the fork at 23.6 ms per frame for BGR24 1280x960,
  * enough to starve the audio buffer.
  *
- * The *_direct functions do that 1:1 case with no division: a byte swap
- * (BGR24, XRGB8888) or the same 5/6/5 bit replication (RGB565). The
+ * The *_direct functions do that 1:1 case with no division: a plain copy of
+ * the three colour bytes (BGR24, XRGB8888) or the same 5/6/5 bit replication
+ * (RGB565). The
  * dispatchers bgr24_to_rgb888(), xrgb8888_to_rgb888() and
  * rgb565_to_rgb888() -- the names record_groovy.c calls -- take the direct
  * path when source and destination dimensions are equal, and the box
@@ -29,10 +37,11 @@
 #include <stddef.h>
 
 /* ---------------------------------------------------------------------------
- * bgr24_to_rgb888 — in-place B↔R byte swap (Pitfall 2 mitigation).
+ * bgr24_to_rgb888 — BGR24 in, wire RGB888 out: the bytes are already in the
+ * wire order B, G, R, so the pixels pass through unchanged.
  *
- * glcore PBO readback produces BGR24; daemon expects RGB888. Swap is
- * mandatory for correct color on the CRT (STRIDE T-3-02).
+ * glcore PBO readback produces BGR24, and the wire carries B, G, R: no byte
+ * is swapped.
  *
  * Handles pitch != width*3 (e.g., GL row alignment padding): reads from
  * pitch-strided source rows, writes to tightly-packed destination rows.
@@ -51,9 +60,10 @@ static inline void groovy_bgr24_to_rgb888_box(uint8_t       *dst,
                              unsigned       src_h,
                              unsigned       src_pitch)
 {
-    /* Box-filter downscale + BGR → RGB (Bug E v2: text legibility fix).
+    /* Box-filter downscale of BGR24 pixels, written in the wire order B, G, R
+     * (Bug E v2: text legibility fix).
      * Same algorithm as xrgb8888_to_rgb888 but reads 3-byte BGR pixels.
-     * When src == dst dims, box is 1×1 and this is a 1:1 copy with swap. */
+     * When src == dst dims, box is 1×1 and this is a plain 1:1 copy. */
     for (unsigned dy = 0; dy < dst_h; ++dy) {
         unsigned sy0 = (unsigned)((size_t)dy * src_h / dst_h);
         unsigned sy1 = (unsigned)((size_t)(dy + 1u) * src_h / dst_h);
@@ -79,21 +89,22 @@ static inline void groovy_bgr24_to_rgb888_box(uint8_t       *dst,
                     ++n;
                 }
             }
-            dst_row[3u * dx + 0u] = (uint8_t)(r_acc / n);
-            dst_row[3u * dx + 1u] = (uint8_t)(g_acc / n);
-            dst_row[3u * dx + 2u] = (uint8_t)(b_acc / n);
+            dst_row[3u * dx + 0u] = (uint8_t)(b_acc / n);  /* B */
+            dst_row[3u * dx + 1u] = (uint8_t)(g_acc / n);  /* G */
+            dst_row[3u * dx + 2u] = (uint8_t)(r_acc / n);  /* R */
         }
     }
 }
 
 /* ---------------------------------------------------------------------------
  * xrgb8888_to_rgb888 — convert 32-bit XRGB8888 (RetroArch FFEMU_PIX_ARGB8888,
- * 4 bytes/pixel little-endian) to packed RGB888 (3 bytes/pixel) — Bug D fix.
+ * 4 bytes/pixel little-endian) to packed wire RGB888 (3 bytes/pixel) — Bug D fix.
  *
  * RetroArch's RETRO_PIXEL_FORMAT_XRGB8888 stores each pixel as a 32-bit value
  * 0x00RRGGBB in native byte order. On x86 (little-endian), the byte layout is:
  *   src[0]=B, src[1]=G, src[2]=R, src[3]=X (alpha/padding, ignored)
- * Daemon expects packed RGB888: dst[0]=R, dst[1]=G, dst[2]=B.
+ * The wire carries the first three bytes as they are: dst[0]=B, dst[1]=G,
+ * dst[2]=R.
  *
  * Same dst/src layout assumptions as bgr24_to_rgb888: dst contiguous
  * width*height*3, src pitch-strided height rows.
@@ -145,9 +156,9 @@ static inline void groovy_xrgb8888_to_rgb888_box(uint8_t       *dst,
                 }
             }
             /* n is at least 1 by clamp above */
-            dst_row[3u * dx + 0u] = (uint8_t)(r_acc / n);  /* R */
+            dst_row[3u * dx + 0u] = (uint8_t)(b_acc / n);  /* B */
             dst_row[3u * dx + 1u] = (uint8_t)(g_acc / n);  /* G */
-            dst_row[3u * dx + 2u] = (uint8_t)(b_acc / n);  /* B */
+            dst_row[3u * dx + 2u] = (uint8_t)(r_acc / n);  /* R */
         }
     }
 }
@@ -214,16 +225,16 @@ static inline void groovy_rgb565_to_rgb888_box(uint8_t       *dst,
                     ++n;
                 }
             }
-            dst_row[3u * dx + 0u] = (uint8_t)(r_acc / n);
-            dst_row[3u * dx + 1u] = (uint8_t)(g_acc / n);
-            dst_row[3u * dx + 2u] = (uint8_t)(b_acc / n);
+            dst_row[3u * dx + 0u] = (uint8_t)(b_acc / n);  /* B */
+            dst_row[3u * dx + 1u] = (uint8_t)(g_acc / n);  /* G */
+            dst_row[3u * dx + 2u] = (uint8_t)(r_acc / n);  /* R */
         }
     }
 }
 
 /* ---------------------------------------------------------------------------
  * The 1:1 paths. Same layouts as the box versions: src pitch-strided,
- * dst tightly packed w*3 bytes per row; dst[0]=R, dst[1]=G, dst[2]=B.
+ * dst tightly packed w*3 bytes per row; dst[0]=B, dst[1]=G, dst[2]=R.
  * ------------------------------------------------------------------------- */
 static inline void groovy_bgr24_to_rgb888_direct(uint8_t *dst,
         const uint8_t *src, unsigned w, unsigned h, unsigned src_pitch)
@@ -235,9 +246,9 @@ static inline void groovy_bgr24_to_rgb888_direct(uint8_t *dst,
             /* Read the whole pixel before writing: dst may alias src
              * (same buffer, pitch == w*3), as the box version allows. */
             const uint8_t b = s[0], g = s[1], r = s[2];
-            d[0] = r;
+            d[0] = b;
             d[1] = g;
-            d[2] = b;
+            d[2] = r;
         }
     }
 }
@@ -249,9 +260,9 @@ static inline void groovy_xrgb8888_to_rgb888_direct(uint8_t *dst,
         const uint8_t *s = src + (size_t)y * src_pitch;
         uint8_t       *d = dst + (size_t)y * w * 3u;
         for (unsigned x = 0; x < w; ++x, s += 4, d += 3) {
-            d[0] = s[2];   /* R */
+            d[0] = s[0];   /* B */
             d[1] = s[1];   /* G */
-            d[2] = s[0];   /* B */
+            d[2] = s[2];   /* R */
         }
     }
 }
@@ -267,9 +278,9 @@ static inline void groovy_rgb565_to_rgb888_direct(uint8_t *dst,
             uint32_t r5  = (col >> 11) & 0x1fu;
             uint32_t g6  = (col >>  5) & 0x3fu;
             uint32_t b5  = (col >>  0) & 0x1fu;
-            d[0] = (uint8_t)((r5 << 3) | (r5 >> 2));
-            d[1] = (uint8_t)((g6 << 2) | (g6 >> 4));
-            d[2] = (uint8_t)((b5 << 3) | (b5 >> 2));
+            d[0] = (uint8_t)((b5 << 3) | (b5 >> 2));   /* B */
+            d[1] = (uint8_t)((g6 << 2) | (g6 >> 4));   /* G */
+            d[2] = (uint8_t)((r5 << 3) | (r5 >> 2));   /* R */
         }
     }
 }
