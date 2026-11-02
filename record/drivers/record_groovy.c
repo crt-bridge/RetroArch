@@ -4185,7 +4185,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
             return true;   /* unusable mode: soft-skip */
         /* The first picture composed under the session gives the reference
          * size of its factors; it is never set again. */
-        if (split_mode == GROOVY_MODE_SESSION && st->session_ref_w == 0u) {
+        if (by_env && st->session_ref_w == 0u) {
             st->session_ref_w = send_w;
             st->session_ref_h = send_h;
         }
