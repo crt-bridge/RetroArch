@@ -37,6 +37,16 @@
  * the largest whole number that fits, and to 1 for a picture larger than
  * the mode (it is cut by the composition, as the receiver used to cut it).
  *
+ * The factors follow the size of the picture the core renders. The session
+ * remembers the size of the first picture it composed (the reference): while
+ * the pictures keep that size the factors are the engine's, brought back to
+ * what fits, so a handheld whose picture never changes keeps the small
+ * centred picture the engine chose. As soon as a picture differs from the
+ * reference, each axis takes the largest whole factor that fits the mode, so
+ * a core that changes its resolution in the middle of a game (368 columns in
+ * a fight, 256 on a menu) fills the mode as the first picture did, and goes
+ * back to the engine's factors when the first size comes back.
+ *
  * Pure: <stdbool.h>, <stddef.h>, <stdint.h>, <string.h>, nothing else. No
  * RetroArch, no gm.h, no I/O. Everything is static inline.
  */
@@ -287,12 +297,24 @@ static inline bool groovy_session_fits(const struct groovy_session_mode *sm,
         && (uint64_t)h <= (uint64_t)sm->v_active + (uint64_t)sm->crop_lines;
 }
 
-/* groovy_session_factors -- the factors of the session brought back to what
- * fits: the largest whole number not above the engine's factor such that the
- * scaled picture stays inside the mode; at least 1, and 1 for a picture that
- * is already larger than the mode. */
+/* groovy_session_factors -- the factors of the session for a picture of w x h.
+ *
+ * (ref_w, ref_h) is the size of the first picture composed under the session,
+ * or 0 x 0 while there is none.
+ *
+ *  - Reference absent (either side zero), or equal to the picture: the
+ *    engine's factors brought back to what fits, i.e. the largest whole
+ *    number not above the engine's factor such that the scaled picture stays
+ *    inside the mode.
+ *  - A picture of another size than the reference: on each axis the largest
+ *    whole number that fits the mode, whatever the engine chose, so the
+ *    picture fills the mode as the first one did.
+ *
+ * Either way at least 1, and 1 on an axis where the picture is already larger
+ * than the mode; the scaled picture never exceeds the mode. */
 static inline void groovy_session_factors(const struct groovy_session_mode *sm,
                                           unsigned w, unsigned h,
+                                          unsigned ref_w, unsigned ref_h,
                                           unsigned *kx, unsigned *ky)
 {
     unsigned x = 1u;
@@ -301,9 +323,16 @@ static inline void groovy_session_factors(const struct groovy_session_mode *sm,
     if (sm && sm->valid && w != 0u && h != 0u) {
         const unsigned fit_x = (w <= sm->h_active) ? (sm->h_active / w) : 1u;
         const unsigned fit_y = (h <= sm->v_active) ? (sm->v_active / h) : 1u;
+        const bool     resized = ref_w != 0u && ref_h != 0u
+                                 && (w != ref_w || h != ref_h);
 
-        x = (sm->kx < fit_x) ? sm->kx : fit_x;
-        y = (sm->ky < fit_y) ? sm->ky : fit_y;
+        if (resized) {
+            x = fit_x;
+            y = fit_y;
+        } else {
+            x = (sm->kx < fit_x) ? sm->kx : fit_x;
+            y = (sm->ky < fit_y) ? sm->ky : fit_y;
+        }
         if (x < 1u) x = 1u;
         if (y < 1u) y = 1u;
     }

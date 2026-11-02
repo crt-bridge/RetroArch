@@ -581,7 +581,12 @@ typedef struct {
     bool      mode_reason_set;
     bool      session_refused;
     struct groovy_announce_said mode_said;
-    uint64_t  downsample_dims_mismatch;     /* frames rejected, never distorted */
+    /* The size of the first picture composed under the session (zero until
+     * there is one), set once and kept to the end of the session: the factors
+     * of the session follow the size of the core against it. */
+    unsigned  session_ref_w;
+    unsigned  session_ref_h;
+    uint64_t  downsample_dims_mismatch;    /* frames rejected, never distorted */
     uint64_t  downsample_prereduced_mismatch; /* frames already reduced by the video driver, not expected */
     uint64_t  downsample_ns_total;          /* box cost, read every 600 */
     uint64_t  downsample_ns_max;
@@ -4116,10 +4121,13 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         int            by_env = 0;   /* GROOVY_MODE imposes the mode announced */
 
         /* The factors: those of the session, brought back to what fits,
-         * in the regime of the session; the receiver's own rule (the one it
-         * used to apply) in the pinned modes. */
+         * in the regime of the session, and following the size of the core
+         * once it differs from that of the first picture composed; the
+         * receiver's own rule (the one it used to apply) in the pinned
+         * modes. */
         if (split_mode == GROOVY_MODE_SESSION) {
-            groovy_session_factors(&st->session, send_w, send_h, &kx, &ky);
+            groovy_session_factors(&st->session, send_w, send_h,
+                                   st->session_ref_w, st->session_ref_h, &kx, &ky);
             by_env = 1;
         } else
             kx = groovy_compose_factor_pinned(send_w, send_h, mode_w, mode_h,
@@ -4175,6 +4183,12 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         if (!groovy_compose_frame(st->compose_buf, mode_w, mode_h, frame,
                                   send_w, send_h, kx, ky))
             return true;   /* unusable mode: soft-skip */
+        /* The first picture composed under the session gives the reference
+         * size of its factors; it is never set again. */
+        if (split_mode == GROOVY_MODE_SESSION && st->session_ref_w == 0u) {
+            st->session_ref_w = send_w;
+            st->session_ref_h = send_h;
+        }
         frame      = st->compose_buf;
         wire_w     = mode_w;
         wire_h     = mode_h;
