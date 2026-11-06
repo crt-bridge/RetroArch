@@ -131,6 +131,7 @@
  * into it (groovy_compose_frame) before anything leaves. Pure, header only;
  * the unit-test bridge includes it too. */
 #include "groovy_compose.h"
+#include "groovy_native.h"
 
 /* The anonymous "[groovy_pacing] ack_lost" line from groovy_pacing.h's
  * default stderr fallback is silenced here -- the driver now prints its
@@ -3162,6 +3163,29 @@ static void groovy_hold_flush_vers(groovy_state_t *st, struct groovy_receiver *r
     }
 }
 
+/* Announce the native-width factors to EVERY receiver, or to none. The frame
+ * is common to all of them: a receiver in a classic session cannot take it, so
+ * one refusal takes the contract back for everybody (and returns false, the
+ * caller then composes the picture as before). (1, 1) withdraws it. */
+static bool groovy_native_apply(groovy_state_t *st, unsigned kx, unsigned ky)
+{
+    bool ok = true;
+    for (unsigned i = 0u; i < st->n_rx; i++) {
+        if (kx > 1u || ky > 1u) {
+            if (!st->rx[i].pad || !st->rx[i].gm
+                || gm_set_native_scale(st->rx[i].gm, kx, ky) != 0)
+                ok = false;
+        } else if (st->rx[i].gm && st->rx[i].pad)
+            (void)gm_set_native_scale(st->rx[i].gm, 1u, 1u);
+    }
+    if (!ok) {
+        for (unsigned i = 0u; i < st->n_rx; i++)
+            if (st->rx[i].gm && st->rx[i].pad)
+                (void)gm_set_native_scale(st->rx[i].gm, 1u, 1u);
+    }
+    return ok;
+}
+
 static bool groovy_fan_out(groovy_state_t *st, enum groovy_emit_kind k,
                            uint16_t vsync, uint8_t field,
                            const uint8_t *a, const uint8_t *b, size_t len)
@@ -4113,6 +4137,8 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
      * size than the last CMD_SWITCHRES is never sent. */
     unsigned wire_w = 0u;
     unsigned wire_h = 0u;
+    unsigned native_kx = 1u;   /* native-width contract in force for this frame */
+    unsigned native_ky = 1u;
     size_t   wire_bytes = 0u;
     {
         const unsigned mode_w = st->announced_mode.h_active;
@@ -4175,6 +4201,54 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
                             st->mode_reason));
             groovy_log_forced(line);
         }
+        /* The native-width contract (GROOVY_NATIVE_SCALE=on, off by default):
+         * when the composition would be a pure repetition that fills the
+         * mode exactly, the native picture goes out as it is and the factors
+         * are announced (0x09) to every receiver; the receiver repeats the
+         * pixels. Any other layout, or a receiver that cannot take it,
+         * composes as before. The factors are withdrawn whenever it does not
+         * apply, and repeated twice a second against a lost datagram. */
+        {
+            static int native_on = -1;
+            if (native_on < 0)
+                native_on = groovy_native_wanted(getenv("GROOVY_NATIVE_SCALE")) ? 1 : 0;
+            if (native_on
+                && groovy_native_exact(send_w, send_h, mode_w, mode_h, kx, ky,
+                        groovy_announce_wire_has_fields(st->announced_valid,
+                                                        &st->announced_mode))
+                && groovy_native_apply(st, kx, ky)) {
+                native_kx = kx;
+                native_ky = ky;
+            } else if (native_on) {
+                (void)groovy_native_apply(st, 1u, 1u);
+            }
+        }
+        if (native_kx > 1u || native_ky > 1u) {
+            static unsigned s_nat_kx, s_nat_ky, s_nat_w, s_nat_h, s_nat_age;
+            if (s_nat_kx != native_kx || s_nat_ky != native_ky
+                || s_nat_w != send_w || s_nat_h != send_h) {
+                RARCH_LOG("[groovy] native-scale: %ux%u announced x%u,%u (mode %ux%u)\n",
+                          send_w, send_h, native_kx, native_ky, mode_w, mode_h);
+                s_nat_kx = native_kx; s_nat_ky = native_ky;
+                s_nat_w = send_w;     s_nat_h = send_h;
+                s_nat_age = 0u;
+            } else if (++s_nat_age >= 30u) {
+                s_nat_age = 0u;
+                for (unsigned i = 0u; i < st->n_rx; i++)
+                    if (st->rx[i].gm)
+                        (void)gm_resend_native_scale(st->rx[i].gm);
+            }
+        }
+        if (native_kx > 1u || native_ky > 1u) {
+            /* The picture stays native: nothing to compose, nothing to copy. */
+            if (by_env && st->session_ref_w == 0u) {
+                st->session_ref_w = send_w;
+                st->session_ref_h = send_h;
+            }
+            wire_w     = send_w;
+            wire_h     = send_h;
+            wire_bytes = (size_t)send_w * (size_t)send_h * 3u;
+        } else {
         if (mode_bytes > st->compose_cap) {
             uint8_t *grown = (uint8_t *)realloc(st->compose_buf, mode_bytes);
             if (!grown)
@@ -4195,6 +4269,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         wire_w     = mode_w;
         wire_h     = mode_h;
         wire_bytes = mode_bytes;
+        }
 #ifdef HAVE_GROOVY_BENCH
         if (cmp_on) {
             const uint64_t cmp_ns = groovy_pacing_mono_ns() - cmp_t0;
@@ -4212,7 +4287,10 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         }
 #endif /* HAVE_GROOVY_BENCH */
     }
-    if (wire_w != st->announced_mode.h_active || wire_h != st->announced_mode.v_active)
+    /* The announced mode is the wire size times the factors in force (1 and 1
+     * unless the native-width contract applies to this frame). */
+    if ((uint64_t)wire_w * native_kx != st->announced_mode.h_active
+        || (uint64_t)wire_h * native_ky != st->announced_mode.v_active)
         return true;   /* never a BLIT of another size than the last announce */
 
     /* Does the wire carry FIELDS? Judged on the modeline last announced --
