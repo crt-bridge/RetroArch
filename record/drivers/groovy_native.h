@@ -24,8 +24,8 @@
 
 #include "groovy_compose.h"
 
-/* The factor bound the wire accepts (one byte each, 1..8). */
-#define GROOVY_NATIVE_MAX_FACTOR 8u
+/* The factor bound the wire accepts (one byte each, 1..10). */
+#define GROOVY_NATIVE_MAX_FACTOR 10u
 
 /* GROOVY_NATIVE_SCALE: "on" / "1" asks for the contract, anything else (and an
  * absent variable) leaves it off. Off is the default: the wire is then bit for

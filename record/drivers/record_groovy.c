@@ -3230,7 +3230,10 @@ static unsigned groovy_native_apply(groovy_state_t *st, unsigned kx, unsigned ky
         /* On a wire of fields, a vertical factor above 1 would break the field order: only a
          * codec follower (its picture travels whole) takes it. An odd height cannot be cut. */
         const bool field_ok = !fields || (!(h & 1u) && (ky == 1u || rx->codec_w));
-        if (w > 0u && field_ok && rx->pad && rx->gm && gm_peer_native_ok(rx->gm)
+        /* factors 9 and 10 only for a codec follower (the client takes them); a hardware receiver
+         * keeps the bound of 8 until its daemon is the one that takes 10 */
+        const bool factor_ok = (kx <= 8u && ky <= 8u) || rx->codec_w;
+        if (w > 0u && field_ok && factor_ok && rx->pad && rx->gm && gm_peer_native_ok(rx->gm)
             && gm_set_native_place(rx->gm, kx, ky, w, h) == 0)
             takes[i] = true;
         else if (rx->gm && rx->pad)
