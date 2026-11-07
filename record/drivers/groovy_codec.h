@@ -4,8 +4,9 @@
  * (gm_send_codec_frame). The master is never in this path: the runloop only copies a picture into
  * a mailbox and goes on.
  *
- * Off by default: GROOVY_CODEC names the follower and the rate, e.g. "1:h264:20000" = the first
- * follower, H.264 4:4:4, 20000 kbit/s. (A key of GROOVY_FOLLOWERS will take over once the codec is
+ * Off by default: GROOVY_CODEC names the follower, the rate and the parity, e.g. "1:h264:20000:10" = the
+ * first follower, H.264 4:4:4, 20000 kbit/s, 10 % Reed-Solomon parity (the burst-loss table of
+ * libgm/test/test_shard_burst.c is why it is that low: under Wi-Fi bursts, parity buys little). (A key of GROOVY_FOLLOWERS will take over once the codec is
  * proven; for one follower an environment variable is enough.)
  *
  * The mailbox keeps the LATEST picture only: a codec that falls behind drops pictures, it never
@@ -19,13 +20,13 @@
 
 #include "groovy_nvenc.h"
 
-/* --- GROOVY_CODEC = <follower>:<codec>[:<kbit/s>] ---------------------------------------------
+/* --- GROOVY_CODEC = <follower>:<codec>[:<kbit/s>[:<parity %>]] -------------------------------------
  * follower: 1..4 (1 = the first follower of GROOVY_FOLLOWERS); codec: "h264"; kbit/s: 500..200000
- * (default 20000). Returns 1 and fills the outputs when well formed, 0 when absent or empty,
- * -1 when malformed (the caller says so and does NOT start a codec). Pure. */
-static inline int groovy_codec_parse(const char *s, unsigned *follower, unsigned *kbps)
+ * (default 20000); parity: 0..100 (default 10). Returns 1 and fills the outputs when well formed, 0
+ * when absent or empty, -1 when malformed (the caller says so and does NOT start a codec). Pure. */
+static inline int groovy_codec_parse(const char *s, unsigned *follower, unsigned *kbps, unsigned *parity)
 {
-    unsigned f = 0u, k = 20000u;
+    unsigned f = 0u, k = 20000u, par = 10u;
     const char *p = s;
     if (!s || s[0] == '\0') return 0;
     if (*p < '1' || *p > '4' || p[1] != ':') return -1;
@@ -40,10 +41,19 @@ static inline int groovy_codec_parse(const char *s, unsigned *follower, unsigned
         while (*p >= '0' && *p <= '9') { v = v * 10ul + (unsigned long)(*p - '0'); if (v > 1000000ul) return -1; p++; }
         if (v < 500ul || v > 200000ul) return -1;
         k = (unsigned)v;
+        if (*p == ':') {
+            unsigned long q = 0ul;
+            p++;
+            if (*p < '0' || *p > '9') return -1;
+            while (*p >= '0' && *p <= '9') { q = q * 10ul + (unsigned long)(*p - '0'); if (q > 1000ul) return -1; p++; }
+            if (q > 100ul) return -1;
+            par = (unsigned)q;
+        }
     }
     if (*p != '\0') return -1;
     if (follower) *follower = f;
     if (kbps) *kbps = k;
+    if (parity) *parity = par;
     return 1;
 }
 

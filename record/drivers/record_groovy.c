@@ -348,6 +348,7 @@ struct groovy_receiver {
     groovy_codec  *codec_w;
     unsigned       codec_kbps;
     int            codec_half_warned;
+    unsigned       codec_idr_asked;   /* keyframes this follower's client has asked for */
     int        audio_on;         /* active by default for a declared follower */
     int        inputs;          /* enum groovy_inputs (groovy_followers.h) */
     uint64_t   audio_errors;     /* gm_send_audio refusals, per receiver */
@@ -2199,9 +2200,9 @@ static void *groovy_new(const struct record_params *params)
             /* Codec follower: GROOVY_CODEC=<n>:h264[:kbps], off by default. It needs a padded follower and
              * NVENC; without either it stays in LZ4, and says so. */
             {
-                unsigned cf = 0u, ck = 0u;
+                unsigned cf = 0u, ck = 0u, cpar = 10u;
                 const char *cenv = getenv("GROOVY_CODEC");
-                const int pr = groovy_codec_parse(cenv, &cf, &ck);
+                const int pr = groovy_codec_parse(cenv, &cf, &ck, &cpar);
                 if (pr < 0)
                     RARCH_WARN("[groovy] GROOVY_CODEC=\"%s\" is malformed (<follower>:h264[:kbps]): no codec\n", cenv);
                 else if (pr == 1 && cf == kept + 1u) {
@@ -2215,7 +2216,8 @@ static void *groovy_new(const struct record_params *params)
                         if (rx->codec_w) {
                             rx->codec = GM_CODEC_H264;
                             rx->codec_kbps = ck;
-                            RARCH_LOG("[groovy] codec: follower %u in H.264 4:4:4, %u kbit/s, NVENC in its own thread\n", cf, ck);
+                            (void)gm_set_codec_parity(rx->gm, cpar);
+                            RARCH_LOG("[groovy] codec: follower %u in H.264 4:4:4, %u kbit/s, %u %% parity, NVENC in its own thread\n", cf, ck, cpar);
                         } else
                             RARCH_WARN("[groovy] codec: the encoder thread did not start: follower %u stays in LZ4\n", cf);
                     }
@@ -3357,8 +3359,16 @@ static bool groovy_fan_out(groovy_state_t *st, enum groovy_emit_kind k,
                         pic = whole;
                     }
                 }
-                if (pic && pw && ph)
-                    (void)groovy_codec_submit(rx->codec_w, pic, pw, ph, st->frame_id, vsync, st->codec_key_pending ? 1 : 0);
+                if (pic && pw && ph) {
+                    /* a keyframe after a new mode, and whenever the client says it lost its reference */
+                    const int asked = gm_codec_idr_requested(rx->gm);
+                    if (asked) {
+                        rx->codec_idr_asked++;
+                        RARCH_LOG("[groovy] codec: %s asked for a keyframe (%u so far)\n", rx->target, rx->codec_idr_asked);
+                    }
+                    (void)groovy_codec_submit(rx->codec_w, pic, pw, ph, st->frame_id, vsync,
+                                              (st->codec_key_pending || asked) ? 1 : 0);
+                }
                 free(whole);
                 codec_submitted = true;
                 rx->last_sent_id = st->frame_id;
