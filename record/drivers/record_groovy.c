@@ -3222,12 +3222,15 @@ static void groovy_hold_flush_vers(groovy_state_t *st, struct groovy_receiver *r
  * the receivers that take it (bit i = receiver i); 0 when none does, or when
  * w = 0 (withdraw it everywhere). */
 static unsigned groovy_native_apply(groovy_state_t *st, unsigned kx, unsigned ky,
-                                    unsigned w, unsigned h)
+                                    unsigned w, unsigned h, bool fields)
 {
     bool takes[32] = { false };
     for (unsigned i = 0u; i < st->n_rx && i < 32u; i++) {
         struct groovy_receiver *rx = &st->rx[i];
-        if (w > 0u && rx->pad && rx->gm && gm_peer_native_ok(rx->gm)
+        /* On a wire of fields, a vertical factor above 1 would break the field order: only a
+         * codec follower (its picture travels whole) takes it. An odd height cannot be cut. */
+        const bool field_ok = !fields || (!(h & 1u) && (ky == 1u || rx->codec_w));
+        if (w > 0u && field_ok && rx->pad && rx->gm && gm_peer_native_ok(rx->gm)
             && gm_set_native_place(rx->gm, kx, ky, w, h) == 0)
             takes[i] = true;
         else if (rx->gm && rx->pad)
@@ -4379,12 +4382,13 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
             if (native_on < 0)
                 native_on = groovy_native_wanted(getenv("GROOVY_NATIVE_SCALE")) ? 1 : 0;
             static int s_nat_state = -1;   /* said once per change, not per picture */
+            /* the field rules (ky = 1, even height) are applied per receiver by groovy_native_apply */
+            const bool nat_fields = groovy_announce_wire_has_fields(st->announced_valid,
+                                                                    &st->announced_mode);
             const bool nat_fits = native_on
-                && groovy_native_fits(send_w, send_h, mode_w, mode_h, kx, ky,
-                        groovy_announce_wire_has_fields(st->announced_valid,
-                                                        &st->announced_mode));
+                && groovy_native_fits(send_w, send_h, mode_w, mode_h, kx, ky, false);
             const unsigned nat_mask = nat_fits
-                ? groovy_native_apply(st, kx, ky, send_w, send_h) : 0u;
+                ? groovy_native_apply(st, kx, ky, send_w, send_h, nat_fields) : 0u;
             if (nat_mask != 0u) {
                 native_kx = kx;
                 native_ky = ky;
@@ -4401,7 +4405,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
                                   " are sent the composed one\n", nat_mask);
                 }
             } else if (native_on) {
-                (void)groovy_native_apply(st, 1u, 1u, 0u, 0u);
+                (void)groovy_native_apply(st, 1u, 1u, 0u, 0u, false);
                 if (nat_fits && s_nat_state != 0) {
                     s_nat_state = 0;
                     RARCH_LOG("[groovy] native-scale: not applied, no receiver has raised FLAG_NATIVE_OK"
