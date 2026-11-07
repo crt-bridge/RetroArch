@@ -567,6 +567,12 @@ typedef struct {
     size_t    down_cap;
     uint8_t  *compose_buf;                 /* the picture at the size of the announced mode, grown once */
     size_t    compose_cap;
+    /* Native contract, this frame only: bit i = receiver i takes the native
+     * picture (0 = none, every receiver gets the composed one). When it is not
+     * all of them, groovy_fan_out composes for the others from nat_frame. */
+    unsigned  nat_mask;
+    const uint8_t *nat_frame;              /* the native picture of this frame, valid during the call */
+    unsigned  nat_w, nat_h, nat_kx, nat_ky, nat_mode_w, nat_mode_h;
     gm_modeline announced_mode;            /* the modeline last sent by groovy_switchres_all */
     bool      announced_valid;             /* false until the first announce of the session */
     /* The mode of the session (GROOVY_MODE, groovy_session.h): read once at
@@ -3163,32 +3169,26 @@ static void groovy_hold_flush_vers(groovy_state_t *st, struct groovy_receiver *r
     }
 }
 
-/* Announce the native picture (CMD_NATIVE_PLACE: factors and size) to EVERY
- * receiver, or to none. The frame is common to all of them: a receiver in a
- * classic session, or that has not raised FLAG_NATIVE_OK, cannot take it, so
- * one refusal takes the contract back for everybody (and returns false, the
- * caller then composes the picture as before). w = 0 withdraws it. */
-static bool groovy_native_apply(groovy_state_t *st, unsigned kx, unsigned ky,
-                                unsigned w, unsigned h)
+/* Announce the native picture (CMD_NATIVE_PLACE: factors and size) to each
+ * receiver that takes it, and take it back from the others. A receiver in a
+ * classic session, or that has not raised FLAG_NATIVE_OK (a MiSTer, an older
+ * receiver, no status yet), cannot take it: it keeps being sent the composed
+ * picture, built by groovy_fan_out from the native one. Returns the mask of
+ * the receivers that take it (bit i = receiver i); 0 when none does, or when
+ * w = 0 (withdraw it everywhere). */
+static unsigned groovy_native_apply(groovy_state_t *st, unsigned kx, unsigned ky,
+                                    unsigned w, unsigned h)
 {
-    bool ok = true;
-    for (unsigned i = 0u; i < st->n_rx; i++) {
-        if (w > 0u) {
-            /* A receiver that has not raised FLAG_NATIVE_OK (an older one, or
-             * no status yet) cannot take the native picture. */
-            if (!st->rx[i].pad || !st->rx[i].gm
-                || !gm_peer_native_ok(st->rx[i].gm)
-                || gm_set_native_place(st->rx[i].gm, kx, ky, w, h) != 0)
-                ok = false;
-        } else if (st->rx[i].gm && st->rx[i].pad)
-            (void)gm_set_native_scale(st->rx[i].gm, 1u, 1u);
+    bool takes[32] = { false };
+    for (unsigned i = 0u; i < st->n_rx && i < 32u; i++) {
+        struct groovy_receiver *rx = &st->rx[i];
+        if (w > 0u && rx->pad && rx->gm && gm_peer_native_ok(rx->gm)
+            && gm_set_native_place(rx->gm, kx, ky, w, h) == 0)
+            takes[i] = true;
+        else if (rx->gm && rx->pad)
+            (void)gm_set_native_scale(rx->gm, 1u, 1u);
     }
-    if (!ok) {
-        for (unsigned i = 0u; i < st->n_rx; i++)
-            if (st->rx[i].gm && st->rx[i].pad)
-                (void)gm_set_native_scale(st->rx[i].gm, 1u, 1u);
-    }
-    return ok;
+    return groovy_native_receiver_mask(takes, st->n_rx);
 }
 
 static bool groovy_fan_out(groovy_state_t *st, enum groovy_emit_kind k,
@@ -3197,9 +3197,16 @@ static bool groovy_fan_out(groovy_state_t *st, enum groovy_emit_kind k,
 {
     bool master_ok    = false;
     bool master_served = false;   /* has the master already been served this turn? */
+    /* Native contract in force for some receivers only: the others are sent the
+     * composed picture, built once from the native one the first time one needs it. */
+    uint8_t *cmp0 = NULL, *cmp1 = NULL;
+    size_t   cmp_len = 0u;
+    bool     cmp_ready = false, cmp_failed = false;
 
     for (unsigned i = 0u; i < st->n_rx; i++) {
         struct groovy_receiver *rx = &st->rx[i];
+        const uint8_t *pa = a, *pb = b;
+        size_t         plen = len;
 
         /* Mode-change repeat (groovy_switchres_repeat.h), followers only:
          * AFTER the master's blit -- the master is index 0 and went first,
@@ -3232,8 +3239,47 @@ static bool groovy_fan_out(groovy_state_t *st, enum groovy_emit_kind k,
             continue;
         }
 
+        if (st->nat_mask != 0u && !(st->nat_mask & (1u << i))) {
+            if (!cmp_ready && !cmp_failed) {
+                const size_t mode_bytes = (size_t)st->nat_mode_w * st->nat_mode_h * 3u;
+                const size_t half_bytes = (size_t)st->nat_mode_w * (st->nat_mode_h / 2u) * 3u;
+                bool ok = false;
+                if (mode_bytes > st->compose_cap) {
+                    uint8_t *grown = (uint8_t *)realloc(st->compose_buf, mode_bytes);
+                    if (grown) { st->compose_buf = grown; st->compose_cap = mode_bytes; }
+                }
+                if (st->compose_cap >= mode_bytes) {
+                    if (k == GROOVY_EMIT_FULL) {
+                        cmp0 = (uint8_t *)malloc(mode_bytes);
+                        cmp_len = mode_bytes;
+                        ok = cmp0 && groovy_native_composed_variant(GROOVY_NATIVE_KIND_FULL, 0u,
+                                st->compose_buf, st->nat_mode_w, st->nat_mode_h, st->nat_frame,
+                                st->nat_w, st->nat_h, st->nat_kx, st->nat_ky, cmp0, NULL);
+                    } else if (k == GROOVY_EMIT_HALF) {
+                        cmp0 = (uint8_t *)malloc(half_bytes);
+                        cmp_len = half_bytes;
+                        ok = cmp0 && groovy_native_composed_variant(GROOVY_NATIVE_KIND_HALF, field,
+                                st->compose_buf, st->nat_mode_w, st->nat_mode_h, st->nat_frame,
+                                st->nat_w, st->nat_h, st->nat_kx, st->nat_ky, cmp0, NULL);
+                    } else {
+                        cmp0 = (uint8_t *)malloc(half_bytes);
+                        cmp1 = (uint8_t *)malloc(half_bytes);
+                        cmp_len = half_bytes;
+                        ok = cmp0 && cmp1 && groovy_native_composed_variant(GROOVY_NATIVE_KIND_FIELDS, 0u,
+                                st->compose_buf, st->nat_mode_w, st->nat_mode_h, st->nat_frame,
+                                st->nat_w, st->nat_h, st->nat_kx, st->nat_ky, cmp0, cmp1);
+                    }
+                }
+                cmp_ready = ok;
+                cmp_failed = !ok;
+            }
+            if (!cmp_ready)
+                continue;   /* no composed picture to give it this turn: skipped, like a saturated follower */
+            pa = cmp0; pb = cmp1; plen = cmp_len;
+        }
+
         int rc = groovy_send_payload(rx->gm, k, st->frame_id, vsync,
-                                     field, a, b, len);
+                                     field, pa, pb, plen);
         if (i == 0u) {
             master_ok    = (rc == 0);
             master_served = true;
@@ -3249,6 +3295,8 @@ static bool groovy_fan_out(groovy_state_t *st, enum groovy_emit_kind k,
         if (st->audio_hold_mode == GROOVY_AUDIO_HOLD_ON && rx->audio_on)
             groovy_hold_flush_vers(st, rx);
     }
+    free(cmp0);
+    free(cmp1);
     return master_ok;
 }
 
@@ -4218,25 +4266,38 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
             static int native_on = -1;
             if (native_on < 0)
                 native_on = groovy_native_wanted(getenv("GROOVY_NATIVE_SCALE")) ? 1 : 0;
-            static int s_nat_refused = -1;   /* said once per change, not per picture */
+            static int s_nat_state = -1;   /* said once per change, not per picture */
             const bool nat_fits = native_on
                 && groovy_native_fits(send_w, send_h, mode_w, mode_h, kx, ky,
                         groovy_announce_wire_has_fields(st->announced_valid,
                                                         &st->announced_mode));
-            if (nat_fits && groovy_native_apply(st, kx, ky, send_w, send_h)) {
+            const unsigned nat_mask = nat_fits
+                ? groovy_native_apply(st, kx, ky, send_w, send_h) : 0u;
+            if (nat_mask != 0u) {
                 native_kx = kx;
                 native_ky = ky;
                 native_active = true;
-                s_nat_refused = 0;
+                st->nat_frame = frame;
+                st->nat_w = send_w;  st->nat_h = send_h;
+                st->nat_kx = kx;     st->nat_ky = ky;
+                st->nat_mode_w = mode_w; st->nat_mode_h = mode_h;
+                const unsigned all = (st->n_rx >= 32u) ? 0xFFFFFFFFu : ((1u << st->n_rx) - 1u);
+                if (s_nat_state != (int)nat_mask) {
+                    s_nat_state = (int)nat_mask;
+                    if (nat_mask != all)
+                        RARCH_LOG("[groovy] native-scale: receivers 0x%x take the native picture, the others"
+                                  " are sent the composed one\n", nat_mask);
+                }
             } else if (native_on) {
                 (void)groovy_native_apply(st, 1u, 1u, 0u, 0u);
-                if (nat_fits && s_nat_refused != 1) {
-                    s_nat_refused = 1;
-                    RARCH_LOG("[groovy] native-scale: not applied, a receiver is in a classic session"
-                              " or has not raised FLAG_NATIVE_OK: composing as before\n");
+                if (nat_fits && s_nat_state != 0) {
+                    s_nat_state = 0;
+                    RARCH_LOG("[groovy] native-scale: not applied, no receiver has raised FLAG_NATIVE_OK"
+                              " in a padded session: composing as before\n");
                 } else if (!nat_fits)
-                    s_nat_refused = -1;
+                    s_nat_state = -1;
             }
+            st->nat_mask = nat_mask;
         }
         if (native_active) {
             static unsigned s_nat_kx, s_nat_ky, s_nat_w, s_nat_h, s_nat_age;
