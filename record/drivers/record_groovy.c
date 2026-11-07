@@ -132,6 +132,7 @@
  * the unit-test bridge includes it too. */
 #include "groovy_compose.h"
 #include "groovy_native.h"
+#include "groovy_codec.h"
 
 /* The anonymous "[groovy_pacing] ack_lost" line from groovy_pacing.h's
  * default stderr fallback is silenced here -- the driver now prints its
@@ -341,6 +342,12 @@ struct groovy_receiver {
     unsigned   mtu;               /* specific to this receiver */
     int        pad;              /* padded-session mode for THIS receiver;
                                    * always 0 for the master */
+    /* Codec follower (GROOVY_CODEC, groovy_codec.h): 0 = none, else GM_CODEC_H264. The picture is then
+     * encoded by codec_w's thread, never sent as pixels; the master is never one. */
+    int            codec;
+    groovy_codec  *codec_w;
+    unsigned       codec_kbps;
+    int            codec_half_warned;
     int        audio_on;         /* active by default for a declared follower */
     int        inputs;          /* enum groovy_inputs (groovy_followers.h) */
     uint64_t   audio_errors;     /* gm_send_audio refusals, per receiver */
@@ -573,6 +580,10 @@ typedef struct {
     unsigned  nat_mask;
     const uint8_t *nat_frame;              /* the native picture of this frame, valid during the call */
     unsigned  nat_w, nat_h, nat_kx, nat_ky, nat_mode_w, nat_mode_h;
+    /* Size of the picture handed to groovy_fan_out (the native one, or the one composed to the mode),
+     * and a keyframe owed to the codec followers after a new mode. */
+    unsigned  fan_w, fan_h;
+    bool      codec_key_pending;
     gm_modeline announced_mode;            /* the modeline last sent by groovy_switchres_all */
     bool      announced_valid;             /* false until the first announce of the session */
     /* The mode of the session (GROOVY_MODE, groovy_session.h): read once at
@@ -1021,7 +1032,7 @@ static void groovy_init_params_for(const groovy_state_t *st,
                                    gm_init_params *p)
 {
     memset(p, 0, sizeof(*p));
-    p->compression = (uint8_t)rx->compression;
+    p->compression = (uint8_t)(rx->codec ? rx->codec : rx->compression);
     p->sample_rate = rx->audio_on ? st->audio_rate_code : 0u;
     p->channels    = (p->sample_rate != 0u) ? st->audio_channels : 0u;
 }
@@ -2185,6 +2196,32 @@ static void *groovy_new(const struct record_params *params)
             rx->inputs       = fcfg[i].inputs;
             rx->audio_errors  = 0u;
 
+            /* Codec follower: GROOVY_CODEC=<n>:h264[:kbps], off by default. It needs a padded follower and
+             * NVENC; without either it stays in LZ4, and says so. */
+            {
+                unsigned cf = 0u, ck = 0u;
+                const char *cenv = getenv("GROOVY_CODEC");
+                const int pr = groovy_codec_parse(cenv, &cf, &ck);
+                if (pr < 0)
+                    RARCH_WARN("[groovy] GROOVY_CODEC=\"%s\" is malformed (<follower>:h264[:kbps]): no codec\n", cenv);
+                else if (pr == 1 && cf == kept + 1u) {
+                    const char *why = NULL;
+                    if (!rx->pad)
+                        RARCH_WARN("[groovy] codec: follower %u is not pad=on, the codec needs a padded session: it stays in LZ4\n", cf);
+                    else if (!groovy_codec_available(&why))
+                        RARCH_WARN("[groovy] codec: NVENC is not usable here (%s): follower %u stays in LZ4\n", why ? why : "?", cf);
+                    else {
+                        rx->codec_w = groovy_codec_start(rx->gm, ck, 60u, 1u);
+                        if (rx->codec_w) {
+                            rx->codec = GM_CODEC_H264;
+                            rx->codec_kbps = ck;
+                            RARCH_LOG("[groovy] codec: follower %u in H.264 4:4:4, %u kbit/s, NVENC in its own thread\n", cf, ck);
+                        } else
+                            RARCH_WARN("[groovy] codec: the encoder thread did not start: follower %u stays in LZ4\n", cf);
+                    }
+                }
+            }
+
             {
                 gm_init_params follower_init_params;
                 int            follower_init_rc, follower_init_err;
@@ -2349,6 +2386,10 @@ static void groovy_free(void *data)
     /* Followers: closed BEFORE the master, never the other way around --
      * rx[0].gm == st->gm, so closing it here too, on top of the
      * gm_close(st->gm) that follows, would close the same handle twice. */
+    for (unsigned i = 1u; i < st->n_rx; i++) {
+        groovy_codec_stop(st->rx[i].codec_w);   /* the thread uses the handle: it stops first */
+        st->rx[i].codec_w = NULL;
+    }
     for (unsigned i = 1u; i < st->n_rx; i++)
         if (st->rx[i].gm)
             gm_close(st->rx[i].gm);
@@ -2998,6 +3039,7 @@ static bool groovy_switchres_all(groovy_state_t *st, const gm_modeline *m)
      * announce against it and does not repeat an identical one. */
     st->announced_mode  = *m;
     st->announced_valid = true;
+    st->codec_key_pending = true;   /* a new mode: the codec followers start again on a keyframe */
 
     for (unsigned i = 0u; i < st->n_rx; i++) {
         if (st->rx[i].switchres_deferred) {
@@ -3202,6 +3244,7 @@ static bool groovy_fan_out(groovy_state_t *st, enum groovy_emit_kind k,
     uint8_t *cmp0 = NULL, *cmp1 = NULL;
     size_t   cmp_len = 0u;
     bool     cmp_ready = false, cmp_failed = false;
+    bool     codec_submitted = false;
 
     for (unsigned i = 0u; i < st->n_rx; i++) {
         struct groovy_receiver *rx = &st->rx[i];
@@ -3278,6 +3321,53 @@ static bool groovy_fan_out(groovy_state_t *st, enum groovy_emit_kind k,
             pa = cmp0; pb = cmp1; plen = cmp_len;
         }
 
+        /* A codec follower: its picture goes to its encoder thread, not on the wire from here. */
+        if (rx->codec_w) {
+            const char *why = NULL;
+            if (groovy_codec_failed(rx->codec_w, &why)) {
+                /* The encoder is gone: this follower goes back to LZ4 with a new CMD_INIT, and gets this picture as pixels. */
+                gm_init_params ip;
+                RARCH_WARN("[groovy] codec: %s -- follower %s goes back to LZ4\n", why ? why : "failed", rx->target);
+                groovy_codec_stop(rx->codec_w);
+                rx->codec_w = NULL;
+                rx->codec = 0;
+                groovy_init_params_for(st, rx, &ip);
+                (void)gm_send_init(rx->gm, &ip);
+            } else if (k == GROOVY_EMIT_HALF) {
+                if (!rx->codec_half_warned) {
+                    rx->codec_half_warned = 1;
+                    RARCH_WARN("[groovy] codec: one field per frame (GroovyMAME style) is not encoded: follower %s gets nothing\n", rx->target);
+                }
+                continue;
+            } else {
+                const bool composed = (st->nat_mask != 0u && !(st->nat_mask & (1u << i)));
+                const unsigned pw = composed ? st->nat_mode_w : st->fan_w;
+                const unsigned ph = composed ? st->nat_mode_h : st->fan_h;
+                const uint8_t *pic = pa;
+                uint8_t *whole = NULL;
+                if (k == GROOVY_EMIT_FIELDS) {
+                    /* two fields back into one picture: the codec carries progressive frames */
+                    const size_t row = (size_t)pw * 3u;
+                    whole = (uint8_t *)malloc(row * ph);
+                    if (whole) {
+                        for (size_t r = 0; r < (size_t)(ph / 2u); r++) {
+                            memcpy(whole + (2u * r) * row, pa + r * row, row);
+                            memcpy(whole + (2u * r + 1u) * row, pb + r * row, row);
+                        }
+                        pic = whole;
+                    }
+                }
+                if (pic && pw && ph)
+                    (void)groovy_codec_submit(rx->codec_w, pic, pw, ph, st->frame_id, vsync, st->codec_key_pending ? 1 : 0);
+                free(whole);
+                codec_submitted = true;
+                rx->last_sent_id = st->frame_id;
+                rx->has_sent     = 1;
+                groovy_sat_note_sent(&rx->sat, st->frame_id);
+                continue;
+            }
+        }
+
         int rc = groovy_send_payload(rx->gm, k, st->frame_id, vsync,
                                      field, pa, pb, plen);
         if (i == 0u) {
@@ -3297,6 +3387,7 @@ static bool groovy_fan_out(groovy_state_t *st, enum groovy_emit_kind k,
     }
     free(cmp0);
     free(cmp1);
+    if (codec_submitted) st->codec_key_pending = false;
     return master_ok;
 }
 
@@ -4363,6 +4454,8 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
         }
 #endif /* HAVE_GROOVY_BENCH */
     }
+    st->fan_w = wire_w;
+    st->fan_h = wire_h;
     /* The announced mode is the wire size times the factors in force (1 and 1
      * unless the native-width contract applies to this frame). */
     if (native_active
