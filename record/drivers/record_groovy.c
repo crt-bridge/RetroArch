@@ -349,6 +349,7 @@ struct groovy_receiver {
     unsigned       codec_kbps;
     int            codec_half_warned;
     unsigned       codec_idr_asked;   /* keyframes this follower's client has asked for */
+    unsigned       codec_log_n;       /* pictures submitted since the last [groovy-codec] line */
     int        audio_on;         /* active by default for a declared follower */
     int        inputs;          /* enum groovy_inputs (groovy_followers.h) */
     uint64_t   audio_errors;     /* gm_send_audio refusals, per receiver */
@@ -3368,6 +3369,16 @@ static bool groovy_fan_out(groovy_state_t *st, enum groovy_emit_kind k,
                     }
                     (void)groovy_codec_submit(rx->codec_w, pic, pw, ph, st->frame_id, vsync,
                                               (st->codec_key_pending || asked) ? 1 : 0);
+                    /* one line per 600 pictures (ten seconds): what the encoder thread did, to be read after the run */
+                    if (++rx->codec_log_n >= 600u) {
+                        groovy_codec_stats cs;
+                        rx->codec_log_n = 0u;
+                        groovy_codec_get_stats(rx->codec_w, &cs);
+                        RARCH_LOG("[groovy-codec] %s %ux%u submitted=%llu encoded=%llu replaced=%llu errors=%llu "
+                                  "encode_last=%.2fms encode_worst=%.2fms keyframes_asked=%u\n",
+                                  rx->target, pw, ph, cs.submitted, cs.encoded, cs.overwritten, cs.errors,
+                                  cs.last_us / 1000.0, cs.worst_us / 1000.0, rx->codec_idr_asked);
+                    }
                 }
                 free(whole);
                 codec_submitted = true;
