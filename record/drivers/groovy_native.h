@@ -34,6 +34,28 @@ static inline bool groovy_native_wanted(const char *env)
         || (env[0] == 'o' && env[1] == 'n' && env[2] == '\0');
 }
 
+/* Can the picture go out native AND PLACED (CMD_NATIVE_PLACE, 0x0A)? The
+ * enlarged picture (send_w * kx by send_h * ky) must fit the mode; the
+ * receiver centres it with the same floor as the composition (black borders
+ * around). It must also be worth it: fewer pixels on the wire than the mode.
+ * `fields` is true when the wire carries fields (480i): ky stays 1 and the
+ * height is even (the receiver refuses the rest, and so do we). */
+static inline bool groovy_native_fits(unsigned send_w, unsigned send_h,
+                                      unsigned mode_w, unsigned mode_h,
+                                      unsigned kx, unsigned ky, bool fields)
+{
+    if (kx < 1u || kx > GROOVY_NATIVE_MAX_FACTOR) return false;
+    if (ky < 1u || ky > GROOVY_NATIVE_MAX_FACTOR) return false;
+    if (send_w == 0u || send_h == 0u) return false;
+    if (send_w > 0xFFFFu || send_h > 0xFFFFu) return false;   /* u16 on the wire */
+    if (fields && (ky > 1u || (send_h & 1u))) return false;
+    if ((uint64_t)send_w * kx > (uint64_t)mode_w) return false;
+    if ((uint64_t)send_h * ky > (uint64_t)mode_h) return false;
+    /* nothing to gain when the picture already is the mode */
+    if ((uint64_t)send_w * send_h >= (uint64_t)mode_w * mode_h) return false;
+    return true;
+}
+
 /* Can the picture go out native? `fields` is true when the wire carries
  * fields (480i): a vertical factor above 1 would repeat lines and break the
  * field order, so the receiver refuses it and so do we. */
