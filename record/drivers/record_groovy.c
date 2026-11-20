@@ -369,9 +369,6 @@ struct groovy_receiver {
      * follows right after another announce. calloc zeroes both. --- */
     struct groovy_open_knock       open_knock;
     uint64_t                       last_announce_ms;
-    /* Instant (ms) of the last CMD_SWITCHRES attempted to this receiver, any
-     * site: the reference of the periodic mode refresh (groovy_mode_refresh.h). */
-    uint64_t                       last_switchres_ms;
 
     /* --- Mode-change repeat (groovy_switchres_repeat.h). Armed by
      * groovy_switchres_all for FOLLOWERS only (index >= 1), with a copy of
@@ -1060,8 +1057,7 @@ static void groovy_init_params_for(const groovy_state_t *st,
  * ------------------------------------------------------------------------- */
 enum groovy_announce_cmd  { GROOVY_ANNOUNCE_INIT = 0, GROOVY_ANNOUNCE_SWITCHRES = 1 };
 enum groovy_announce_site { GROOVY_SITE_OPENING = 0, GROOVY_SITE_REANNOUNCE = 1,
-                           GROOVY_SITE_SWITCHRES_ALL = 2, GROOVY_SITE_SWITCHRES_REPEAT = 3,
-                           GROOVY_SITE_REFRESH = 4 };
+                           GROOVY_SITE_SWITCHRES_ALL = 2, GROOVY_SITE_SWITCHRES_REPEAT = 3 };
 #define GROOVY_ANNOUNCE_NOT_READY 1   /* reserved rc: no geometry to carry */
 
 static const char *groovy_role_name(int r);   /* defined further below, with the named traces */
@@ -1071,7 +1067,7 @@ static void groovy_announce_note(const groovy_state_t *st, struct groovy_receive
                                 int rc, int wsa, uint64_t t_ns)
 {
     static const char *const cmd_name[]  = { "init", "switchres" };
-    static const char *const site_name[] = { "opening", "reannounce", "switchres_all", "switchres_repeat", "refresh" };
+    static const char *const site_name[] = { "opening", "reannounce", "switchres_all", "switchres_repeat" };
     const char *issue;
 
     if (rc == GROOVY_ANNOUNCE_NOT_READY) { issue = "not_ready"; wsa = 0; }
@@ -1080,11 +1076,8 @@ static void groovy_announce_note(const groovy_state_t *st, struct groovy_receive
     /* Shared open-knock timer: restarted by every announce that was really
      * attempted, whatever the site -- never by a not_ready one, where
      * nothing went out. Same clock as the now_ms of groovy_push_video. */
-    if (rc != GROOVY_ANNOUNCE_NOT_READY) {
+    if (rc != GROOVY_ANNOUNCE_NOT_READY)
         rx->last_announce_ms = t_ns / 1000000u;
-        if (cmd == GROOVY_ANNOUNCE_SWITCHRES)
-            rx->last_switchres_ms = t_ns / 1000000u;
-    }
     RARCH_LOG("[groovy-annonce] target=%s role=%s cmd=%s site=%s issue=%s wsa=%d "
               "frame=%u t_ns=%llu\n",
               rx->target, groovy_role_name(rx->role), cmd_name[cmd], site_name[site],
@@ -3001,13 +2994,18 @@ static void groovy_mode_refresh_maybe(groovy_state_t *st, struct groovy_receiver
     if (!st || !rx || !rx->gm) return;
     if (!groovy_mode_refresh_due(st->mode_refresh_ms, st->announced_valid ? 1 : 0,
                                  rx->switchres_deferred ? 1 : 0,
-                                 rx->last_switchres_ms, now_ms))
+                                 rx->last_announce_ms, now_ms))
         return;
     rc   = gm_send_switchres(rx->gm, &st->announced_mode);
     wsa  = gm_last_announce_error(rx->gm);
     t_ns = groovy_pacing_mono_ns();
-    groovy_announce_note(st, rx, GROOVY_ANNOUNCE_SWITCHRES, GROOVY_SITE_REFRESH,
-                        rc, wsa, t_ns);
+    /* Its own trace, not a site of [groovy-annonce] (the bench readers know
+     * four sites): one line per refresh, i.e. one per interval and receiver.
+     * It restarts the shared announce timer, the reference of the next one. */
+    rx->last_announce_ms = t_ns / 1000000u;
+    RARCH_LOG("[groovy-emit] mode-refresh: target=%s role=%s issue=%s wsa=%d frame=%u t_ns=%llu\n",
+              rx->target, groovy_role_name(rx->role), rc == 0 ? "sent" : "failed", wsa,
+              (unsigned)st->frame_id, (unsigned long long)t_ns);
 }
 
 /* ---------------------------------------------------------------------------
