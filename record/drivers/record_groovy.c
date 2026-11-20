@@ -2955,7 +2955,7 @@ static void groovy_reannounce_flush_deferred(groovy_state_t *st, struct groovy_r
      * to this receiver: a stock MiSTer core wipes its modeline on every
      * CMD_INIT (setInit allocates a fresh state) and skips every frame until
      * the next CMD_SWITCHRES, yet it acknowledges each frame header -- so
-     * `link.synced` is true within a few frames and proves neither a mode nor
+     * the link-sync flag is true within a few frames and proves neither a mode nor
      * a picture. The cancellation that used to sit here left such a receiver
      * black for good. A receiver that really kept its mode sees the same
      * modeline twice, which every receiver of the protocol accepts (the
