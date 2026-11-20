@@ -40,7 +40,8 @@
  * modeline the launcher chose, announced as given. The other three are the
  * receiver's pinned modes, the path of fall-back and the default path. */
 enum groovy_mode { GROOVY_MODE_240P_SUPER_RES = 0, GROOVY_MODE_480I = 1, GROOVY_MODE_480P = 2,
-                   GROOVY_MODE_SESSION = 3 };   /* moved from record_groovy.h */
+                   GROOVY_MODE_SESSION = 3,     /* moved from record_groovy.h */
+                   GROOVY_MODE_NATIVE = 4 };    /* the core's own geometry, announced as it is */
 
 #define GROOVY_MODE_480I_ABOVE_LINES   280u                 /* 480i threshold */
 #define GROOVY_DIM_HYSTERESIS_FRAMES   15u                  /* moved from record_groovy.c */
@@ -87,6 +88,8 @@ struct groovy_mode_state {
     uint64_t dims_drops;     /* frames refused: size != announced, same regime */
     bool     khz31;          /* session policy: the receiver takes 31 kHz (zero = off) */
     const struct groovy_session_mode *session;   /* the mode of the session; NULL = none (zero = none) */
+    bool     native_fallback;  /* a picture that does not fit the session is announced at its native geometry,
+                                * not in the receiver's pinned table (zero = the pinned table) */
 };
 /* A zeroed struct (calloc) is the valid initial state. */
 
@@ -109,13 +112,17 @@ static inline enum groovy_mode groovy_mode_classify_policy(unsigned h, bool khz3
 /* groovy_mode_wanted — the regime a picture of w x h asks for. In the mode of
  * the session when the picture takes place in it (groovy_session_fits: its
  * lines and columns do not exceed those of the mode plus the crop the session
- * allows); otherwise the rule of before, groovy_mode_classify_policy,
- * unchanged. Without a session nothing fits, and the rule is the only one. */
+ * allows); otherwise, with the native fallback on, the native
+ * regime -- the mode follows the core, whatever the screen; otherwise the rule
+ * of before, groovy_mode_classify_policy, unchanged. Without a session
+ * nothing fits. */
 static inline enum groovy_mode groovy_mode_wanted(const struct groovy_mode_state *ms,
                                                   unsigned w, unsigned h)
 {
     if (groovy_session_fits(ms->session, w, h))
         return GROOVY_MODE_SESSION;
+    if (ms->native_fallback)
+        return GROOVY_MODE_NATIVE;
     return groovy_mode_classify_policy(h, ms->khz31);
 }
 
@@ -137,6 +144,7 @@ static inline const char *groovy_mode_name(enum groovy_mode m)
     case GROOVY_MODE_480I: return "480i";
     case GROOVY_MODE_480P: return "480p";
     case GROOVY_MODE_SESSION: return "session";
+    case GROOVY_MODE_NATIVE:  return "native";
     default:               return "240p_super_res";
     }
 }
