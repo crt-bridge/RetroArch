@@ -2142,6 +2142,41 @@ static void *groovy_new(const struct record_params *params)
     double   native_hz = (params && params->samplerate > 0.0)
                        ? params->samplerate : 0.0;
     uint8_t  code      = groovy_audio_rate_code(native_hz);
+    /* Bench lever: GROOVY_AUDIO_RATE=22050|44100|48000 forces the
+     * WIRE frequency, the resampler below bridging the native one. Asked for
+     * because a stock MiSTer core may resample a 44100 Hz stream to its own
+     * output rate with a crude filter: sending 48000 Hz lets this driver do
+     * it. Anything else is named and ignored. */
+    {
+        const char *arate = getenv("GROOVY_AUDIO_RATE");
+
+        /* Measured on a SuperStation, 2026-11-20: a 44100 Hz stream played
+         * "rough" there and perfectly smooth locally; the same audio sent at
+         * 48000 Hz (this driver resampling) was "much better". A MiSTer core
+         * resamples to its own output rate with a crude filter. So toward a
+         * MiSTer core (padded headers: GROOVY_PAD=headers, or a probe that
+         * found one) a 44100 Hz core goes out at 48000 Hz, unless
+         * GROOVY_AUDIO_RATE says otherwise. */
+        if ((!arate || arate[0] == '\0') && code == 2u
+            && st->pad_master == GROOVY_PAD_MODE_HEADERS) {
+            code = 3u;
+            RARCH_LOG("[groovy] audio: wire rate 48000 Hz toward a MiSTer core "
+                      "(its own resampling of 44100 Hz is crude; "
+                      "GROOVY_AUDIO_RATE=44100 keeps the core's rate)\n");
+        }
+        if (arate && arate[0] != '\0' && code != 0u) {
+            if (!strcmp(arate, "22050"))      code = 1u;
+            else if (!strcmp(arate, "44100")) code = 2u;
+            else if (!strcmp(arate, "48000")) code = 3u;
+            else
+                RARCH_WARN("[groovy] GROOVY_AUDIO_RATE=\"%s\" not understood "
+                           "(expected 22050, 44100 or 48000): the core's own "
+                           "rate stays\n", arate);
+            if (code != groovy_audio_rate_code(native_hz))
+                RARCH_LOG("[groovy] audio: wire rate forced to %u Hz by "
+                          "GROOVY_AUDIO_RATE\n", groovy_audio_rate_hz(code));
+        }
+    }
     unsigned wire_hz   = groovy_audio_rate_hz(code);
     /* The "GROOVY_AUDIO=off on the master -> code=0 for the whole
      * session" short-circuit is gone from here. st->audio_rate_code is
