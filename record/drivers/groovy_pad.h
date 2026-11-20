@@ -51,4 +51,43 @@ static inline const char *groovy_pad_name(int on)
     return on ? "on" : "off";
 }
 
+/* The MASTER's setting is richer than the boolean above with the MiSTer support: two
+ * more words for a MiSTer core forked to take padded HEADERS (not the full
+ * padded session -- see gm.h, GM_PAD_HEADERS).
+ *   off      0  the original forms (default)
+ *   on       1  the full padded session (crt-bridge receiver or client)
+ *   headers  2  the four short headers padded, classic chunking
+ *   probe    3  ask the peer first (CMD_GET_VERSION): headers if it is the
+ *               forked core, otherwise the original forms -- and, toward the
+ *               original MiSTer core, no audio (its 3-byte header dies on Wi-Fi)
+ * Same strictness as groovy_pad_parse: anything else -> -1, the caller names
+ * the fallback. groovy_pad_parse itself is unchanged: on/off only. */
+#define GROOVY_PAD_MODE_OFF      0
+#define GROOVY_PAD_MODE_ON       1
+#define GROOVY_PAD_MODE_HEADERS  2
+#define GROOVY_PAD_MODE_PROBE    3
+
+static inline int groovy_pad_mode_parse(const char *s)
+{
+    int p = groovy_pad_parse(s);
+
+    if (p >= 0)
+        return p;
+    if (s && !strcmp(s, "headers"))
+        return GROOVY_PAD_MODE_HEADERS;
+    if (s && !strcmp(s, "probe"))
+        return GROOVY_PAD_MODE_PROBE;
+    return -1;
+}
+
+static inline const char *groovy_pad_mode_name(int mode)
+{
+    switch (mode) {
+    case GROOVY_PAD_MODE_ON:      return "on";
+    case GROOVY_PAD_MODE_HEADERS: return "headers";
+    case GROOVY_PAD_MODE_PROBE:   return "probe";
+    default:                      return "off";
+    }
+}
+
 #endif /* GROOVY_PAD_H */

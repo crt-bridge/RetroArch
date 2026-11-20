@@ -504,8 +504,10 @@ typedef struct {
     /* --- Compression. Set at session opening, never touched afterwards. --- */
     enum groovy_compression_mode compression_mode;   /* off by default */
 
-    /* --- Padded session towards the MASTER. 0 or 1, resolved once in the
-     * precedence block below, then handed to gm_set_padding(st->gm, ...).
+    /* --- Padded session towards the MASTER. A GROOVY_PAD_MODE_* value
+     * (off, on, headers, probe -- groovy_pad.h), resolved once in the
+     * precedence block below, then handed to libgm at opening ("probe" is
+     * settled there, by asking the peer).
      * A follower's own padding lives in struct groovy_receiver::pad, set
      * from its GROOVY_FOLLOWERS pad= key -- this field never touches
      * that. --- */
@@ -1451,16 +1453,16 @@ static void *groovy_new(const struct record_params *params)
          * per entry, from its GROOVY_FOLLOWERS pad= key. */
         env = getenv("GROOVY_PAD");
         if (groovy_precedence_env_wins(env)) {
-            int p = groovy_pad_parse(env);
+            int p = groovy_pad_mode_parse(env);
             if (p < 0) {
                 RARCH_WARN("[groovy] GROOVY_PAD=\"%s\" not understood "
-                           "(expected off or on): the padded session "
-                           "stays off\n", env);
+                           "(expected off, on, headers or probe): the "
+                           "padded session stays off\n", env);
                 p = 0;
             }
             st->pad_master = p;
             groovy_precedence_msg(msg, sizeof msg, "groovy_pad",
-                                  groovy_pad_name(p), "GROOVY_PAD");
+                                  groovy_pad_mode_name(p), "GROOVY_PAD");
             groovy_log_forced(msg);
         } else {
             st->pad_master = (cfg && cfg->bools.groovy_pad) ? 1 : 0;
@@ -2007,12 +2009,55 @@ static void *groovy_new(const struct record_params *params)
      * persisted groovy_pad key) -- off by default, because a MiSTer master
      * only reads a 4- or 5-byte CMD_INIT and would break on 8. Must run
      * BEFORE gm_send_init (libgm/include/gm.h contract). */
-    (void)gm_set_padding(st->gm, st->pad_master);
-    RARCH_LOG("[groovy] pad: master=%s\n", groovy_pad_name(st->pad_master));
+    /* "probe" asks the peer first (CMD_GET_VERSION, sent alone,
+     * repeated -- it runs here, before the first CMD_INIT, while nothing else
+     * flows on the socket). The forked MiSTer core answers `01 43 42 <rev>`:
+     * padded headers. The original MiSTer core answers one byte: the original
+     * forms stay, and the audio is cut -- its 3-byte header dies on a Wi-Fi
+     * link and the orphaned sound datagrams are read as commands. Anything
+     * else (the crt-bridge receiver answers with its 13-byte status, a silent
+     * peer answers nothing): the original forms, audio untouched. The
+     * resolved mode is kept in st->pad_master for the log and the warning
+     * below. */
+    if (st->pad_master == GROOVY_PAD_MODE_PROBE) {
+        unsigned rev = 0u;
+        const int peer = gm_probe_peer(st->gm, 5, 300, &rev);
+
+        if (peer == GM_PEER_PADDED) {
+            st->pad_master = GROOVY_PAD_MODE_HEADERS;
+            RARCH_LOG("[groovy] pad probe: %s answers `01 43 42 %u`: a MiSTer "
+                      "core with padded headers\n", st->rx[0].target, rev);
+        } else if (peer == GM_PEER_STOCK) {
+            st->pad_master = GROOVY_PAD_MODE_OFF;
+            RARCH_LOG("[groovy] pad probe: %s answers one byte: the original "
+                      "MiSTer core, the original forms stay\n", st->rx[0].target);
+            if (st->audio_mode != GROOVY_AUDIO_OFF) {
+                RARCH_WARN("[groovy] audio is cut towards %s: the original "
+                           "MiSTer core takes a 3-byte audio header that dies "
+                           "on a Wi-Fi link (GROOVY_PAD=headers or off forces "
+                           "it)\n", st->rx[0].target);
+                st->audio_mode = GROOVY_AUDIO_OFF;
+            }
+        } else {
+            st->pad_master = GROOVY_PAD_MODE_OFF;
+            RARCH_LOG("[groovy] pad probe: %s gave no known answer to "
+                      "GET_VERSION: the original forms stay\n", st->rx[0].target);
+        }
+    }
+    (void)gm_set_padding_mode(st->gm,
+                              st->pad_master == GROOVY_PAD_MODE_HEADERS ? GM_PAD_HEADERS
+                              : st->pad_master == GROOVY_PAD_MODE_ON    ? GM_PAD_FULL
+                              :                                           GM_PAD_OFF);
+    RARCH_LOG("[groovy] pad: master=%s\n", groovy_pad_mode_name(st->pad_master));
     RARCH_LOG("[groovy-mode] 31khz=%s (on: an image taller than 280 lines "
               "is announced as progressive 480p; off: interlaced 480i)\n",
               groovy_khz31_name(st->mode_state.khz31));
-    if (st->pad_master) {
+    if (st->pad_master == GROOVY_PAD_MODE_HEADERS) {
+        RARCH_WARN("[groovy] padded headers towards %s (master); this mode "
+                   "exists ONLY for a MiSTer core forked to accept them -- "
+                   "the original core ignores a padded header\n",
+                   st->rx[0].target);
+    } else if (st->pad_master) {
         /* Same discipline as the follower warning further below: the
          * protocol has no way to detect what is actually at the other end
          * of the wire -- naming the target is the most honest thing we can
@@ -2114,7 +2159,7 @@ static void *groovy_new(const struct record_params *params)
      * here, right before building its CMD_INIT. */
     st->rx[0].compression = (int)st->compression_mode;
     st->rx[0].mtu         = st->mtu;
-    st->rx[0].pad         = st->pad_master;
+    st->rx[0].pad         = st->pad_master != GROOVY_PAD_MODE_OFF;
     st->rx[0].audio_on    = (st->audio_mode != GROOVY_AUDIO_OFF);
 
     /* Send CMD_INIT: compression now carries the GROOVY_COMPRESSION
