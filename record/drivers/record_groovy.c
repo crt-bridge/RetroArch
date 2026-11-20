@@ -2032,10 +2032,16 @@ static void *groovy_new(const struct record_params *params)
             RARCH_LOG("[groovy] pad probe: %s answers one byte: the original "
                       "MiSTer core, the original forms stay\n", st->rx[0].target);
             if (st->audio_mode != GROOVY_AUDIO_OFF) {
+                char cutmsg[GROOVY_FORCED_MSG_CAP];
+
                 RARCH_WARN("[groovy] audio is cut towards %s: the original "
                            "MiSTer core takes a 3-byte audio header that dies "
-                           "on a Wi-Fi link (GROOVY_PAD=headers or off forces "
-                           "it)\n", st->rx[0].target);
+                           "on a Wi-Fi link (GROOVY_PAD=off keeps the audio)\n",
+                           st->rx[0].target);
+                snprintf(cutmsg, sizeof cutmsg,
+                         "audio cut towards %s: the original MiSTer core "
+                         "(GROOVY_PAD=probe)", st->rx[0].target);
+                groovy_log_forced(cutmsg);
                 st->audio_mode = GROOVY_AUDIO_OFF;
             }
         } else {
