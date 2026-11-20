@@ -369,6 +369,12 @@ struct groovy_receiver {
      * follows right after another announce. calloc zeroes both. --- */
     struct groovy_open_knock       open_knock;
     uint64_t                       last_announce_ms;
+    /* Periodic mode refresh (groovy_mode_refresh.h): its own timer, so that it
+     * never moves the reference of the open knock above (a silent receiver
+     * would be refreshed every 5 s and never knocked at). refresh_fast counts
+     * the close-spaced refreshes still owed after a mode change. */
+    uint64_t                       last_refresh_ms;
+    unsigned                       refresh_fast;
 
     /* --- Mode-change repeat (groovy_switchres_repeat.h). Armed by
      * groovy_switchres_all for FOLLOWERS only (index >= 1), with a copy of
@@ -1539,7 +1545,7 @@ static void *groovy_new(const struct record_params *params)
             if (!strcmp(env, "native")) {
                 st->mode_state.native_fallback = true;
             } else if (strcmp(env, "pinned")) {
-                RARCH_WARN("[groovy] GROOVY_MODE_FALLBACK not understood (%s): pinned table kept"\n", env);
+                RARCH_WARN("[groovy] GROOVY_MODE_FALLBACK not understood (%s): pinned table kept\n", env);
             }
         }
         RARCH_LOG("[groovy] mode fallback: %s\n",
@@ -2988,21 +2994,36 @@ static void groovy_reannounce_flush_deferred(groovy_state_t *st, struct groovy_r
 static void groovy_mode_refresh_maybe(groovy_state_t *st, struct groovy_receiver *rx,
                                       uint64_t now_ms)
 {
-    int rc, wsa;
+    int      rc, wsa;
     uint64_t t_ns;
+    unsigned interval;
+    uint64_t last;
 
     if (!st || !rx || !rx->gm) return;
-    if (!groovy_mode_refresh_due(st->mode_refresh_ms, st->announced_valid ? 1 : 0,
-                                 rx->switchres_deferred ? 1 : 0,
-                                 rx->last_announce_ms, now_ms))
+    /* One field per frame: a refresh between the two halves of a pair would
+     * make the receiver drop the half already assembled (it clears its
+     * partial slot on every CMD_SWITCHRES) and flip the parity of the pairs.
+     * That lever is a GroovyMAME-compat bench mode: no refresh there. */
+    if (st->field_mode == GROOVY_FIELD_PER_FRAME) return;
+    /* After a mode change, the first refreshes come close (250 ms, then 1 s):
+     * a stock MiSTer core ignores a CMD_SWITCHRES that lands while a frame is
+     * being received, and the master gets a single send. */
+    interval = st->mode_refresh_ms;
+    if (interval != 0u && rx->refresh_fast > 0u)
+        interval = (rx->refresh_fast >= 2u) ? 250u : 1000u;
+    last = (rx->last_refresh_ms > rx->last_announce_ms) ? rx->last_refresh_ms : rx->last_announce_ms;
+    if (!groovy_mode_refresh_due(interval, st->announced_valid ? 1 : 0,
+                                 rx->switchres_deferred ? 1 : 0, last, now_ms))
         return;
     rc   = gm_send_switchres(rx->gm, &st->announced_mode);
     wsa  = gm_last_announce_error(rx->gm);
     t_ns = groovy_pacing_mono_ns();
+    if (rx->refresh_fast > 0u)
+        rx->refresh_fast--;
     /* Its own trace, not a site of [groovy-annonce] (the bench readers know
-     * four sites): one line per refresh, i.e. one per interval and receiver.
-     * It restarts the shared announce timer, the reference of the next one. */
-    rx->last_announce_ms = t_ns / 1000000u;
+     * four sites): one line per refresh. Its own timer: the open knock keeps
+     * its own reference (rx->last_announce_ms). */
+    rx->last_refresh_ms = t_ns / 1000000u;
     RARCH_LOG("[groovy-emit] mode-refresh: target=%s role=%s issue=%s wsa=%d frame=%u t_ns=%llu\n",
               rx->target, groovy_role_name(rx->role), rc == 0 ? "sent" : "failed", wsa,
               (unsigned)st->frame_id, (unsigned long long)t_ns);
@@ -3087,6 +3108,8 @@ static bool groovy_switchres_all(groovy_state_t *st, const gm_modeline *m)
         groovy_switchres_repeat_arm(&st->rx[i].repeat, st->turn_video + 1u,
                                     t_env[i] / 1000000u);
     }
+    for (unsigned i = 0u; i < st->n_rx; i++)
+        st->rx[i].refresh_fast = 2u;   /* 250 ms, then 1 s, then the steady interval */
     for (unsigned i = 0u; i < st->n_rx; i++)
         groovy_announce_note(st, &st->rx[i], GROOVY_ANNOUNCE_SWITCHRES,
                             GROOVY_SITE_SWITCHRES_ALL, rc[i], wsa[i], t_env[i]);
@@ -4113,7 +4136,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
      * Placed HERE, outside the if/else 480i/240p chain below, so that BOTH
      * modes flush their deferrals -- and AFTER this frame's status drain
      * (groovy_drain_statuses, in the block that just closed) so that the
-     * cancellation test (rx->link.synced) reads the freshest
+     * (the old cancellation test is gone) reads the freshest
      * state. No effect when GROOVY_REANNOUNCE_SPACING_US is 0 (no send is
      * ever deferred); no effect on the frame that just set a deferral
      * (switchres_deferred_turn, checked in

@@ -44,6 +44,7 @@ enum groovy_mode { GROOVY_MODE_240P_SUPER_RES = 0, GROOVY_MODE_480I = 1, GROOVY_
                    GROOVY_MODE_NATIVE = 4 };    /* the core's own geometry, announced as it is */
 
 #define GROOVY_MODE_480I_ABOVE_LINES   280u                 /* 480i threshold */
+#define GROOVY_NATIVE_FPS_STEP         0.05                 /* native regime: a rate change this large is announced again (Hz) */
 #define GROOVY_DIM_HYSTERESIS_FRAMES   15u                  /* moved from record_groovy.c */
 #define GROOVY_MODE_GUARD_MAX_SWITCHES 2u                   /* oscillation guard: switches allowed per window */
 #define GROOVY_MODE_GUARD_WINDOW_NS    1000000000ull        /* oscillation guard: the window, in ns (1 s) */
@@ -279,6 +280,13 @@ static inline enum groovy_mode_action groovy_mode_on_frame(struct groovy_mode_st
             return a;
         return groovy_mode_announce(ms, cache, w, h, fps, wanted, GROOVY_MODE_REASON_SWITCH);
     }
+
+    /* The native modeline carries the core's rate: a change of rate at the same
+     * size has to be announced too. */
+    if (cache->mode == GROOVY_MODE_NATIVE && w == cache->width && h == cache->height
+        && fps > 1.0 && cache->fps > 1.0
+        && (fps - cache->fps > GROOVY_NATIVE_FPS_STEP || cache->fps - fps > GROOVY_NATIVE_FPS_STEP))
+        return groovy_mode_announce(ms, cache, w, h, fps, wanted, GROOVY_MODE_REASON_SETTLED);
 
     if (w != cache->width || h != cache->height) {
         if (ms->have_hint && w == ms->hint_w && h == ms->hint_h)

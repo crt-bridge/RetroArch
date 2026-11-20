@@ -198,7 +198,7 @@ static inline void groovy_announce_native(unsigned w, unsigned h, double fps, bo
     unsigned     min_blank;
     double       khz;
 
-    if (w == 0u || h == 0u || !(fps > 1.0)) {
+    if (w == 0u || h == 0u || w > 8192u || h > 4096u || !(fps > 1.0) || fps > 1000.0) {
         groovy_announce_pinned(GROOVY_MODE_240P_SUPER_RES, out);
         return;
     }
@@ -253,7 +253,11 @@ static inline void groovy_announce_modeline_for(const groovy_av_cache_t *c,
                                                 const struct groovy_session_mode *sm,
                                                 bool khz31, gm_modeline *out)
 {
-    if (c && c->valid && c->mode == GROOVY_MODE_NATIVE)
+    if (!c) {
+        groovy_announce_pinned(GROOVY_MODE_240P_SUPER_RES, out);
+        return;
+    }
+    if (c->valid && c->mode == GROOVY_MODE_NATIVE)
         groovy_announce_native(c->width, c->height, c->fps, khz31, out);
     else
         groovy_announce_modeline(groovy_mode_of(c), sm, out);

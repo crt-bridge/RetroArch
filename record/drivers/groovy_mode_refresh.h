@@ -62,8 +62,8 @@ static inline unsigned groovy_mode_refresh_parse(const char *s)
  *   have_mode     : something has been announced (nothing to repeat before);
  *   pending       : a deferred CMD_SWITCHRES of a re-announce is still to go
  *                   -- it is the mode, about to be said, so nothing is added;
- *   last_sent_ms  : the instant of the last announce (CMD_INIT or CMD_SWITCHRES) attempted to this
- *                   receiver, any site (0 = never);
+ *   last_sent_ms  : the later of the last announce attempted to this
+ *                   receiver, any site, and the last refresh (0 = never);
  *   now_ms        : the same clock.
  * A clock that went backwards never fires. */
 static inline int groovy_mode_refresh_due(unsigned interval_ms, int have_mode, int pending,
