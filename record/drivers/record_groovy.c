@@ -1886,6 +1886,24 @@ static void *groovy_new(const struct record_params *params)
      * second, identical parser would have added nothing. */
     st->servo_mode     = groovy_servo_mode_parse(getenv("GROOVY_SERVO"));
     st->audio_ratio_on = (groovy_servo_mode_parse(getenv("GROOVY_AUDIO_RATIO")) == GROOVY_SERVO_ON);
+    /* Without the variables, the master's profile (groovy_peer.h) gives the
+     * default: feed-forward and the wire ratio towards the forked MiSTer core,
+     * off everywhere else (the crt-bridge receiver keeps its behaviour). A
+     * variable that is set wins, whatever its value. */
+    {
+        const struct groovy_peer_profile *pp = groovy_peer_profile(st->peer);
+
+        if (pp->servo_ff && !groovy_precedence_env_wins(getenv("GROOVY_SERVO"))) {
+            st->servo_mode = GROOVY_SERVO_FF;
+            RARCH_LOG("[groovy-servo] servo=ff (peer %s; GROOVY_SERVO=off keeps the core's cadence)\n",
+                      pp->name);
+        }
+        if (pp->audio_ratio && !groovy_precedence_env_wins(getenv("GROOVY_AUDIO_RATIO"))) {
+            st->audio_ratio_on = 1;
+            RARCH_LOG("[groovy-servo] audio_ratio=on (peer %s; GROOVY_AUDIO_RATIO=off keeps it off)\n",
+                      pp->name);
+        }
+    }
     /* Trace per measured ack, not throttled -- read once here, same
      * parser as the servo's other two settings. Off by default: no
      * setting = not one more byte in the log, not one more cycle in the
