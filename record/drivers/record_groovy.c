@@ -527,6 +527,8 @@ typedef struct {
      * every 600 frames -- a wide gap between the two entries would signal
      * a stuck parity, hence a stale ACK. --- */
     enum groovy_field_mode field_mode;      /* both (0x07) by default */
+    bool mister_target;                     /* the master is a MiSTer core: forked (probe answered), original, or
+                                             * GROOVY_PAD=headers; set once at opening, after the probe */
     uint32_t                fields_sent[2];
 
     /* --- Send-side MTU. Set at session opening, never touched
@@ -2027,12 +2029,12 @@ static void *groovy_new(const struct record_params *params)
             st->pad_master = GROOVY_PAD_MODE_HEADERS;
             RARCH_LOG("[groovy] pad probe: %s answers `01 43 42 %u`: a MiSTer "
                       "core with padded headers\n", st->rx[0].target, rev);
-            st->mode_state.hold_hfreq = true;      /* a MiSTer target */
+            st->mister_target = true;              /* a MiSTer target */
         } else if (peer == GM_PEER_STOCK) {
             st->pad_master = GROOVY_PAD_MODE_OFF;
             RARCH_LOG("[groovy] pad probe: %s answers one byte: the original "
                       "MiSTer core, the original forms stay\n", st->rx[0].target);
-            st->mode_state.hold_hfreq = true;      /* a MiSTer target */
+            st->mister_target = true;              /* a MiSTer target */
             if (st->audio_mode != GROOVY_AUDIO_OFF) {
                 char cutmsg[GROOVY_FORCED_MSG_CAP];
 
@@ -2065,7 +2067,8 @@ static void *groovy_new(const struct record_params *params)
      * gap is said below, never silent. auto = a MiSTer target (the probe
      * answered, or GROOVY_PAD=headers); on / off force it, the variable wins. */
     if (st->pad_master == GROOVY_PAD_MODE_HEADERS)
-        st->mode_state.hold_hfreq = true;
+        st->mister_target = true;
+    st->mode_state.hold_hfreq = st->mister_target;
     {
         const char *henv = getenv("GROOVY_NATIVE_HOLD_HFREQ");
 
@@ -2082,6 +2085,25 @@ static void *groovy_new(const struct record_params *params)
               st->mode_state.hold_hfreq ? "held at the standard rate (15734 Hz NTSC); the frame rate follows the line "
                                           "(59.83 Hz for a core at 59.92 Hz, 0.16 % apart) -- colour of the FPGA composite encoder"
                                         : "the core's own rate (the line is where the rounded line count puts it)");
+
+    /* The same MiSTer target also takes the two settings the SuperStation trial
+     * proved good (Sir, 2026-11-21, at the JVC): the native fallback (the
+     * receiver's pinned table is a table of one tube, 2560 columns, which a
+     * MiSTer does not show) and ONE field per frame in 480i (two fields per
+     * frame looked bad; the tube refused the one-field mode by eye, so it is
+     * never applied to it). A variable that is set wins, whatever its value:
+     * GROOVY_MODE_FALLBACK=pinned, GROOVY_FIELD_PER_FRAME=off keep the old
+     * behaviour. */
+    if (st->mister_target) {
+        if (!groovy_precedence_env_wins(getenv("GROOVY_MODE_FALLBACK"))) {
+            st->mode_state.native_fallback = true;
+            RARCH_LOG("[groovy] mode fallback: native (a MiSTer target; GROOVY_MODE_FALLBACK=pinned keeps the pinned table)\n");
+        }
+        if (!groovy_precedence_env_wins(getenv("GROOVY_FIELD_PER_FRAME"))) {
+            st->field_mode = GROOVY_FIELD_PER_FRAME;
+            RARCH_LOG("[groovy] 480i: one field per frame (a MiSTer target; GROOVY_FIELD_PER_FRAME=off keeps two fields)\n");
+        }
+    }
     RARCH_LOG("[groovy-mode] 31khz=%s (on: an image taller than 280 lines "
               "is announced as progressive 480p; off: interlaced 480i)\n",
               groovy_khz31_name(st->mode_state.khz31));
