@@ -164,6 +164,117 @@ static inline void groovy_announce_modeline(enum groovy_mode m,
     out->pclock_mhz = (double)sm->khz / 1000.0;
 }
 
+/* The native regime: the modeline follows the core, whatever the
+ * screen. Nothing in it is a table of one tube.
+ *
+ * What it takes: the size of the picture and the rate the core renders at
+ * (the cache the announce was made from), and whether the session declared a
+ * 31 kHz receiver. What it gives: h_active = the width of the picture,
+ * v_active = its height (rounded up to an even number when interlaced), a
+ * 15 kHz line for a picture of at most GROOVY_NATIVE_INTERLACE_ABOVE_LINES
+ * lines or a 31 kHz line (progressive) when the session says so, interlaced
+ * otherwise, and the pixel clock that makes the field rate equal to the
+ * core's `fps` -- the cadence rule of the pinned 480i, which counts FIELDS.
+ * The positions are laid out by fixed fractions of the blanking (a line of
+ * 320 pixels comes out as 320/336/368/427, the shape the launcher already
+ * hands for a 224p).
+ *
+ * hold_hfreq (a MiSTer target): the LINE is held at the exact
+ * standard rate (15734 Hz NTSC, 15625 Hz PAL) and the frame rate follows
+ * it (263 lines: 59.83 Hz for a core at 59.92 Hz, 0.16 % apart). The
+ * FPGA composite encoder derives its colour subcarrier from the line rate:
+ * at 15.76 kHz the JVC switched the colour off (SuperStation, 2026-11-21).
+ * Without it the clock gives the core's own rate and the line comes out
+ * where the rounded line count puts it. 31 kHz is not touched.
+ *
+ * Whether a receiver can show the result is its own judgment, as for any
+ * modeline of the wire. Pure function. */
+#define GROOVY_NATIVE_INTERLACE_ABOVE_LINES 300u
+#define GROOVY_NATIVE_HFREQ_15K_NTSC_HZ  15734.0
+#define GROOVY_NATIVE_HFREQ_15K_PAL_HZ   15625.0
+#define GROOVY_NATIVE_HFREQ_31K_HZ       31469.0
+
+static inline void groovy_announce_native(unsigned w, unsigned h, double fps, bool khz31,
+                                          bool hold_hfreq, gm_modeline *out)
+{
+    const bool   hi   = khz31 && h > GROOVY_NATIVE_INTERLACE_ABOVE_LINES;
+    const bool   itl  = !khz31 && h > GROOVY_NATIVE_INTERLACE_ABOVE_LINES;
+    double       rate;
+    double       hfreq;
+    unsigned     v_active, v_total, v_blank, v_front, v_sync;
+    unsigned     h_total, h_blank;
+    unsigned     min_blank;
+    double       khz;
+
+    if (w == 0u || h == 0u || w > 8192u || h > 4096u || !(fps > 1.0) || fps > 1000.0) {
+        groovy_announce_pinned(GROOVY_MODE_240P_SUPER_RES, out);
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+
+    rate  = itl ? fps / 2.0 : fps;                 /* frames per second on the wire */
+    hfreq = hi  ? GROOVY_NATIVE_HFREQ_31K_HZ
+                : (fps < 55.0 ? GROOVY_NATIVE_HFREQ_15K_PAL_HZ : GROOVY_NATIVE_HFREQ_15K_NTSC_HZ);
+
+    v_active  = h + ((itl && (h & 1u)) ? 1u : 0u);
+    min_blank = itl ? 24u : 12u;
+    v_total   = (unsigned)(hfreq / rate + 0.5);
+    if (itl)
+        v_total |= 1u;                              /* an odd number of lines: two fields */
+    if (v_total < v_active + min_blank) {
+        v_total = v_active + min_blank;
+        if (itl)
+            v_total |= 1u;
+    }
+    v_blank = v_total - v_active;
+    v_sync  = itl ? 6u : 3u;
+    v_front = v_blank * 24u / 100u;
+    if (v_front < 1u)
+        v_front = 1u;
+    if (v_front + v_sync + 1u > v_blank)
+        v_front = (v_blank > v_sync + 1u) ? v_blank - v_sync - 1u : 0u;
+
+    h_total = (w * 4u + 2u) / 3u;
+    if (h_total < w + 32u)
+        h_total = w + 32u;
+    h_blank = h_total - w;
+
+    out->h_active  = (uint16_t)w;
+    out->h_begin   = (uint16_t)(w + h_blank * 15u / 100u);
+    out->h_end     = (uint16_t)(w + h_blank * 15u / 100u + h_blank * 30u / 100u);
+    out->h_total   = (uint16_t)h_total;
+    out->v_active  = (uint16_t)v_active;
+    out->v_begin   = (uint16_t)(v_active + v_front);
+    out->v_end     = (uint16_t)(v_active + v_front + v_sync);
+    out->v_total   = (uint16_t)v_total;
+    out->interlace = (uint8_t)(itl ? 1u : 0u);
+
+    if (hold_hfreq && !hi)
+        khz = (double)h_total * hfreq / 1000.0;         /* the line is the standard line */
+    else
+        khz = (double)h_total * (double)v_total * rate / 1000.0;
+    out->pclock_mhz = (double)(uint32_t)(khz + 0.5) / 1000.0;
+}
+
+/* groovy_announce_modeline_for -- the modeline of the last announced regime,
+ * read from the cache that carries it: the native regime needs the size and
+ * the rate of the picture, every other regime only its name. All three
+ * announcement sites go through this one. */
+static inline void groovy_announce_modeline_for(const groovy_av_cache_t *c,
+                                                const struct groovy_session_mode *sm,
+                                                bool khz31, bool hold_hfreq,
+                                                gm_modeline *out)
+{
+    if (!c) {
+        groovy_announce_pinned(GROOVY_MODE_240P_SUPER_RES, out);
+        return;
+    }
+    if (c->valid && c->mode == GROOVY_MODE_NATIVE)
+        groovy_announce_native(c->width, c->height, c->fps, khz31, hold_hfreq, out);
+    else
+        groovy_announce_modeline(groovy_mode_of(c), sm, out);
+}
+
 /* groovy_announce_cadence_hz -- the rate the tube is given by `m`: frames per
  * second, or FIELDS per second when the modeline is interlaced. Computed on
  * the clock brought back to a whole number of kHz, because that is the clock

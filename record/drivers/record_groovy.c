@@ -199,6 +199,7 @@ static inline void groovy_pacing_log_mute(const char *ev) { (void)ev; }
  * pattern as groovy_compression.h above. */
 #include "groovy_dump.h"
 #include "groovy_reannounce.h"
+#include "groovy_mode_refresh.h"
 
 /* Open knock: re-sends CMD_INIT + CMD_SWITCHRES to a receiver that stays
  * silent, on every video turn, with its own counter. Header-only, no
@@ -380,6 +381,12 @@ struct groovy_receiver {
      * follows right after another announce. calloc zeroes both. --- */
     struct groovy_open_knock       open_knock;
     uint64_t                       last_announce_ms;
+    /* Periodic mode refresh (groovy_mode_refresh.h): its own timer, so that it
+     * never moves the reference of the open knock above (a silent receiver
+     * would be refreshed every 5 s and never knocked at). refresh_fast counts
+     * the close-spaced refreshes still owed after a mode change. */
+    uint64_t                       last_refresh_ms;
+    unsigned                       refresh_fast;
 
     /* --- Mode-change repeat (groovy_switchres_repeat.h). Armed by
      * groovy_switchres_all for FOLLOWERS only (index >= 1), with a copy of
@@ -468,6 +475,7 @@ typedef struct {
      * budget itself is now per receiver). */
     int                 reannounce_enabled;  /* GROOVY_REANNOUNCE */
     unsigned reannounce_spacing_us;  /* GROOVY_REANNOUNCE_SPACING_US ; 0 = send immediately */
+    unsigned mode_refresh_ms;        /* GROOVY_MODE_REFRESH_MS ; 0 = no periodic mode refresh */
     unsigned            width;          /* cached from last push_video (Plan 03-06 handoff) */
     unsigned            height;         /* cached from last push_video */
     groovy_av_cache_t   av_cache;       /* geometry dedupe state — Phase 3.1 */
@@ -508,8 +516,10 @@ typedef struct {
     /* --- Compression. Set at session opening, never touched afterwards. --- */
     enum groovy_compression_mode compression_mode;   /* off by default */
 
-    /* --- Padded session towards the MASTER. 0 or 1, resolved once in the
-     * precedence block below, then handed to gm_set_padding(st->gm, ...).
+    /* --- Padded session towards the MASTER. A GROOVY_PAD_MODE_* value
+     * (off, on, headers, probe -- groovy_pad.h), resolved once in the
+     * precedence block below, then handed to libgm at opening ("probe" is
+     * settled there, by asking the peer).
      * A follower's own padding lives in struct groovy_receiver::pad, set
      * from its GROOVY_FOLLOWERS pad= key -- this field never touches
      * that. --- */
@@ -529,6 +539,8 @@ typedef struct {
      * every 600 frames -- a wide gap between the two entries would signal
      * a stuck parity, hence a stale ACK. --- */
     enum groovy_field_mode field_mode;      /* both (0x07) by default */
+    bool mister_target;                     /* the master is a MiSTer core: forked (probe answered), original, or
+                                             * GROOVY_PAD=headers; set once at opening, after the probe */
     uint32_t                fields_sent[2];
 
     /* --- Send-side MTU. Set at session opening, never touched
@@ -1465,16 +1477,16 @@ static void *groovy_new(const struct record_params *params)
          * per entry, from its GROOVY_FOLLOWERS pad= key. */
         env = getenv("GROOVY_PAD");
         if (groovy_precedence_env_wins(env)) {
-            int p = groovy_pad_parse(env);
+            int p = groovy_pad_mode_parse(env);
             if (p < 0) {
                 RARCH_WARN("[groovy] GROOVY_PAD=\"%s\" not understood "
-                           "(expected off or on): the padded session "
-                           "stays off\n", env);
+                           "(expected off, on, headers or probe): the "
+                           "padded session stays off\n", env);
                 p = 0;
             }
             st->pad_master = p;
             groovy_precedence_msg(msg, sizeof msg, "groovy_pad",
-                                  groovy_pad_name(p), "GROOVY_PAD");
+                                  groovy_pad_mode_name(p), "GROOVY_PAD");
             groovy_log_forced(msg);
         } else {
             st->pad_master = (cfg && cfg->bools.groovy_pad) ? 1 : 0;
@@ -1547,6 +1559,23 @@ static void *groovy_new(const struct record_params *params)
                 st->reduction_memo.window = &st->reduction_window;
             }
         }
+
+        /* The fallback of a picture that does not fit the session:
+         * GROOVY_MODE_FALLBACK=native announces its own geometry
+         * (groovy_announce_native) instead of the receiver's pinned table,
+         * which is a table of one tube. Anything else, or nothing, keeps the
+         * pinned table: the shipped behaviour of the crt-bridge receiver. The
+         * variable has no menu counterpart. */
+        env = getenv("GROOVY_MODE_FALLBACK");
+        if (groovy_precedence_env_wins(env)) {
+            if (!strcmp(env, "native")) {
+                st->mode_state.native_fallback = true;
+            } else if (strcmp(env, "pinned")) {
+                RARCH_WARN("[groovy] GROOVY_MODE_FALLBACK not understood (%s): pinned table kept\n", env);
+            }
+        }
+        RARCH_LOG("[groovy] mode fallback: %s\n",
+                  st->mode_state.native_fallback ? "native" : "pinned");
 
         /* The reason of the launcher's choice, shown on the status line of
          * the mode. It is text from the environment shown on the screen, so
@@ -1877,6 +1906,14 @@ static void *groovy_new(const struct record_params *params)
 #endif
     st->rx[0].reannounce_exhausted_logged = 0;
     RARCH_LOG("[groovy] re-announce: %s\n", st->reannounce_enabled ? "on" : "off");
+    /* Periodic mode refresh: a bench build may change or disable the
+     * interval, a release build keeps the default. */
+#ifdef HAVE_GROOVY_BENCH
+    st->mode_refresh_ms = groovy_mode_refresh_parse(getenv("GROOVY_MODE_REFRESH_MS"));
+#else
+    st->mode_refresh_ms = GROOVY_MODE_REFRESH_DEFAULT_MS;
+#endif
+    RARCH_LOG("[groovy] mode refresh: %u ms\n", st->mode_refresh_ms);
 
 #ifndef HAVE_GROOVY_BENCH
     st->reannounce_spacing_us = GROOVY_REANNOUNCE_SPACING_US_DEFAULT;
@@ -1996,12 +2033,108 @@ static void *groovy_new(const struct record_params *params)
      * persisted groovy_pad key) -- off by default, because a MiSTer master
      * only reads a 4- or 5-byte CMD_INIT and would break on 8. Must run
      * BEFORE gm_send_init (libgm/include/gm.h contract). */
-    (void)gm_set_padding(st->gm, st->pad_master);
-    RARCH_LOG("[groovy] pad: master=%s\n", groovy_pad_name(st->pad_master));
+    /* "probe" asks the peer first (CMD_GET_VERSION, sent alone,
+     * repeated -- it runs here, before the first CMD_INIT, while nothing else
+     * flows on the socket). The forked MiSTer core answers `01 43 42 <rev>`:
+     * padded headers. The original MiSTer core answers one byte: the original
+     * forms stay, and the audio is cut -- its 3-byte header dies on a Wi-Fi
+     * link and the orphaned sound datagrams are read as commands. Anything
+     * else (the crt-bridge receiver answers with its 13-byte status, a silent
+     * peer answers nothing): the original forms, audio untouched. The
+     * resolved mode is kept in st->pad_master for the log and the warning
+     * below. */
+    if (st->pad_master == GROOVY_PAD_MODE_PROBE) {
+        unsigned rev = 0u;
+        const int peer = gm_probe_peer(st->gm, 5, 300, &rev);
+
+        if (peer == GM_PEER_PADDED) {
+            st->pad_master = GROOVY_PAD_MODE_HEADERS;
+            RARCH_LOG("[groovy] pad probe: %s answers `01 43 42 %u`: a MiSTer "
+                      "core with padded headers\n", st->rx[0].target, rev);
+            st->mister_target = true;              /* a MiSTer target */
+        } else if (peer == GM_PEER_STOCK) {
+            st->pad_master = GROOVY_PAD_MODE_OFF;
+            RARCH_LOG("[groovy] pad probe: %s answers one byte: the original "
+                      "MiSTer core, the original forms stay\n", st->rx[0].target);
+            st->mister_target = true;              /* a MiSTer target */
+            if (st->audio_mode != GROOVY_AUDIO_OFF) {
+                char cutmsg[GROOVY_FORCED_MSG_CAP];
+
+                RARCH_WARN("[groovy] audio is cut towards %s: the original "
+                           "MiSTer core takes a 3-byte audio header that dies "
+                           "on a Wi-Fi link (GROOVY_PAD=off keeps the audio)\n",
+                           st->rx[0].target);
+                snprintf(cutmsg, sizeof cutmsg,
+                         "audio cut towards %s: the original MiSTer core "
+                         "(GROOVY_PAD=probe)", st->rx[0].target);
+                groovy_log_forced(cutmsg);
+                st->audio_mode = GROOVY_AUDIO_OFF;
+            }
+        } else {
+            st->pad_master = GROOVY_PAD_MODE_OFF;
+            RARCH_LOG("[groovy] pad probe: %s gave no known answer to "
+                      "GET_VERSION: the original forms stay\n", st->rx[0].target);
+        }
+    }
+    (void)gm_set_padding_mode(st->gm,
+                              st->pad_master == GROOVY_PAD_MODE_HEADERS ? GM_PAD_HEADERS
+                              : st->pad_master == GROOVY_PAD_MODE_ON    ? GM_PAD_FULL
+                              :                                           GM_PAD_OFF);
+    RARCH_LOG("[groovy] pad: master=%s\n", groovy_pad_mode_name(st->pad_master));
+
+    /* The native announce toward a MiSTer holds the LINE at the standard rate:
+     * the FPGA composite encoder makes its colour subcarrier from
+     * the line rate, and the JVC switched the colour off at 15.76 kHz. The
+     * frame rate follows the line (59.83 Hz for a core at 59.92 Hz) -- the
+     * gap is said below, never silent. auto = a MiSTer target (the probe
+     * answered, or GROOVY_PAD=headers); on / off force it, the variable wins. */
+    if (st->pad_master == GROOVY_PAD_MODE_HEADERS)
+        st->mister_target = true;
+    st->mode_state.hold_hfreq = st->mister_target;
+    {
+        const char *henv = getenv("GROOVY_NATIVE_HOLD_HFREQ");
+
+        if (groovy_precedence_env_wins(henv)) {
+            if (!strcmp(henv, "on"))
+                st->mode_state.hold_hfreq = true;
+            else if (!strcmp(henv, "off"))
+                st->mode_state.hold_hfreq = false;
+            else if (strcmp(henv, "auto"))
+                RARCH_WARN("[groovy] GROOVY_NATIVE_HOLD_HFREQ not understood (%s): auto kept\n", henv);
+        }
+    }
+    RARCH_LOG("[groovy-mode] native line rate: %s\n",
+              st->mode_state.hold_hfreq ? "held at the standard rate (15734 Hz NTSC); the frame rate follows the line "
+                                          "(59.83 Hz for a core at 59.92 Hz, 0.16 % apart) -- colour of the FPGA composite encoder"
+                                        : "the core's own rate (the line is where the rounded line count puts it)");
+
+    /* The same MiSTer target also takes the two settings the SuperStation trial
+     * proved good (Sir, 2026-11-21, at the JVC): the native fallback (the
+     * receiver's pinned table is a table of one tube, 2560 columns, which a
+     * MiSTer does not show) and ONE field per frame in 480i (two fields per
+     * frame looked bad; the tube refused the one-field mode by eye, so it is
+     * never applied to it). A variable that is set wins, whatever its value:
+     * GROOVY_MODE_FALLBACK=pinned, GROOVY_FIELD_PER_FRAME=off keep the old
+     * behaviour. */
+    if (st->mister_target) {
+        if (!groovy_precedence_env_wins(getenv("GROOVY_MODE_FALLBACK"))) {
+            st->mode_state.native_fallback = true;
+            RARCH_LOG("[groovy] mode fallback: native (a MiSTer target; GROOVY_MODE_FALLBACK=pinned keeps the pinned table)\n");
+        }
+        if (!groovy_precedence_env_wins(getenv("GROOVY_FIELD_PER_FRAME"))) {
+            st->field_mode = GROOVY_FIELD_PER_FRAME;
+            RARCH_LOG("[groovy] 480i: one field per frame (a MiSTer target; GROOVY_FIELD_PER_FRAME=off keeps two fields)\n");
+        }
+    }
     RARCH_LOG("[groovy-mode] 31khz=%s (on: an image taller than 280 lines "
               "is announced as progressive 480p; off: interlaced 480i)\n",
               groovy_khz31_name(st->mode_state.khz31));
-    if (st->pad_master) {
+    if (st->pad_master == GROOVY_PAD_MODE_HEADERS) {
+        RARCH_WARN("[groovy] padded headers towards %s (master); this mode "
+                   "exists ONLY for a MiSTer core forked to accept them -- "
+                   "the original core ignores a padded header\n",
+                   st->rx[0].target);
+    } else if (st->pad_master) {
         /* Same discipline as the follower warning further below: the
          * protocol has no way to detect what is actually at the other end
          * of the wire -- naming the target is the most honest thing we can
@@ -2080,6 +2213,41 @@ static void *groovy_new(const struct record_params *params)
     double   native_hz = (params && params->samplerate > 0.0)
                        ? params->samplerate : 0.0;
     uint8_t  code      = groovy_audio_rate_code(native_hz);
+    /* Bench lever: GROOVY_AUDIO_RATE=22050|44100|48000 forces the
+     * WIRE frequency, the resampler below bridging the native one. Asked for
+     * because a stock MiSTer core may resample a 44100 Hz stream to its own
+     * output rate with a crude filter: sending 48000 Hz lets this driver do
+     * it. Anything else is named and ignored. */
+    {
+        const char *arate = getenv("GROOVY_AUDIO_RATE");
+
+        /* Measured on a SuperStation, 2026-11-20: a 44100 Hz stream played
+         * "rough" there and perfectly smooth locally; the same audio sent at
+         * 48000 Hz (this driver resampling) was "much better". A MiSTer core
+         * resamples to its own output rate with a crude filter. So toward a
+         * MiSTer core (padded headers: GROOVY_PAD=headers, or a probe that
+         * found one) a 44100 Hz core goes out at 48000 Hz, unless
+         * GROOVY_AUDIO_RATE says otherwise. */
+        if ((!arate || arate[0] == '\0') && code == 2u
+            && st->pad_master == GROOVY_PAD_MODE_HEADERS) {
+            code = 3u;
+            RARCH_LOG("[groovy] audio: wire rate 48000 Hz toward a MiSTer core "
+                      "(its own resampling of 44100 Hz is crude; "
+                      "GROOVY_AUDIO_RATE=44100 keeps the core's rate)\n");
+        }
+        if (arate && arate[0] != '\0' && code != 0u) {
+            if (!strcmp(arate, "22050"))      code = 1u;
+            else if (!strcmp(arate, "44100")) code = 2u;
+            else if (!strcmp(arate, "48000")) code = 3u;
+            else
+                RARCH_WARN("[groovy] GROOVY_AUDIO_RATE=\"%s\" not understood "
+                           "(expected 22050, 44100 or 48000): the core's own "
+                           "rate stays\n", arate);
+            if (code != groovy_audio_rate_code(native_hz))
+                RARCH_LOG("[groovy] audio: wire rate forced to %u Hz by "
+                          "GROOVY_AUDIO_RATE\n", groovy_audio_rate_hz(code));
+        }
+    }
     unsigned wire_hz   = groovy_audio_rate_hz(code);
     /* The "GROOVY_AUDIO=off on the master -> code=0 for the whole
      * session" short-circuit is gone from here. st->audio_rate_code is
@@ -2103,7 +2271,7 @@ static void *groovy_new(const struct record_params *params)
      * here, right before building its CMD_INIT. */
     st->rx[0].compression = (int)st->compression_mode;
     st->rx[0].mtu         = st->mtu;
-    st->rx[0].pad         = st->pad_master;
+    st->rx[0].pad         = st->pad_master != GROOVY_PAD_MODE_OFF;
     st->rx[0].audio_on    = (st->audio_mode != GROOVY_AUDIO_OFF);
 
     /* Send CMD_INIT: compression now carries the GROOVY_COMPRESSION
@@ -2228,6 +2396,33 @@ static void *groovy_new(const struct record_params *params)
                 }
             }
 
+            /* The hookup byte leaves BEFORE this follower's CMD_INIT:
+             * a stock MiSTer core reads it once, inside its CMD_INIT handler. */
+            /* Per-receiver input channel: this follower is only a
+             * candidate for hookup if GROOVY_INPUT=on AND its `inputs`
+             * key isn't `off` -- inputs=off opens NO socket, not even to
+             * send the hookup byte. The index into the s_groovy_input_h[]
+             * set is st->rx[]'s, 1 + kept here -- never fcfg[]'s index i,
+             * which doesn't count the master and still counts a dropped
+             * follower. */
+            if (st->input_mode == GROOVY_INPUT_ON && rx->inputs != GROOVY_INPUTS_OFF) {
+                int ok_bind = (gm_bind_inputs(rx->gm, 0) == 0);
+                if (ok_bind) {
+                    s_groovy_input_h[1u + kept]    = rx->gm;
+                    s_groovy_input_attr[1u + kept] = rx->inputs;
+                    /* Named for the transition trace. */
+                    snprintf(s_groovy_input_target[1u + kept], sizeof(s_groovy_input_target[0]),
+                             "%s", rx->target);
+                } else {
+                    RARCH_WARN("[groovy-input] hookup failed towards %s\n", rx->target);
+                }
+                RARCH_LOG("[groovy-input] follower %s: inputs=%s (%s)\n",
+                          rx->target,
+                          (rx->inputs == GROOVY_INPUTS_P1) ? "p1" : "p2",
+                          ok_bind ? "hooked" : "not hooked");
+            } else if (st->input_mode == GROOVY_INPUT_ON) {
+                RARCH_LOG("[groovy-input] follower %s: inputs=off (not hooked)\n", rx->target);
+            }
             {
                 gm_init_params follower_init_params;
                 int            follower_init_rc, follower_init_err;
@@ -2259,31 +2454,6 @@ static void *groovy_new(const struct record_params *params)
                            "crt-bridge client, NEVER for a MiSTer FPGA\n", rx->target);
             }
 
-            /* Per-receiver input channel: this follower is only a
-             * candidate for hookup if GROOVY_INPUT=on AND its `inputs`
-             * key isn't `off` -- inputs=off opens NO socket, not even to
-             * send the hookup byte. The index into the s_groovy_input_h[]
-             * set is st->rx[]'s, 1 + kept here -- never fcfg[]'s index i,
-             * which doesn't count the master and still counts a dropped
-             * follower. */
-            if (st->input_mode == GROOVY_INPUT_ON && rx->inputs != GROOVY_INPUTS_OFF) {
-                int ok_bind = (gm_bind_inputs(rx->gm, 0) == 0);
-                if (ok_bind) {
-                    s_groovy_input_h[1u + kept]    = rx->gm;
-                    s_groovy_input_attr[1u + kept] = rx->inputs;
-                    /* Named for the transition trace. */
-                    snprintf(s_groovy_input_target[1u + kept], sizeof(s_groovy_input_target[0]),
-                             "%s", rx->target);
-                } else {
-                    RARCH_WARN("[groovy-input] hookup failed towards %s\n", rx->target);
-                }
-                RARCH_LOG("[groovy-input] follower %s: inputs=%s (%s)\n",
-                          rx->target,
-                          (rx->inputs == GROOVY_INPUTS_P1) ? "p1" : "p2",
-                          ok_bind ? "hooked" : "not hooked");
-            } else if (st->input_mode == GROOVY_INPUT_ON) {
-                RARCH_LOG("[groovy-input] follower %s: inputs=off (not hooked)\n", rx->target);
-            }
             kept++;
         }
         st->n_rx = 1u + kept;
@@ -2801,9 +2971,6 @@ static void groovy_reannounce_emit(groovy_state_t *st, struct groovy_receiver *r
      * gm.h). The re-announce therefore inherits the mode without a single
      * line of code here: nothing to reset. */
     groovy_init_params_for(st, rx, &init_p);
-    rc_init  = gm_send_init(rx->gm, &init_p);
-    wsa_init = gm_last_announce_error(rx->gm);   /* before CMD_SWITCHRES, which would overwrite it */
-    t_init   = groovy_pacing_mono_ns();
 
     /* Reset the input sequence guard BEFORE sending the hookup byte below.
      * The ORDER IS THE FIX, not just the call itself: the peer cannot send
@@ -2872,6 +3039,16 @@ static void groovy_reannounce_emit(groovy_state_t *st, struct groovy_receiver *r
     if (st->input_mode == GROOVY_INPUT_ON && gm_send_input_hello(rx->gm) == 0)
         s_reannounce_hello++;
 
+    /* CMD_INIT goes out AFTER the hookup byte. A stock MiSTer core
+     * reads that byte once, non-blocking, inside its CMD_INIT handler, and
+     * sends the pads back to the source port of whatever it finds: a byte
+     * that arrives after the CMD_INIT is only read at the NEXT one. The
+     * crt-bridge receiver and client never read the byte at INIT time, so
+     * the order costs them nothing. */
+    rc_init  = gm_send_init(rx->gm, &init_p);
+    wsa_init = gm_last_announce_error(rx->gm);   /* before CMD_SWITCHRES, which would overwrite it */
+    t_init   = groovy_pacing_mono_ns();
+
     if (!st->av_cache.valid || st->av_cache.fps <= 0.0) {
         /* No geometry has been announced yet: CMD_INIT alone, and it is
          * counted. The next geometry change will do the rest. */
@@ -2912,7 +3089,7 @@ static void groovy_reannounce_emit(groovy_state_t *st, struct groovy_receiver *r
      * cache, groovy_mode_of(&st->av_cache) -- the pinned modeline of the
      * receiver, or the mode of the session: a re-announce always reapplies
      * the regime already announced, never a separately-tracked one. */
-    groovy_announce_modeline(groovy_mode_of(&st->av_cache), &st->session, &mode);
+    groovy_announce_modeline_for(&st->av_cache, &st->session, st->mode_state.khz31, st->mode_state.hold_hfreq, &mode);
     {
         const int      rc_sw  = gm_send_switchres(rx->gm, &mode);
         const int      wsa_sw = gm_last_announce_error(rx->gm);
@@ -2950,24 +3127,12 @@ static void groovy_reannounce_emit(groovy_state_t *st, struct groovy_receiver *r
  * of the fan-out result that follows: the "never the same turn" lock no
  * longer depends on any send, only on the number of frames rendered.
  *
- * No effect while the spacing hasn't elapsed. Cancelled if the receiver is
- * back in sync on a live link: a hooked peer never receives this resend --
- * this test reads rx->link.synced exactly as THIS frame's status drain
- * (groovy_drain_statuses, called earlier in groovy_push_video, before this
- * loop) and its ack_lost tick just left it: the caller must stay placed
- * AFTER that drain, never before. The geometry sent is the one in effect
- * AT SEND TIME.
+ * No effect while the spacing hasn't elapsed. NEVER cancelled because the
+ * receiver looks synchronized: an acknowledgement proves neither a
+ * mode nor a picture, and a CMD_INIT that went out has to be followed by the
+ * mode. The geometry sent is the one in effect AT SEND TIME.
  *
- * Why the link flag and not the last frame echo. The two agree whenever a
- * status arrives (groovy_ack_link_on_status sets synced from that same
- * echo); they part only after two seconds of silence, when
- * groovy_ack_link_on_tick drops synced while the last echo keeps its value
- * from before the silence. That is a restarted receiver, the very one the
- * open knock re-announces to: testing the stale echo would cancel the
- * knock's CMD_SWITCHRES and log a resync that never came back. A receiver
- * that does not answer CMD_INIT would then never get its geometry back.
- *
- * The two silent returns below (cancellation, av_cache guard) used to count
+ * The silent return below (av_cache guard) used to count
  * a failed CMD_INIT nowhere -- reannounces_failed undercounted in one
  * build. Fixed to increment s_reannounce_failure the same way the
  * immediate path does; the av_cache guard now also traces
@@ -2981,12 +3146,15 @@ static void groovy_reannounce_flush_deferred(groovy_state_t *st, struct groovy_r
     if (!groovy_reannounce_spacing_due(rx->switchres_t_init_ns, st->reannounce_spacing_us, now_ns))
         return;
     rx->switchres_deferred = 0;
-    if (rx->link.synced) {
-        if (rx->switchres_rc_init != 0) s_reannounce_failure++;
-        RARCH_LOG("[groovy-emit] reannounce: deferred switchres cancelled for target=%s role=%s -- resync already back\n",
-                  rx->target, groovy_role_name(rx->role));
-        return;
-    }
+    /* NEVER cancelled on a synchronized link. A CMD_INIT went out
+     * to this receiver: a stock MiSTer core wipes its modeline on every
+     * CMD_INIT (setInit allocates a fresh state) and skips every frame until
+     * the next CMD_SWITCHRES, yet it acknowledges each frame header -- so
+     * the link-sync flag is true within a few frames and proves neither a mode nor
+     * a picture. The cancellation that used to sit here left such a receiver
+     * black for good. A receiver that really kept its mode sees the same
+     * modeline twice, which every receiver of the protocol accepts (the
+     * follower repeats of groovy_switchres_repeat do exactly that). */
     if (!st->av_cache.valid || st->av_cache.fps <= 0.0) {
         if (rx->switchres_rc_init != 0) s_reannounce_failure++;
         groovy_announce_note(st, rx, GROOVY_ANNOUNCE_SWITCHRES, GROOVY_SITE_REANNOUNCE,
@@ -2995,7 +3163,7 @@ static void groovy_reannounce_flush_deferred(groovy_state_t *st, struct groovy_r
     }
     /* Same rationale as groovy_reannounce_emit above -- the modeline of the
      * announced regime, interlace included. */
-    groovy_announce_modeline(groovy_mode_of(&st->av_cache), &st->session, &mode);
+    groovy_announce_modeline_for(&st->av_cache, &st->session, st->mode_state.khz31, st->mode_state.hold_hfreq, &mode);
     {
         const int      rc_sw  = gm_send_switchres(rx->gm, &mode);
         const int      wsa_sw = gm_last_announce_error(rx->gm);
@@ -3005,6 +3173,49 @@ static void groovy_reannounce_flush_deferred(groovy_state_t *st, struct groovy_r
         groovy_announce_note(st, rx, GROOVY_ANNOUNCE_SWITCHRES, GROOVY_SITE_REANNOUNCE,
                             rc_sw, wsa_sw, t_sw);
     }
+}
+
+/* Says the mode again to one receiver at a fixed interval (groovy_mode_refresh.h).
+ * Not a re-announce: no CMD_INIT, no budget, no
+ * input-guard reset -- one CMD_SWITCHRES carrying the modeline last
+ * announced to everyone (st->announced_mode). Called between two frames,
+ * after the status drain and any re-announce of the same turn. */
+static void groovy_mode_refresh_maybe(groovy_state_t *st, struct groovy_receiver *rx,
+                                      uint64_t now_ms)
+{
+    int      rc, wsa;
+    uint64_t t_ns;
+    unsigned interval;
+    uint64_t last;
+
+    if (!st || !rx || !rx->gm) return;
+    /* One field per frame: a refresh between the two halves of a pair would
+     * make the receiver drop the half already assembled (it clears its
+     * partial slot on every CMD_SWITCHRES) and flip the parity of the pairs.
+     * That lever is a GroovyMAME-compat bench mode: no refresh there. */
+    if (st->field_mode == GROOVY_FIELD_PER_FRAME) return;
+    /* After a mode change, the first refreshes come close (250 ms, then 1 s):
+     * a stock MiSTer core ignores a CMD_SWITCHRES that lands while a frame is
+     * being received, and the master gets a single send. */
+    interval = st->mode_refresh_ms;
+    if (interval != 0u && rx->refresh_fast > 0u)
+        interval = (rx->refresh_fast >= 2u) ? 250u : 1000u;
+    last = (rx->last_refresh_ms > rx->last_announce_ms) ? rx->last_refresh_ms : rx->last_announce_ms;
+    if (!groovy_mode_refresh_due(interval, st->announced_valid ? 1 : 0,
+                                 rx->switchres_deferred ? 1 : 0, last, now_ms))
+        return;
+    rc   = gm_send_switchres(rx->gm, &st->announced_mode);
+    wsa  = gm_last_announce_error(rx->gm);
+    t_ns = groovy_pacing_mono_ns();
+    if (rx->refresh_fast > 0u)
+        rx->refresh_fast--;
+    /* Its own trace, not a site of [groovy-annonce] (the bench readers know
+     * four sites): one line per refresh. Its own timer: the open knock keeps
+     * its own reference (rx->last_announce_ms). */
+    rx->last_refresh_ms = t_ns / 1000000u;
+    RARCH_LOG("[groovy-emit] mode-refresh: target=%s role=%s issue=%s wsa=%d frame=%u t_ns=%llu\n",
+              rx->target, groovy_role_name(rx->role), rc == 0 ? "sent" : "failed", wsa,
+              (unsigned)st->frame_id, (unsigned long long)t_ns);
 }
 
 /* ---------------------------------------------------------------------------
@@ -3087,6 +3298,8 @@ static bool groovy_switchres_all(groovy_state_t *st, const gm_modeline *m)
         groovy_switchres_repeat_arm(&st->rx[i].repeat, st->turn_video + 1u,
                                     t_env[i] / 1000000u);
     }
+    for (unsigned i = 0u; i < st->n_rx; i++)
+        st->rx[i].refresh_fast = 2u;   /* 250 ms, then 1 s, then the steady interval */
     for (unsigned i = 0u; i < st->n_rx; i++)
         groovy_announce_note(st, &st->rx[i], GROOVY_ANNOUNCE_SWITCHRES,
                             GROOVY_SITE_SWITCHRES_ALL, rc[i], wsa[i], t_env[i]);
@@ -3825,7 +4038,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
 
     if (mode_action == GROOVY_MODE_ANNOUNCE) {
         gm_modeline mode;
-        groovy_announce_modeline(groovy_mode_of(&st->av_cache), &st->session, &mode);
+        groovy_announce_modeline_for(&st->av_cache, &st->session, st->mode_state.khz31, st->mode_state.hold_hfreq, &mode);
         /* The wire carries the modeline of the regime, not the native size:
          * a size change inside the same regime announces the very modeline
          * that is already there. The cache and the composition change, the
@@ -4020,6 +4233,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
          * most per turn; off with GROOVY_REANNOUNCE=off. */
         if (st->reannounce_enabled) want_master |= groovy_open_knock_due(&st->rx[0], now_ms);
         if (want_master) groovy_reannounce_emit(st, &st->rx[0]);
+        else             groovy_mode_refresh_maybe(st, &st->rx[0], now_ms);
 
         /* Freshness decision (groovy_pacing.h), on the state the drain
          * above just refreshed -- the ONLY call to
@@ -4126,6 +4340,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
             groovy_drain_statuses(st, &st->rx[i], now_ms, &want_i);
             if (st->reannounce_enabled) want_i |= groovy_open_knock_due(&st->rx[i], now_ms);
             if (want_i) groovy_reannounce_emit(st, &st->rx[i]);
+            else        groovy_mode_refresh_maybe(st, &st->rx[i], now_ms);
         }
 
         /* ack_lost plus a sample, one receiver at a time, in rx[] order --
@@ -4298,7 +4513,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
      * Placed HERE, outside the if/else 480i/240p chain below, so that BOTH
      * modes flush their deferrals -- and AFTER this frame's status drain
      * (groovy_drain_statuses, in the block that just closed) so that the
-     * cancellation test (rx->link.synced) reads the freshest
+     * (the old cancellation test is gone) reads the freshest
      * state. No effect when GROOVY_REANNOUNCE_SPACING_US is 0 (no send is
      * ever deferred); no effect on the frame that just set a deferral
      * (switchres_deferred_turn, checked in
@@ -4376,6 +4591,8 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
             groovy_session_factors(&st->session, send_w, send_h,
                                    st->session_ref_w, st->session_ref_h, &kx, &ky);
             by_env = 1;
+        } else if (split_mode == GROOVY_MODE_NATIVE) {
+            kx = 1u;   /* the mode IS the picture: nothing to multiply */
         } else
             kx = groovy_compose_factor_pinned(send_w, send_h, mode_w, mode_h,
                                               st->declared_aspect);
