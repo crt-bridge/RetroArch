@@ -179,6 +179,14 @@ static inline void groovy_announce_modeline(enum groovy_mode m,
  * 320 pixels comes out as 320/336/368/427, the shape the launcher already
  * hands for a 224p).
  *
+ * hold_hfreq (a MiSTer target): the LINE is held at the exact
+ * standard rate (15734 Hz NTSC, 15625 Hz PAL) and the frame rate follows
+ * it (263 lines: 59.83 Hz for a core at 59.92 Hz, 0.16 % apart). The
+ * FPGA composite encoder derives its colour subcarrier from the line rate:
+ * at 15.76 kHz the JVC switched the colour off (SuperStation, 2026-11-21).
+ * Without it the clock gives the core's own rate and the line comes out
+ * where the rounded line count puts it. 31 kHz is not touched.
+ *
  * Whether a receiver can show the result is its own judgment, as for any
  * modeline of the wire. Pure function. */
 #define GROOVY_NATIVE_INTERLACE_ABOVE_LINES 300u
@@ -187,7 +195,7 @@ static inline void groovy_announce_modeline(enum groovy_mode m,
 #define GROOVY_NATIVE_HFREQ_31K_HZ       31469.0
 
 static inline void groovy_announce_native(unsigned w, unsigned h, double fps, bool khz31,
-                                          gm_modeline *out)
+                                          bool hold_hfreq, gm_modeline *out)
 {
     const bool   hi   = khz31 && h > GROOVY_NATIVE_INTERLACE_ABOVE_LINES;
     const bool   itl  = !khz31 && h > GROOVY_NATIVE_INTERLACE_ABOVE_LINES;
@@ -241,7 +249,10 @@ static inline void groovy_announce_native(unsigned w, unsigned h, double fps, bo
     out->v_total   = (uint16_t)v_total;
     out->interlace = (uint8_t)(itl ? 1u : 0u);
 
-    khz = (double)h_total * (double)v_total * rate / 1000.0;
+    if (hold_hfreq && !hi)
+        khz = (double)h_total * hfreq / 1000.0;         /* the line is the standard line */
+    else
+        khz = (double)h_total * (double)v_total * rate / 1000.0;
     out->pclock_mhz = (double)(uint32_t)(khz + 0.5) / 1000.0;
 }
 
@@ -251,14 +262,15 @@ static inline void groovy_announce_native(unsigned w, unsigned h, double fps, bo
  * announcement sites go through this one. */
 static inline void groovy_announce_modeline_for(const groovy_av_cache_t *c,
                                                 const struct groovy_session_mode *sm,
-                                                bool khz31, gm_modeline *out)
+                                                bool khz31, bool hold_hfreq,
+                                                gm_modeline *out)
 {
     if (!c) {
         groovy_announce_pinned(GROOVY_MODE_240P_SUPER_RES, out);
         return;
     }
     if (c->valid && c->mode == GROOVY_MODE_NATIVE)
-        groovy_announce_native(c->width, c->height, c->fps, khz31, out);
+        groovy_announce_native(c->width, c->height, c->fps, khz31, hold_hfreq, out);
     else
         groovy_announce_modeline(groovy_mode_of(c), sm, out);
 }

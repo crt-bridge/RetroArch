@@ -2027,10 +2027,12 @@ static void *groovy_new(const struct record_params *params)
             st->pad_master = GROOVY_PAD_MODE_HEADERS;
             RARCH_LOG("[groovy] pad probe: %s answers `01 43 42 %u`: a MiSTer "
                       "core with padded headers\n", st->rx[0].target, rev);
+            st->mode_state.hold_hfreq = true;      /* a MiSTer target */
         } else if (peer == GM_PEER_STOCK) {
             st->pad_master = GROOVY_PAD_MODE_OFF;
             RARCH_LOG("[groovy] pad probe: %s answers one byte: the original "
                       "MiSTer core, the original forms stay\n", st->rx[0].target);
+            st->mode_state.hold_hfreq = true;      /* a MiSTer target */
             if (st->audio_mode != GROOVY_AUDIO_OFF) {
                 char cutmsg[GROOVY_FORCED_MSG_CAP];
 
@@ -2055,6 +2057,31 @@ static void *groovy_new(const struct record_params *params)
                               : st->pad_master == GROOVY_PAD_MODE_ON    ? GM_PAD_FULL
                               :                                           GM_PAD_OFF);
     RARCH_LOG("[groovy] pad: master=%s\n", groovy_pad_mode_name(st->pad_master));
+
+    /* The native announce toward a MiSTer holds the LINE at the standard rate:
+     * the FPGA composite encoder makes its colour subcarrier from
+     * the line rate, and the JVC switched the colour off at 15.76 kHz. The
+     * frame rate follows the line (59.83 Hz for a core at 59.92 Hz) -- the
+     * gap is said below, never silent. auto = a MiSTer target (the probe
+     * answered, or GROOVY_PAD=headers); on / off force it, the variable wins. */
+    if (st->pad_master == GROOVY_PAD_MODE_HEADERS)
+        st->mode_state.hold_hfreq = true;
+    {
+        const char *henv = getenv("GROOVY_NATIVE_HOLD_HFREQ");
+
+        if (groovy_precedence_env_wins(henv)) {
+            if (!strcmp(henv, "on"))
+                st->mode_state.hold_hfreq = true;
+            else if (!strcmp(henv, "off"))
+                st->mode_state.hold_hfreq = false;
+            else if (strcmp(henv, "auto"))
+                RARCH_WARN("[groovy] GROOVY_NATIVE_HOLD_HFREQ not understood (%s): auto kept\n", henv);
+        }
+    }
+    RARCH_LOG("[groovy-mode] native line rate: %s\n",
+              st->mode_state.hold_hfreq ? "held at the standard rate (15734 Hz NTSC); the frame rate follows the line "
+                                          "(59.83 Hz for a core at 59.92 Hz, 0.16 % apart) -- colour of the FPGA composite encoder"
+                                        : "the core's own rate (the line is where the rounded line count puts it)");
     RARCH_LOG("[groovy-mode] 31khz=%s (on: an image taller than 280 lines "
               "is announced as progressive 480p; off: interlaced 480i)\n",
               groovy_khz31_name(st->mode_state.khz31));
@@ -2986,7 +3013,7 @@ static void groovy_reannounce_emit(groovy_state_t *st, struct groovy_receiver *r
      * cache, groovy_mode_of(&st->av_cache) -- the pinned modeline of the
      * receiver, or the mode of the session: a re-announce always reapplies
      * the regime already announced, never a separately-tracked one. */
-    groovy_announce_modeline_for(&st->av_cache, &st->session, st->mode_state.khz31, &mode);
+    groovy_announce_modeline_for(&st->av_cache, &st->session, st->mode_state.khz31, st->mode_state.hold_hfreq, &mode);
     {
         const int      rc_sw  = gm_send_switchres(rx->gm, &mode);
         const int      wsa_sw = gm_last_announce_error(rx->gm);
@@ -3060,7 +3087,7 @@ static void groovy_reannounce_flush_deferred(groovy_state_t *st, struct groovy_r
     }
     /* Same rationale as groovy_reannounce_emit above -- the modeline of the
      * announced regime, interlace included. */
-    groovy_announce_modeline_for(&st->av_cache, &st->session, st->mode_state.khz31, &mode);
+    groovy_announce_modeline_for(&st->av_cache, &st->session, st->mode_state.khz31, st->mode_state.hold_hfreq, &mode);
     {
         const int      rc_sw  = gm_send_switchres(rx->gm, &mode);
         const int      wsa_sw = gm_last_announce_error(rx->gm);
@@ -3747,7 +3774,7 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
 
     if (mode_action == GROOVY_MODE_ANNOUNCE) {
         gm_modeline mode;
-        groovy_announce_modeline_for(&st->av_cache, &st->session, st->mode_state.khz31, &mode);
+        groovy_announce_modeline_for(&st->av_cache, &st->session, st->mode_state.khz31, st->mode_state.hold_hfreq, &mode);
         /* The wire carries the modeline of the regime, not the native size:
          * a size change inside the same regime announces the very modeline
          * that is already there. The cache and the composition change, the

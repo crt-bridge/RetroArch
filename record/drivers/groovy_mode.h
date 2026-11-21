@@ -91,6 +91,9 @@ struct groovy_mode_state {
     const struct groovy_session_mode *session;   /* the mode of the session; NULL = none (zero = none) */
     bool     native_fallback;  /* a picture that does not fit the session is announced at its native geometry,
                                 * not in the receiver's pinned table (zero = the pinned table) */
+    bool     hold_hfreq;       /* native announce: the LINE is held at the standard rate and the frame rate
+                                * follows (a MiSTer target: colour of the FPGA composite encoder;
+                                * GROOVY_NATIVE_HOLD_HFREQ; zero = the clock gives the core's own rate) */
 };
 /* A zeroed struct (calloc) is the valid initial state. */
 
