@@ -1583,7 +1583,7 @@ static void *groovy_new(const struct record_params *params)
                 RARCH_WARN("[groovy] GROOVY_MODE_FALLBACK not understood (%s): pinned table kept\n", env);
             }
         }
-        RARCH_LOG("[groovy] mode fallback: %s\n",
+        RARCH_LOG("[groovy] mode fallback: %s (variable or default; the peer's profile may change it)\n",
                   st->mode_state.native_fallback ? "native" : "pinned");
 
         /* The reason of the launcher's choice, shown on the status line of
@@ -1746,12 +1746,12 @@ static void *groovy_new(const struct record_params *params)
             forced = groovy_peer_parse(penv);
             if (forced < 0)
                 RARCH_WARN("[groovy] GROOVY_PEER=\"%s\" not understood (expected standard, "
-                           "crt-bridge, mister or mister-stock): the peer is asked\n", penv);
+                           "crt-bridge, mister or mister-stock): ignored\n", penv);
         }
         if (forced >= 0) {
             st->peer = (enum groovy_peer)forced;
             RARCH_LOG("[groovy] peer: %s (GROOVY_PEER)\n", groovy_peer_name(st->peer));
-        } else if (groovy_peer_wants_probe(false, st->pad_master, st->pad_from_env)) {
+        } else if (groovy_peer_wants_probe(st->pad_master, st->pad_from_env)) {
             unsigned  rev    = 0u;
             const int answer = gm_probe_peer(st->gm, 5, 300, &rev);
 
@@ -1769,11 +1769,21 @@ static void *groovy_new(const struct record_params *params)
                 RARCH_LOG("[groovy] peer: mister-stock (%s:%u answers one byte: the original "
                           "MiSTer core)\n", ip, (unsigned)port);
                 break;
-            default:
+            default: {
+                /* Said on the screen too: a crt-bridge receiver that was not up
+                 * yet would otherwise play the whole session in the wrong
+                 * dialect without the player knowing. */
+                char smsg[GROOVY_FORCED_MSG_CAP];
+
                 RARCH_WARN("[groovy] peer: standard (%s:%u gave no known answer to GET_VERSION): "
                            "the original Groovy protocol; GROOVY_PEER=crt-bridge if it is a "
                            "crt-bridge receiver that was not up yet\n", ip, (unsigned)port);
-                break;
+                snprintf(smsg, sizeof smsg,
+                         "%s:%u did not answer: original Groovy protocol. A crt-bridge "
+                         "receiver not up yet? Load the content again.", ip, (unsigned)port);
+                runloop_msg_queue_push(smsg, strlen(smsg), 2, 600, false, NULL,
+                      MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_WARNING);
+                break; }
             }
         } else {
             st->peer = groovy_peer_of_pad(st->pad_master);
@@ -1821,7 +1831,7 @@ static void *groovy_new(const struct record_params *params)
                   MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
         }
         groovy_input_set_clear();   /* discipline shared by every closing path */
-        gm_close(st->gm);           /* nothing went out yet, gm_init sends no byte */
+        gm_close(st->gm);           /* only the probe's GET_VERSION went out: no session to close */
         free(st);
         return NULL;
     }
@@ -2066,7 +2076,7 @@ static void *groovy_new(const struct record_params *params)
      * current fld0+fld1 path, bit-identical (guarded by
      * test_pcap_diff_groovy_baseline.py). */
     st->field_mode = groovy_field_mode_parse(getenv("GROOVY_FIELD_PER_FRAME"));
-    RARCH_LOG("[groovy] 480i: %s\n",
+    RARCH_LOG("[groovy] 480i: %s (variable or default; the peer's profile may change it)\n",
               (st->field_mode == GROOVY_FIELD_PER_FRAME)
                   ? "one field per frame (0x06 half-height, GroovyMAME path)"
                   : "two fields per frame (0x07, prior behavior)");
@@ -2111,14 +2121,15 @@ static void *groovy_new(const struct record_params *params)
 
         /* The original MiSTer core takes a 3-byte audio header that dies on a
          * Wi-Fi link, and the orphaned sound datagrams are read as commands:
-         * no audio towards it. GROOVY_PEER or an explicit GROOVY_PAD skips the
-         * question, and keeps the audio. */
+         * no audio towards it, nor towards the followers (the audio is one
+         * setting of the session). GROOVY_PAD=off, without GROOVY_PEER, asks
+         * nothing and keeps the audio. */
         if (prof->cut_audio && st->audio_mode != GROOVY_AUDIO_OFF) {
             char cutmsg[GROOVY_FORCED_MSG_CAP];
 
-            RARCH_WARN("[groovy] audio is cut towards %s:%u: the original MiSTer core "
-                       "takes a 3-byte audio header that dies on a Wi-Fi link "
-                       "(GROOVY_PAD=off keeps the audio)\n", ip, (unsigned)port);
+            RARCH_WARN("[groovy] audio is cut towards %s:%u and every follower: the original "
+                       "MiSTer core takes a 3-byte audio header that dies on a Wi-Fi link "
+                       "(GROOVY_PAD=off, without GROOVY_PEER, keeps the audio)\n", ip, (unsigned)port);
             snprintf(cutmsg, sizeof cutmsg,
                      "audio cut towards %s:%u: the original MiSTer core", ip, (unsigned)port);
             groovy_log_forced(cutmsg);
@@ -2173,9 +2184,8 @@ static void *groovy_new(const struct record_params *params)
                    st->rx[0].target);
     } else if (st->pad_master) {
         /* Same discipline as the follower warning further below: the
-         * protocol has no way to detect what is actually at the other end
-         * of the wire -- naming the target is the most honest thing we can
-         * do. */
+         * padding was chosen (GROOVY_PAD or the menu), the peer was not
+         * asked -- naming the target is the most honest thing we can do. */
         RARCH_WARN("[groovy] padded mode active towards %s (master); this "
                    "mode exists ONLY for a crt-bridge receiver or a "
                    "crt-bridge client, NEVER for a MiSTer FPGA\n",
@@ -2509,6 +2519,22 @@ static void *groovy_new(const struct record_params *params)
             RARCH_WARN("[groovy] GROOVY_FIELD_PER_FRAME active with %u follower(s): the field "
                        "sent to everyone follows the MASTER's parity -- a tube follower "
                        "(crt-bridge-rcv) would receive reversed fields; known limitation\n", kept);
+
+        /* The master's profile is one set of session settings: the mode
+         * fallback, the line, the fields and the audio reach every follower
+         * too. Said on the screen and in the log when it is not the
+         * crt-bridge profile, the one the followers were written for. */
+        if (st->peer != GROOVY_PEER_CRTBRIDGE && kept > 0u) {
+            char fmsg[GROOVY_FORCED_MSG_CAP];
+
+            RARCH_WARN("[groovy] the master's profile (%s) applies to the %u follower(s) too: "
+                       "mode fallback, line, fields%s\n", groovy_peer_name(st->peer), kept,
+                       groovy_peer_profile(st->peer)->cut_audio ? ", and no audio" : "");
+            snprintf(fmsg, sizeof fmsg, "Master is %s: its settings reach the %u follower(s)%s",
+                     groovy_peer_name(st->peer), kept,
+                     groovy_peer_profile(st->peer)->cut_audio ? ", audio cut for all" : "");
+            groovy_log_forced(fmsg);
+        }
     }
 
     /* CMD_SWITCHRES is NOT sent here. Rationale:

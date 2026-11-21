@@ -103,12 +103,11 @@ static inline enum groovy_peer groovy_peer_from_probe(int gm_peer)
     }
 }
 
-/* Is the peer asked? pad_master is the value resolved from GROOVY_PAD or the
- * menu, pad_from_env says which. See the table at the top of this file. */
-static inline bool groovy_peer_wants_probe(bool peer_forced, int pad_master, bool pad_from_env)
+/* Is the peer asked, when GROOVY_PEER names no profile? pad_master is the value
+ * resolved from GROOVY_PAD or the menu, pad_from_env says which. See the table
+ * at the top of this file. */
+static inline bool groovy_peer_wants_probe(int pad_master, bool pad_from_env)
 {
-    if (peer_forced)
-        return false;
     if (pad_master == GROOVY_PAD_MODE_PROBE)
         return true;
     if (pad_from_env)
