@@ -13,10 +13,11 @@ This is the chain the pre-release was tried on, and nothing else.
 - Emitter: Windows 11, with the `vulkan` and `glcore` video drivers.
 - Receiver: a PC with an AMD Radeon HD 7750 graphics card, under the Linux `radeon` driver, wired by Ethernet, driving a JVC DT-V1710CG tube. This receiver is not part of this release.
 - Software receiver (the crt-bridge client, a libretro core that shows the picture on a second computer instead of a tube): on Windows and on macOS. The Mac was also tried over Wi-Fi, with Padded Session turned on.
+- A MiSTer FPGA, a SuperStation One running the Groovy core, through its composite output to the same JVC tube, over Wi-Fi. Picture and gamepad work with the original Groovy core; sound needed a modified core, which is not published.
 
 ### Expected but not tested
 
-- A MiSTer FPGA running its Groovy core. It speaks the same protocol, but this release has never been tried with one. Never turn on Receiver 31 kHz or Padded Session (a Wi-Fi option) towards it.
+- A MiSTer's other analog outputs (RGB, S-Video), other MiSTer boards, and a MiSTer on a wired link. Never turn on Receiver 31 kHz or Padded Session (a Wi-Fi option) towards a MiSTer.
 - The Linux emitter towards a CRT receiver. The Linux kit has only been run towards the software receiver.
 
 ### Not supported
@@ -59,6 +60,36 @@ message on the PC screen that says where to set it.
 
 Everything RetroArch writes (saves, states, screenshots, logs, playlists, the settings saved
 by the menu) stays inside this folder.
+
+## Using a MiSTer as the receiver
+
+A MiSTer FPGA with its Groovy core can be the receiver instead of a PC. On the emitter, nothing
+changes from the Quick start: set Groovy Master Address to the MiSTer's address.
+
+**What the emitter does by itself.** When recording starts, it asks the receiver what it is. A
+MiSTer core gets the original Groovy protocol: every picture at the core's own resolution, the
+line held at the standard 15,734 Hz, or 15,625 Hz for a 50 Hz game (a composite encoder takes
+its colour from the line rate),
+and one field per frame in 480i. A crt-bridge receiver keeps its own settings. The log says
+which receiver was found.
+
+**On the MiSTer.**
+
+- Load the Groovy core. A wired network is better: the Wi-Fi of the tested MiSTer dropped once in
+  a long session, which froze the picture for about ten seconds.
+- In the Groovy core's menu, set Joysticks to On, or the gamepad is not sent back.
+- The Groovy core shows ten generic buttons. Map Start, Select, L and R in the MiSTer's own
+  controller menu: before that, only the directions and a few buttons reach the emulator.
+- Use a USB gamepad on the MiSTer.
+- To drive a 15 kHz CRT, set the MiSTer's video output for a CRT. On a SuperStation One, through
+  composite: System menu, Video, CRT mode; DIP switch 3 up; and `vga_mode=svideo` in
+  `MiSTer.ini`. With the factory settings its composite output is black and white.
+
+**Limits.**
+
+- Sound. The original Groovy core receives sound in small packets that a Wi-Fi link drops, and the
+  packets that follow are then misread. Towards that core the emitter sends no sound.
+- 480i. The tested MiSTer showed doubled frames now and then in 480i, over Wi-Fi. Not explained yet.
 
 ## Factory settings
 
