@@ -5,8 +5,8 @@
  * a mailbox and goes on.
  *
  * Off by default: GROOVY_CODEC names the follower, the rate and the parity, e.g. "1:h264:20000:10" = the
- * first follower, H.264 4:4:4, 20000 kbit/s, 10 % Reed-Solomon parity (the burst-loss table of
- * libgm/test/test_shard_burst.c is why it is that low: under Wi-Fi bursts, parity buys little). (A key of GROOVY_FOLLOWERS will take over once the codec is
+ * first follower, H.264 4:4:4, 20000 kbit/s, 10 % Reed-Solomon parity (measured burst-loss table: under
+ * Wi-Fi bursts, parity buys little, which is why it is that low). (A key of GROOVY_FOLLOWERS will take over once the codec is
  * proven; for one follower an environment variable is enough.)
  *
  * The mailbox keeps the LATEST picture only: a codec that falls behind drops pictures, it never

@@ -111,9 +111,9 @@ groovy_nvenc *groovy_nvenc_open(const groovy_nvenc_cfg *cfg, const char **why)
     e->w = cfg->width; e->h = cfg->height;
     QueryPerformanceFrequency(&e->qpf);
 
-    e->cuda_dll = LoadLibraryA("nvcuda.dll");
+    e->cuda_dll = LoadLibraryExA("nvcuda.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!e->cuda_dll) { *why = "nvcuda.dll not found (no NVIDIA driver)"; goto fail; }
-    e->nv_dll = LoadLibraryA("nvEncodeAPI64.dll");
+    e->nv_dll = LoadLibraryExA("nvEncodeAPI64.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!e->nv_dll) { *why = "nvEncodeAPI64.dll not found (no NVENC)"; goto fail; }
     cu_init = (cuInit_fn)(void *)GetProcAddress(e->cuda_dll, "cuInit");
     cu_dev = (cuDeviceGet_fn)(void *)GetProcAddress(e->cuda_dll, "cuDeviceGet");

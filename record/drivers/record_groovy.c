@@ -2108,8 +2108,8 @@ static void *groovy_new(const struct record_params *params)
                                           "(59.83 Hz for a core at 59.92 Hz, 0.16 % apart) -- colour of the FPGA composite encoder"
                                         : "the core's own rate (the line is where the rounded line count puts it)");
 
-    /* The same MiSTer target also takes the two settings the SuperStation trial
-     * proved good (Sir, 2026-11-21, at the JVC): the native fallback (the
+    /* The same MiSTer target also takes the two settings a trial on a CRT
+     * proved good: the native fallback (the
      * receiver's pinned table is a table of one tube, 2560 columns, which a
      * MiSTer does not show) and ONE field per frame in 480i (two fields per
      * frame looked bad; the tube refused the one-field mode by eye, so it is
@@ -3624,6 +3624,8 @@ static bool groovy_fan_out(groovy_state_t *st, enum groovy_emit_kind k,
                             memcpy(whole + (2u * r + 1u) * row, pb + r * row, row);
                         }
                         pic = whole;
+                    } else {
+                        pic = NULL;   /* no whole picture: the half-size field must never be read as a full one */
                     }
                 }
                 if (pic && pw && ph) {

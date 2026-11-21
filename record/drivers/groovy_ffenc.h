@@ -5,7 +5,7 @@
  * Same shape as groovy_nvenc.h, and the same configuration structure: the codec thread of
  * record_groovy calls either one. libavcodec is NOT linked: it is loaded at run time (LoadLibrary /
  * dlopen) from GROOVY_FFMPEG_DIR, then the system, then (macOS) Homebrew, exactly as the client
- * loads it for decoding (client/codec_ff.c); no FFmpeg header is compiled in, the prototypes are
+ * loads it for decoding; no FFmpeg header is compiled in, the prototypes are
  * written by hand. Only the majors listed in groovy_ffenc.c are accepted. libx264 must be inside that
  * FFmpeg (a GPL build): when it is not, groovy_ffenc_open returns NULL and says why, and the caller
  * falls back to LZ4.

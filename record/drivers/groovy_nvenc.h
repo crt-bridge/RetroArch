@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* groovy_nvenc.h -- H.264 4:4:4 encoding of the native picture through NVENC, loaded at run time
- * (phase 38, slice 3 of the codec phase).
+/* groovy_nvenc.h -- H.264 4:4:4 encoding of the native picture through NVENC, loaded at run time.
  *
  * NVENC is reached through the driver's own nvEncodeAPI64.dll and nvcuda.dll, loaded with
  * LoadLibrary: nothing is linked, nothing new is built, nothing is shipped. When the DLL or the card is
@@ -23,7 +22,7 @@ typedef struct groovy_nvenc groovy_nvenc;
 typedef struct {
     unsigned width, height;        /* the native picture */
     unsigned fps_num, fps_den;     /* the rate it arrives at (the VBV buffer is one frame of it) */
-    unsigned bitrate_kbps;         /* constant bitrate, 20000 by default (spike 019: 39.7 dB on Tekken 3) */
+    unsigned bitrate_kbps;         /* constant bitrate, 20000 by default (39.7 dB measured at that rate on real game frames) */
     int      intra_refresh;        /* 1 = gradual refresh over `refresh_period` frames instead of periodic keyframes */
     unsigned refresh_period;       /* 60 by default */
 } groovy_nvenc_cfg;

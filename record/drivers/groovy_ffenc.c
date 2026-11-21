@@ -265,6 +265,11 @@ static void ffenc_stop(groovy_ffenc *e)
 
 groovy_ffenc *groovy_ffenc_open(const groovy_nvenc_cfg *cfg, const char **why)
 {
+#if !(UINTPTR_MAX > 0xffffffffu)
+    /* The hand-written AVFrame/AVPacket prefixes are checked for 64-bit builds only. */
+    if (why) *why = "the libx264 path is built for 64-bit only";
+    return NULL;
+#endif
     groovy_ffenc *e;
     if (why) *why = "";
     if (!cfg || cfg->width < 16u || cfg->height < 16u || cfg->width > 4096u || cfg->height > 2048u) { if (why) *why = "bad picture size"; return NULL; }
