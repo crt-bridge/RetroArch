@@ -172,6 +172,10 @@ static inline void groovy_pacing_log_mute(const char *ev) { (void)ev; }
  * pad= key (groovy_followers.h), unrelated to this header. */
 #include "groovy_pad.h"
 
+/* What the master is (crt-bridge receiver, MiSTer core, original Groovy) and
+ * the one table of settings that follows from it. Header-only. */
+#include "groovy_peer.h"
+
 /* "The receiver takes 31 kHz" setting: reads GROOVY_31KHZ, handed to the
  * regime rule through st->mode_state.khz31 (groovy_mode.h). Header-only,
  * same pattern as groovy_pad.h above. */
@@ -524,6 +528,12 @@ typedef struct {
      * from its GROOVY_FOLLOWERS pad= key -- this field never touches
      * that. --- */
     int pad_master;   /* off by default */
+    bool pad_from_env;   /* pad_master came from GROOVY_PAD, not from the menu */
+
+    /* --- What the master is (groovy_peer.h): asked once at opening, before the
+     * first CMD_INIT and before the followers are read; its profile gives the
+     * defaults of the mode, the line, the fields, the padding and the audio. --- */
+    enum groovy_peer peer;
 
     /* --- Lever 1 switch. Set at session opening, never touched
      * afterwards; handed to libgm via the frame-skip setter. dup_count_base
@@ -538,9 +548,7 @@ typedef struct {
      * parity of the sent field (0 or 1), reset by the [groovy-emit] block
      * every 600 frames -- a wide gap between the two entries would signal
      * a stuck parity, hence a stale ACK. --- */
-    enum groovy_field_mode field_mode;      /* both (0x07) by default */
-    bool mister_target;                     /* the master is a MiSTer core: forked (probe answered), original, or
-                                             * GROOVY_PAD=headers; set once at opening, after the probe */
+    enum groovy_field_mode field_mode;      /* both (0x07) by default; the peer's profile may change it */
     uint32_t                fields_sent[2];
 
     /* --- Send-side MTU. Set at session opening, never touched
@@ -1485,6 +1493,7 @@ static void *groovy_new(const struct record_params *params)
                 p = 0;
             }
             st->pad_master = p;
+            st->pad_from_env = true;
             groovy_precedence_msg(msg, sizeof msg, "groovy_pad",
                                   groovy_pad_mode_name(p), "GROOVY_PAD");
             groovy_log_forced(msg);
@@ -1722,11 +1731,66 @@ static void *groovy_new(const struct record_params *params)
         }
     }
 
+    /* What the master is (groovy_peer.h). Asked HERE, before the followers are
+     * read (their shape must be the master's) and long before the first
+     * CMD_INIT: nothing has gone out on the master's socket yet. GROOVY_PEER
+     * names the profile and skips the question; an explicit GROOVY_PAD, or the
+     * menu's padded session, is a choice and skips it too. The crt-bridge
+     * receiver answers with its status: its profile is the behaviour of before,
+     * to the bit, from the CMD_INIT on. */
+    {
+        const char *penv   = getenv("GROOVY_PEER");
+        int         forced = -1;
+
+        if (groovy_precedence_env_wins(penv)) {
+            forced = groovy_peer_parse(penv);
+            if (forced < 0)
+                RARCH_WARN("[groovy] GROOVY_PEER=\"%s\" not understood (expected standard, "
+                           "crt-bridge, mister or mister-stock): the peer is asked\n", penv);
+        }
+        if (forced >= 0) {
+            st->peer = (enum groovy_peer)forced;
+            RARCH_LOG("[groovy] peer: %s (GROOVY_PEER)\n", groovy_peer_name(st->peer));
+        } else if (groovy_peer_wants_probe(false, st->pad_master, st->pad_from_env)) {
+            unsigned  rev    = 0u;
+            const int answer = gm_probe_peer(st->gm, 5, 300, &rev);
+
+            st->peer = groovy_peer_from_probe(answer);
+            switch (st->peer) {
+            case GROOVY_PEER_CRTBRIDGE:
+                RARCH_LOG("[groovy] peer: crt-bridge (%s:%u answers GET_VERSION with its "
+                          "13-byte status)\n", ip, (unsigned)port);
+                break;
+            case GROOVY_PEER_MISTER:
+                RARCH_LOG("[groovy] peer: mister (%s:%u answers `01 43 42 %u`: a MiSTer core "
+                          "with padded headers)\n", ip, (unsigned)port, rev);
+                break;
+            case GROOVY_PEER_MISTER_STOCK:
+                RARCH_LOG("[groovy] peer: mister-stock (%s:%u answers one byte: the original "
+                          "MiSTer core)\n", ip, (unsigned)port);
+                break;
+            default:
+                RARCH_WARN("[groovy] peer: standard (%s:%u gave no known answer to GET_VERSION): "
+                           "the original Groovy protocol; GROOVY_PEER=crt-bridge if it is a "
+                           "crt-bridge receiver that was not up yet\n", ip, (unsigned)port);
+                break;
+            }
+        } else {
+            st->peer = groovy_peer_of_pad(st->pad_master);
+            RARCH_LOG("[groovy] peer: %s (not asked: padding chosen by %s)\n",
+                      groovy_peer_name(st->peer),
+                      st->pad_from_env ? "GROOVY_PAD" : "the menu");
+        }
+    }
+
     uint32_t mip    = 0u;
     uint16_t mport  = port;
     int      mip_ok = gm_peer_addr(st->gm, &mip, &mport);
+    const char *fpf_env = getenv("GROOVY_FIELD_PER_FRAME");
     int      shape_master =
-        (groovy_field_mode_parse(getenv("GROOVY_FIELD_PER_FRAME")) == GROOVY_FIELD_PER_FRAME)
+        (groovy_precedence_env_wins(fpf_env)
+             ? (groovy_field_mode_parse(fpf_env) == GROOVY_FIELD_PER_FRAME)
+             : groovy_peer_profile(st->peer)->field_per_frame)
             ? GROOVY_SHAPE_FIELD : GROOVY_SHAPE_IMAGE;
     struct groovy_follower_config fcfg[GROOVY_FOLLOWERS_MAX];
     unsigned n_f = 0u;
@@ -2028,69 +2092,61 @@ static void *groovy_new(const struct record_params *params)
               (st->mtu == (unsigned)GM_MTU_DEFAULT) ? " (default)" : " (GROOVY_MTU)");
     groovy_log_send_path(st->gm, "master", st->mtu, false);
 
-    /* Padded-session mode for the MASTER: st->pad_master is resolved once,
-     * above, in the "Menu / variable precedence" block (GROOVY_PAD or the
-     * persisted groovy_pad key) -- off by default, because a MiSTer master
-     * only reads a 4- or 5-byte CMD_INIT and would break on 8. Must run
-     * BEFORE gm_send_init (libgm/include/gm.h contract). */
-    /* "probe" asks the peer first (CMD_GET_VERSION, sent alone,
-     * repeated -- it runs here, before the first CMD_INIT, while nothing else
-     * flows on the socket). The forked MiSTer core answers `01 43 42 <rev>`:
-     * padded headers. The original MiSTer core answers one byte: the original
-     * forms stay, and the audio is cut -- its 3-byte header dies on a Wi-Fi
-     * link and the orphaned sound datagrams are read as commands. Anything
-     * else (the crt-bridge receiver answers with its 13-byte status, a silent
-     * peer answers nothing): the original forms, audio untouched. The
-     * resolved mode is kept in st->pad_master for the log and the warning
-     * below. */
-    if (st->pad_master == GROOVY_PAD_MODE_PROBE) {
-        unsigned rev = 0u;
-        const int peer = gm_probe_peer(st->gm, 5, 300, &rev);
+    /* The settings of the master's profile (groovy_peer.h), asked above,
+     * before the followers were read. Each one keeps its variable, which wins
+     * whatever its value; the profile only gives the default. */
+    {
+        const struct groovy_peer_profile *prof = groovy_peer_profile(st->peer);
 
-        if (peer == GM_PEER_PADDED) {
-            st->pad_master = GROOVY_PAD_MODE_HEADERS;
-            RARCH_LOG("[groovy] pad probe: %s answers `01 43 42 %u`: a MiSTer "
-                      "core with padded headers\n", st->rx[0].target, rev);
-            st->mister_target = true;              /* a MiSTer target */
-        } else if (peer == GM_PEER_STOCK) {
-            st->pad_master = GROOVY_PAD_MODE_OFF;
-            RARCH_LOG("[groovy] pad probe: %s answers one byte: the original "
-                      "MiSTer core, the original forms stay\n", st->rx[0].target);
-            st->mister_target = true;              /* a MiSTer target */
-            if (st->audio_mode != GROOVY_AUDIO_OFF) {
-                char cutmsg[GROOVY_FORCED_MSG_CAP];
+        /* Padding: must reach libgm BEFORE gm_send_init (libgm/include/gm.h
+         * contract). A MiSTer master only reads a 4- or 5-byte CMD_INIT unless
+         * its core was forked for padded headers. */
+        st->pad_master = groovy_peer_pad_mode(st->peer, st->pad_master, st->pad_from_env);
+        (void)gm_set_padding_mode(st->gm,
+                                  st->pad_master == GROOVY_PAD_MODE_HEADERS ? GM_PAD_HEADERS
+                                  : st->pad_master == GROOVY_PAD_MODE_ON    ? GM_PAD_FULL
+                                  :                                           GM_PAD_OFF);
+        RARCH_LOG("[groovy] pad: master=%s (peer %s)\n",
+                  groovy_pad_mode_name(st->pad_master), prof->name);
 
-                RARCH_WARN("[groovy] audio is cut towards %s: the original "
-                           "MiSTer core takes a 3-byte audio header that dies "
-                           "on a Wi-Fi link (GROOVY_PAD=off keeps the audio)\n",
-                           st->rx[0].target);
-                snprintf(cutmsg, sizeof cutmsg,
-                         "audio cut towards %s: the original MiSTer core "
-                         "(GROOVY_PAD=probe)", st->rx[0].target);
-                groovy_log_forced(cutmsg);
-                st->audio_mode = GROOVY_AUDIO_OFF;
-            }
-        } else {
-            st->pad_master = GROOVY_PAD_MODE_OFF;
-            RARCH_LOG("[groovy] pad probe: %s gave no known answer to "
-                      "GET_VERSION: the original forms stay\n", st->rx[0].target);
+        /* The original MiSTer core takes a 3-byte audio header that dies on a
+         * Wi-Fi link, and the orphaned sound datagrams are read as commands:
+         * no audio towards it. GROOVY_PEER or an explicit GROOVY_PAD skips the
+         * question, and keeps the audio. */
+        if (prof->cut_audio && st->audio_mode != GROOVY_AUDIO_OFF) {
+            char cutmsg[GROOVY_FORCED_MSG_CAP];
+
+            RARCH_WARN("[groovy] audio is cut towards %s:%u: the original MiSTer core "
+                       "takes a 3-byte audio header that dies on a Wi-Fi link "
+                       "(GROOVY_PAD=off keeps the audio)\n", ip, (unsigned)port);
+            snprintf(cutmsg, sizeof cutmsg,
+                     "audio cut towards %s:%u: the original MiSTer core", ip, (unsigned)port);
+            groovy_log_forced(cutmsg);
+            st->audio_mode = GROOVY_AUDIO_OFF;
+        }
+
+        /* The native announce holds the LINE at the standard rate towards a
+         * MiSTer: the FPGA composite encoder makes its colour subcarrier from
+         * the line rate, and the JVC switched the colour off at 15.76 kHz. The
+         * frame rate follows the line (59.83 Hz for a core at 59.92 Hz) -- the
+         * gap is said below, never silent. */
+        st->mode_state.hold_hfreq = prof->hold_hfreq;
+
+        /* The native fallback (the receiver's pinned table is a table of one
+         * tube, 2560 columns) and ONE field per frame in 480i (the GroovyMAME
+         * path; two fields per frame looked bad on a MiSTer). The crt-bridge
+         * receiver keeps its pinned table and two fields per frame. */
+        if (prof->native_fallback && !groovy_precedence_env_wins(getenv("GROOVY_MODE_FALLBACK"))) {
+            st->mode_state.native_fallback = true;
+            RARCH_LOG("[groovy] mode fallback: native (peer %s; GROOVY_MODE_FALLBACK=pinned "
+                      "keeps the pinned table)\n", prof->name);
+        }
+        if (prof->field_per_frame && !groovy_precedence_env_wins(getenv("GROOVY_FIELD_PER_FRAME"))) {
+            st->field_mode = GROOVY_FIELD_PER_FRAME;
+            RARCH_LOG("[groovy] 480i: one field per frame (peer %s; GROOVY_FIELD_PER_FRAME=off "
+                      "keeps two fields)\n", prof->name);
         }
     }
-    (void)gm_set_padding_mode(st->gm,
-                              st->pad_master == GROOVY_PAD_MODE_HEADERS ? GM_PAD_HEADERS
-                              : st->pad_master == GROOVY_PAD_MODE_ON    ? GM_PAD_FULL
-                              :                                           GM_PAD_OFF);
-    RARCH_LOG("[groovy] pad: master=%s\n", groovy_pad_mode_name(st->pad_master));
-
-    /* The native announce toward a MiSTer holds the LINE at the standard rate:
-     * the FPGA composite encoder makes its colour subcarrier from
-     * the line rate, and the JVC switched the colour off at 15.76 kHz. The
-     * frame rate follows the line (59.83 Hz for a core at 59.92 Hz) -- the
-     * gap is said below, never silent. auto = a MiSTer target (the probe
-     * answered, or GROOVY_PAD=headers); on / off force it, the variable wins. */
-    if (st->pad_master == GROOVY_PAD_MODE_HEADERS)
-        st->mister_target = true;
-    st->mode_state.hold_hfreq = st->mister_target;
     {
         const char *henv = getenv("GROOVY_NATIVE_HOLD_HFREQ");
 
@@ -2107,25 +2163,6 @@ static void *groovy_new(const struct record_params *params)
               st->mode_state.hold_hfreq ? "held at the standard rate (15734 Hz NTSC); the frame rate follows the line "
                                           "(59.83 Hz for a core at 59.92 Hz, 0.16 % apart) -- colour of the FPGA composite encoder"
                                         : "the core's own rate (the line is where the rounded line count puts it)");
-
-    /* The same MiSTer target also takes the two settings a trial on a CRT
-     * proved good: the native fallback (the
-     * receiver's pinned table is a table of one tube, 2560 columns, which a
-     * MiSTer does not show) and ONE field per frame in 480i (two fields per
-     * frame looked bad; the tube refused the one-field mode by eye, so it is
-     * never applied to it). A variable that is set wins, whatever its value:
-     * GROOVY_MODE_FALLBACK=pinned, GROOVY_FIELD_PER_FRAME=off keep the old
-     * behaviour. */
-    if (st->mister_target) {
-        if (!groovy_precedence_env_wins(getenv("GROOVY_MODE_FALLBACK"))) {
-            st->mode_state.native_fallback = true;
-            RARCH_LOG("[groovy] mode fallback: native (a MiSTer target; GROOVY_MODE_FALLBACK=pinned keeps the pinned table)\n");
-        }
-        if (!groovy_precedence_env_wins(getenv("GROOVY_FIELD_PER_FRAME"))) {
-            st->field_mode = GROOVY_FIELD_PER_FRAME;
-            RARCH_LOG("[groovy] 480i: one field per frame (a MiSTer target; GROOVY_FIELD_PER_FRAME=off keeps two fields)\n");
-        }
-    }
     RARCH_LOG("[groovy-mode] 31khz=%s (on: an image taller than 280 lines "
               "is announced as progressive 480p; off: interlaced 480i)\n",
               groovy_khz31_name(st->mode_state.khz31));
@@ -2225,11 +2262,11 @@ static void *groovy_new(const struct record_params *params)
          * "rough" there and perfectly smooth locally; the same audio sent at
          * 48000 Hz (this driver resampling) was "much better". A MiSTer core
          * resamples to its own output rate with a crude filter. So toward a
-         * MiSTer core (padded headers: GROOVY_PAD=headers, or a probe that
-         * found one) a 44100 Hz core goes out at 48000 Hz, unless
-         * GROOVY_AUDIO_RATE says otherwise. */
+         * MiSTer core with audio (the peer's profile, groovy_peer.h) a
+         * 44100 Hz core goes out at 48000 Hz, unless GROOVY_AUDIO_RATE says
+         * otherwise. */
         if ((!arate || arate[0] == '\0') && code == 2u
-            && st->pad_master == GROOVY_PAD_MODE_HEADERS) {
+            && groovy_peer_profile(st->peer)->wire_48k) {
             code = 3u;
             RARCH_LOG("[groovy] audio: wire rate 48000 Hz toward a MiSTer core "
                       "(its own resampling of 44100 Hz is crude; "
@@ -3189,11 +3226,14 @@ static void groovy_mode_refresh_maybe(groovy_state_t *st, struct groovy_receiver
     uint64_t last;
 
     if (!st || !rx || !rx->gm) return;
-    /* One field per frame: a refresh between the two halves of a pair would
-     * make the receiver drop the half already assembled (it clears its
-     * partial slot on every CMD_SWITCHRES) and flip the parity of the pairs.
-     * That lever is a GroovyMAME-compat bench mode: no refresh there. */
-    if (st->field_mode == GROOVY_FIELD_PER_FRAME) return;
+    /* One field per frame, while the wire carries fields: a refresh between
+     * the two halves of a pair would make the crt-bridge receiver drop the half
+     * already assembled (it clears its partial slot on every CMD_SWITCHRES) and
+     * flip the parity of the pairs. No refresh then. A progressive mode has no
+     * pair to break: the refresh runs, whatever the field setting. */
+    if (st->field_mode == GROOVY_FIELD_PER_FRAME
+        && groovy_announce_wire_has_fields(st->announced_valid, &st->announced_mode))
+        return;
     /* After a mode change, the first refreshes come close (250 ms, then 1 s):
      * a stock MiSTer core ignores a CMD_SWITCHRES that lands while a frame is
      * being received, and the master gets a single send. */

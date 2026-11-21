@@ -11,11 +11,10 @@
  * carried above the size a Wi-Fi link drops (CMD_INIT at 8 bytes instead of
  * 4). See libgm/include/gm.h, gm_set_padding.
  *
- * OFF is the default, so nothing changes on first launch: a MiSTer FPGA
- * only reads a 4- or 5-byte CMD_INIT and a 3-byte CMD_AUDIO. Turning
- * padding on by default would break every MiSTer master, and the protocol
- * has no way to know what is actually at the other end of the wire -- there
- * is no negotiation, only a deliberate, off-by-default choice made here.
+ * OFF is the default: a MiSTer FPGA only reads a 4- or 5-byte CMD_INIT and
+ * a 3-byte CMD_AUDIO. With no explicit value the master is asked what it is
+ * (groovy_peer.h) and its profile gives the padding; a value set here is a
+ * choice, and the master is not asked.
  *
  * This setting is for the MASTER only. A follower keeps its own `pad=` key
  * inside GROOVY_FOLLOWERS (groovy_followers.h) -- unrelated to this file,
