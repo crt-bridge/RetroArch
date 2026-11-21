@@ -2211,14 +2211,14 @@ static void *groovy_new(const struct record_params *params)
                     if (!rx->pad)
                         RARCH_WARN("[groovy] codec: follower %u is not pad=on, the codec needs a padded session: it stays in LZ4\n", cf);
                     else if (!groovy_codec_available(&why))
-                        RARCH_WARN("[groovy] codec: NVENC is not usable here (%s): follower %u stays in LZ4\n", why ? why : "?", cf);
+                        RARCH_WARN("[groovy] codec: no encoder is usable here (%s): follower %u stays in LZ4\n", why ? why : "?", cf);
                     else {
                         rx->codec_w = groovy_codec_start(rx->gm, ck, 60u, 1u);
                         if (rx->codec_w) {
                             rx->codec = GM_CODEC_H264;
                             rx->codec_kbps = ck;
                             (void)gm_set_codec_parity(rx->gm, cpar);
-                            RARCH_LOG("[groovy] codec: follower %u in H.264 4:4:4, %u kbit/s, %u %% parity, NVENC in its own thread\n", cf, ck, cpar);
+                            RARCH_LOG("[groovy] codec: follower %u in H.264 4:4:4, %u kbit/s, %u %% parity, %s in its own thread\n", cf, ck, cpar, groovy_codec_backend());
                         } else
                             RARCH_WARN("[groovy] codec: the encoder thread did not start: follower %u stays in LZ4\n", cf);
                     }

@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "groovy_nvenc.h"
+#include "groovy_ffenc.h"
 
 /* --- GROOVY_CODEC = <follower>:<codec>[:<kbit/s>[:<parity %>]] -------------------------------------
  * follower: 1..4 (1 = the first follower of GROOVY_FOLLOWERS); codec: "h264"; kbit/s: 500..200000
@@ -69,8 +70,11 @@ typedef struct {
     double             worst_us;
 } groovy_codec_stats;
 
-/* Cheap check, at the opening of the session: can NVENC be used at all here? 1 or 0 (*why says why). */
+/* Cheap check, at the opening of the session: can an encoder be used at all here? 1 or 0 (*why says why).
+ * GROOVY_ENCODER = auto (default: NVENC, then libavcodec/libx264) | nvenc | ff picks the encoder. */
 int groovy_codec_available(const char **why);
+/* The encoder groovy_codec_available chose: "NVENC", "libx264", or "none". */
+const char *groovy_codec_backend(void);
 
 /* Starts the thread for one follower handle (gm = a gm_handle *). NULL on failure. */
 groovy_codec *groovy_codec_start(void *gm, unsigned kbps, unsigned fps_num, unsigned fps_den);

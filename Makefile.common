@@ -2592,6 +2592,7 @@ ifeq ($(HAVE_GROOVY), 1)
    OBJ += record/drivers/record_groovy.o
    # crt-bridge: the codec of a follower (NVENC loaded at run time, nothing linked), see groovy_codec.h
    OBJ += record/drivers/groovy_nvenc.o
+   OBJ += record/drivers/groovy_ffenc.o
    OBJ += record/drivers/groovy_codec.o
    # crt-bridge: ported joypad driver -- lives under the same guard as
    # record_groovy, whose input API it consumes.

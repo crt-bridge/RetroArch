@@ -2,13 +2,16 @@
 /* groovy_codec.c -- see groovy_codec.h. */
 #include "groovy_codec.h"
 
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "gm.h"
 
 #ifndef _WIN32
 
-int groovy_codec_available(const char **why) { if (why) *why = "NVENC is only wired on Windows"; return 0; }
+int groovy_codec_available(const char **why) { if (why) *why = "the codec thread is only wired on Windows"; return 0; }
+const char *groovy_codec_backend(void) { return "none"; }
 groovy_codec *groovy_codec_start(void *gm, unsigned kbps, unsigned n, unsigned d) { (void)gm; (void)kbps; (void)n; (void)d; return NULL; }
 void groovy_codec_stop(groovy_codec *c) { (void)c; }
 int groovy_codec_submit(groovy_codec *c, const uint8_t *p, unsigned w, unsigned h, uint32_t f, uint16_t v, int k)
@@ -38,22 +41,70 @@ struct groovy_codec {
     groovy_codec_stats st;
 };
 
+/* One encoder, whichever: NVENC (NVIDIA, driver) or libavcodec/libx264 (anywhere FFmpeg is). */
+typedef struct { groovy_nvenc *nv; groovy_ffenc *ff; } codec_enc;
+
+static const char *g_backend = "none";
+
+/* GROOVY_ENCODER: 0 = auto (NVENC first, then libx264), 1 = nvenc only, 2 = libx264 only; -1 = unknown word. */
+static int codec_encoder_choice(void)
+{
+    const char *s = getenv("GROOVY_ENCODER");
+    if (!s || !*s || !strcmp(s, "auto")) return 0;
+    if (!strcmp(s, "nvenc")) return 1;
+    if (!strcmp(s, "ff")) return 2;
+    return -1;
+}
+
+static int codec_enc_open(codec_enc *e, const groovy_nvenc_cfg *cfg, const char **why)
+{
+    const int ch = codec_encoder_choice();
+    const char *w1 = NULL, *w2 = NULL;
+    static char both[240];
+    e->nv = NULL; e->ff = NULL;
+    if (ch < 0) { *why = "GROOVY_ENCODER must be auto, nvenc or ff"; return -1; }
+    if (ch != 2) e->nv = groovy_nvenc_open(cfg, &w1);
+    if (e->nv) { g_backend = "NVENC"; return 0; }
+    if (ch != 1) e->ff = groovy_ffenc_open(cfg, &w2);
+    if (e->ff) { g_backend = "libx264"; return 0; }
+    if (ch == 1) snprintf(both, sizeof both, "NVENC: %s", w1 ? w1 : "unavailable");
+    else if (ch == 2) snprintf(both, sizeof both, "libx264: %s", w2 ? w2 : "unavailable");
+    else snprintf(both, sizeof both, "NVENC: %s; libx264: %s", w1 ? w1 : "unavailable", w2 ? w2 : "unavailable");
+    *why = both;
+    return -1;
+}
+
+static void codec_enc_close(codec_enc *e)
+{
+    if (e->nv) groovy_nvenc_close(e->nv);
+    if (e->ff) groovy_ffenc_close(e->ff);
+    e->nv = NULL; e->ff = NULL;
+}
+
+static int codec_enc_encode(codec_enc *e, const uint8_t *bgr, int key, const uint8_t **out, size_t *len, int *is_key, double *us)
+{
+    if (e->nv) return groovy_nvenc_encode(e->nv, bgr, key, out, len, is_key, us);
+    return groovy_ffenc_encode(e->ff, bgr, key, out, len, is_key, us);
+}
+
+const char *groovy_codec_backend(void) { return g_backend; }
+
 int groovy_codec_available(const char **why)
 {
     groovy_nvenc_cfg cfg;
-    groovy_nvenc *e;
+    codec_enc e;
     const char *w = NULL;
     groovy_nvenc_cfg_defaults(&cfg, 320u, 240u);   /* NVENC refuses H.264 4:4:4 at 128x128: ask for a size that exists */
-    e = groovy_nvenc_open(&cfg, &w);
-    if (!e) { if (why) *why = w ? w : "NVENC unavailable"; return 0; }
-    groovy_nvenc_close(e);
+    if (codec_enc_open(&e, &cfg, &w) != 0) { if (why) *why = w ? w : "no encoder"; g_backend = "none"; return 0; }
+    codec_enc_close(&e);
     return 1;
 }
 
 static DWORD WINAPI codec_thread(LPVOID arg)
 {
     groovy_codec *c = (groovy_codec *)arg;
-    groovy_nvenc *enc = NULL;
+    codec_enc enc = { NULL, NULL };
+    int enc_open = 0;
     unsigned ew = 0u, eh = 0u;
     uint8_t *pic = NULL;
     size_t pic_cap = 0u;
@@ -78,14 +129,14 @@ static DWORD WINAPI codec_thread(LPVOID arg)
         c->box_key = 0;
         LeaveCriticalSection(&c->lock);
 
-        if (enc && (w != ew || h != eh)) { groovy_nvenc_close(enc); enc = NULL; key = 1; }   /* a new size is a new session */
-        if (!enc) {
+        if (enc_open && (w != ew || h != eh)) { codec_enc_close(&enc); enc_open = 0; key = 1; }   /* a new size is a new session */
+        if (!enc_open) {
             groovy_nvenc_cfg cfg;
             const char *why = NULL;
             groovy_nvenc_cfg_defaults(&cfg, w, h);
             cfg.fps_num = c->fps_num; cfg.fps_den = c->fps_den; cfg.bitrate_kbps = c->kbps;
-            enc = groovy_nvenc_open(&cfg, &why);
-            if (!enc) { c->why = why ? why : "NVENC refused"; InterlockedExchange(&c->failed, 1); break; }
+            if (codec_enc_open(&enc, &cfg, &why) != 0) { c->why = why ? why : "encoder refused"; InterlockedExchange(&c->failed, 1); break; }
+            enc_open = 1;
             ew = w; eh = h; key = 1;
         }
         {
@@ -93,9 +144,9 @@ static DWORD WINAPI codec_thread(LPVOID arg)
             size_t len = 0u;
             int is_key = 0;
             double us = 0.0;
-            if (groovy_nvenc_encode(enc, pic, key, &au, &len, &is_key, &us) != 0) {
+            if (codec_enc_encode(&enc, pic, key, &au, &len, &is_key, &us) != 0) {
                 c->st.errors++;
-                c->why = "NVENC encode error";
+                c->why = "encoder error";
                 InterlockedExchange(&c->failed, 1);
                 break;
             }
@@ -105,7 +156,7 @@ static DWORD WINAPI codec_thread(LPVOID arg)
             else c->st.errors++;
         }
     }
-    if (enc) groovy_nvenc_close(enc);
+    if (enc_open) codec_enc_close(&enc);
     free(pic);
     return 0;
 }
