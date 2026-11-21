@@ -347,6 +347,8 @@ struct groovy_receiver {
     int            codec;
     groovy_codec  *codec_w;
     unsigned       codec_kbps;
+    unsigned       codec_parity;      /* % of Reed-Solomon parity, kept to restart the codec after a fall back to LZ4 */
+    int            codec_suspended;   /* the codec follower went back to LZ4 on an interlaced mode and will return */
     int            codec_half_warned;
     unsigned       codec_idr_asked;   /* keyframes this follower's client has asked for */
     unsigned       codec_log_n;       /* pictures submitted since the last [groovy-codec] line */
@@ -2217,6 +2219,7 @@ static void *groovy_new(const struct record_params *params)
                         if (rx->codec_w) {
                             rx->codec = GM_CODEC_H264;
                             rx->codec_kbps = ck;
+                            rx->codec_parity = cpar;
                             (void)gm_set_codec_parity(rx->gm, cpar);
                             RARCH_LOG("[groovy] codec: follower %u in H.264 4:4:4, %u kbit/s, %u %% parity, %s in its own thread\n", cf, ck, cpar, groovy_codec_backend());
                         } else
@@ -3214,6 +3217,48 @@ static void groovy_hold_flush_vers(groovy_state_t *st, struct groovy_receiver *r
     }
 }
 
+/* A codec follower on an INTERLACED mode goes back to LZ4 by itself, and returns to the codec on the next progressive mode.
+ * Default: the receiver has not been proven with an interlaced codec picture, and a refused picture freezes the tube. The
+ * opt-in GROOVY_CODEC_INTERLACED=codec keeps the codec on an interlaced mode (the receiver must put the whole decoded picture
+ * out as a completed pair of fields). The fall back is a plain CMD_INIT without codec, as when the encoder fails. */
+static bool groovy_codec_interlaced_ok(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("GROOVY_CODEC_INTERLACED");
+        cached = (e && strcmp(e, "codec") == 0) ? 1 : 0;
+    }
+    return cached == 1;
+}
+
+static void groovy_codec_follow_mode(groovy_state_t *st, struct groovy_receiver *rx, bool interlaced)
+{
+    gm_init_params ip;
+    if (rx->codec_w && interlaced && !groovy_codec_interlaced_ok()) {
+        groovy_codec_stop(rx->codec_w);   /* the thread uses the handle: it stops first */
+        rx->codec_w = NULL;
+        rx->codec = 0;
+        rx->codec_suspended = 1;
+        groovy_init_params_for(st, rx, &ip);
+        (void)gm_send_init(rx->gm, &ip);
+        RARCH_LOG("[groovy] codec: interlaced mode, follower %s goes back to LZ4 until a progressive mode "
+                  "(GROOVY_CODEC_INTERLACED=codec keeps the codec)\n", rx->target);
+    } else if (!rx->codec_w && rx->codec_suspended && !interlaced) {
+        rx->codec_suspended = 0;
+        rx->codec_w = groovy_codec_start(rx->gm, rx->codec_kbps, 60u, 1u);
+        if (rx->codec_w) {
+            rx->codec = GM_CODEC_H264;
+            (void)gm_set_codec_parity(rx->gm, rx->codec_parity);
+            st->codec_key_pending = true;
+            groovy_init_params_for(st, rx, &ip);
+            (void)gm_send_init(rx->gm, &ip);
+            RARCH_LOG("[groovy] codec: progressive mode again, follower %s returns to H.264\n", rx->target);
+        } else {
+            RARCH_WARN("[groovy] codec: the encoder thread did not restart: follower %s stays in LZ4\n", rx->target);
+        }
+    }
+}
+
 /* Announce the native picture (CMD_NATIVE_PLACE: factors and size) to each
  * receiver that takes it, and take it back from the others. A receiver in a
  * classic session, or that has not raised FLAG_NATIVE_OK (a MiSTer, an older
@@ -3227,6 +3272,7 @@ static unsigned groovy_native_apply(groovy_state_t *st, unsigned kx, unsigned ky
     bool takes[32] = { false };
     for (unsigned i = 0u; i < st->n_rx && i < 32u; i++) {
         struct groovy_receiver *rx = &st->rx[i];
+        groovy_codec_follow_mode(st, rx, fields);   /* before the codec is counted below */
         /* On a wire of fields, a vertical factor above 1 would break the field order: only a
          * codec follower (its picture travels whole) takes it. An odd height cannot be cut. */
         const bool field_ok = !fields || (!(h & 1u) && (ky == 1u || rx->codec_w));
@@ -3330,6 +3376,7 @@ static bool groovy_fan_out(groovy_state_t *st, enum groovy_emit_kind k,
             pa = cmp0; pb = cmp1; plen = cmp_len;
         }
 
+        groovy_codec_follow_mode(st, rx, k != GROOVY_EMIT_FULL);   /* an interlaced frame: LZ4 for this follower */
         /* A codec follower: its picture goes to its encoder thread, not on the wire from here. */
         if (rx->codec_w) {
             const char *why = NULL;
