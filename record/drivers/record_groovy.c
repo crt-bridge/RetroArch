@@ -561,6 +561,7 @@ typedef struct {
      * emit_samples below. --- */
     unsigned  skip_every;                   /* 0 = off, otherwise one frame in N */
     uint32_t  skipped_frames;               /* frames skipped since the last reading */
+    uint32_t  drop_tail_seen;               /* bench: tails dropped by libgm, last count logged */
 
     /* --- Diagnostic fault injection (GROOVY_INJECT). Items are parsed once
      * at session opening and never added to afterwards; inject_n == 0 means
@@ -2263,6 +2264,22 @@ static void *groovy_new(const struct record_params *params)
     st->skip_every = groovy_skip_every_parse(getenv("GROOVY_SKIP_FRAME_EVERY"));
     GROOVY_BENCH_LOG("[groovy] skip: one frame in %u%s\n", st->skip_every,
               (st->skip_every == 0u) ? " (off)" : " (GROOVY_SKIP_FRAME_EVERY)");
+
+#ifdef HAVE_GROOVY_BENCH
+    /* Diagnostic hook: the master's picture goes out without its last datagram,
+     * one in N (gm_set_drop_tail), as if the link had dropped it -- to see what a
+     * receiver shows for an incomplete picture. Bench build only, master only. */
+    {
+        const char *denv = getenv("GROOVY_DROP_TAIL_EVERY");
+        const long  dn   = (denv && denv[0]) ? strtol(denv, NULL, 10) : 0L;
+
+        if (dn > 0L && dn <= 1000000L) {
+            (void)gm_set_drop_tail(st->gm, (uint32_t)dn);
+            RARCH_WARN("[groovy] drop-tail: the last datagram of one picture in %ld is not sent "
+                       "(GROOVY_DROP_TAIL_EVERY, diagnostic)\n", dn);
+        }
+    }
+#endif
 
     /* Known-fault injection, read once here like the hook above. Absent or
      * refused: inject_n stays 0 and the hot path below never looks at it. */
@@ -5165,6 +5182,21 @@ static bool groovy_push_video(void *data, const struct record_video_data *vid)
      * would shift every latency by a whole frame. No wire change: the ring
      * lives entirely on the emitter side. */
     groovy_servo_note_send(&st->servo, st->frame_id, groovy_pacing_mono_ns());
+
+#ifdef HAVE_GROOVY_BENCH
+    /* Each tail dropped on purpose (GROOVY_DROP_TAIL_EVERY) is said with the
+     * wall-clock time, to be matched with what is seen on the screen. */
+    {
+        const uint32_t dropped = gm_dropped_tails(st->gm);
+
+        if (dropped != st->drop_tail_seen) {
+            st->drop_tail_seen = dropped;
+            RARCH_LOG("[groovy-bench] drop-tail: n=%u frame_id=%u utc_ms=%llu\n",
+                      (unsigned)dropped, (unsigned)st->frame_id,
+                      (unsigned long long)groovy_wall_ms());
+        }
+    }
+#endif
 
     st->frame_id++;
     return true;
