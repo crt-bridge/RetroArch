@@ -92,8 +92,8 @@ which receiver was found.
   packets that follow are then misread. Towards that core the emitter sends no sound.
 - 480i over Wi-Fi. When a packet of a picture is lost on the way, the MiSTer drops that picture
   and resets its video memory: the picture shows doubled frames for one or two seconds. A wired
-  link avoids it. Keep the Groovy core's "Blit at" option on ASAP: End Line makes every loss
-  visible.
+  link should avoid it (not tried). Keep the Groovy core's "Blit at" option on ASAP: End Line
+  makes every loss visible.
 
 ## Factory settings
 
