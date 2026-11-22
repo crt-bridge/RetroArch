@@ -13,11 +13,11 @@ This is the chain the pre-release was tried on, and nothing else.
 - Emitter: Windows 11, with the `vulkan` and `glcore` video drivers.
 - Receiver: a PC with an AMD Radeon HD 7750 graphics card, under the Linux `radeon` driver, wired by Ethernet, driving a JVC DT-V1710CG tube. This receiver is not part of this release.
 - Software receiver (the crt-bridge client, a libretro core that shows the picture on a second computer instead of a tube): on Windows and on macOS. The Mac was also tried over Wi-Fi, with Padded Session turned on.
-- A MiSTer FPGA, a SuperStation One running the Groovy core, through its composite output to the same JVC tube, over Wi-Fi. Picture and gamepad work with the original Groovy core; sound needed a modified core, which is not published.
+- A MiSTer FPGA, a SuperStation One running the Groovy core, through its composite and S-Video outputs to the same JVC tube, over Wi-Fi. Picture and gamepad work with the original Groovy core; sound needed a modified core, which is not published.
 
 ### Expected but not tested
 
-- A MiSTer's other analog outputs (RGB, S-Video), other MiSTer boards, and a MiSTer on a wired link. Never turn on Receiver 31 kHz or Padded Session (a Wi-Fi option) towards a MiSTer.
+- A MiSTer's RGB output, other MiSTer boards, and a MiSTer on a wired link. Never turn on Receiver 31 kHz or Padded Session (a Wi-Fi option) towards a MiSTer.
 - The Linux emitter towards a CRT receiver. The Linux kit has only been run towards the software receiver.
 
 ### Not supported
@@ -82,8 +82,9 @@ which receiver was found.
   controller menu: before that, only the directions and a few buttons reach the emulator.
 - Use a USB gamepad on the MiSTer.
 - To drive a 15 kHz CRT, set the MiSTer's video output for a CRT. On a SuperStation One, through
-  composite: System menu, Video, CRT mode; DIP switch 3 up; and `vga_mode=svideo` in
-  `MiSTer.ini`. With the factory settings its composite output is black and white.
+  composite or S-Video (the same settings serve both, and both outputs can be connected at once):
+  System menu, Video, CRT mode; DIP switch 3 up; and `vga_mode=svideo` in `MiSTer.ini`. With the
+  factory settings its composite output is black and white.
 
 **Limits.**
 
