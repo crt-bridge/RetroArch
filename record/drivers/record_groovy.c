@@ -2165,7 +2165,8 @@ static void *groovy_new(const struct record_params *params)
         /* The native fallback (the receiver's pinned table is a table of one
          * tube, 2560 columns) and ONE field per frame in 480i (the GroovyMAME
          * path; two fields per frame looked bad on a MiSTer). The crt-bridge
-         * receiver keeps its pinned table and two fields per frame. */
+         * receiver keeps its pinned table, and takes one field per frame too:
+         * its field gate shows it in the right order. */
         if (prof->native_fallback && !groovy_precedence_env_wins(getenv("GROOVY_MODE_FALLBACK"))) {
             st->mode_state.native_fallback = true;
             RARCH_LOG("[groovy] mode fallback: native (peer %s; GROOVY_MODE_FALLBACK=pinned "
@@ -2551,9 +2552,9 @@ static void *groovy_new(const struct record_params *params)
          * would come out reversed. Known limitation, stated in the log
          * right at opening rather than discovered by eye. */
         if (st->field_mode == GROOVY_FIELD_PER_FRAME && kept > 0u)
-            RARCH_WARN("[groovy] GROOVY_FIELD_PER_FRAME active with %u follower(s): the field "
-                       "sent to everyone follows the MASTER's parity -- a tube follower "
-                       "(crt-bridge-rcv) would receive reversed fields; known limitation\n", kept);
+            RARCH_WARN("[groovy] one field per frame with %u follower(s): the field sent to "
+                       "everyone follows the MASTER's parity -- a tube follower without a field "
+                       "gate (crt-bridge-rcv before its field gate) would show reversed fields\n", kept);
 
         /* The master's profile is one set of session settings: the mode
          * fallback, the line, the fields and the audio reach every follower

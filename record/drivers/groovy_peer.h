@@ -58,14 +58,18 @@ struct groovy_peer_profile {
     bool audio_ratio;      /* the wire audio resampled by the known ratio (goes with servo_ff) */
 };
 
-/* The table. The crt-bridge line is the behaviour of before, to the bit: every
- * field zero, the padding left to the menu or the variable. The servo is on
- * for the forked MiSTer core only: the one heard and judged smooth with it; the
- * original core has not been tried. */
+/* The table. The crt-bridge line keeps the receiver's pinned table, the
+ * padding left to the menu or the variable, and no servo; in 480i it now takes
+ * ONE field per frame, as a MiSTer does: a receiver whose field gate waits for
+ * the right field before each flip shows it smoothly (a receiver without that
+ * gate shows the fields in the wrong order: GROOVY_FIELD_PER_FRAME=off keeps
+ * two fields per frame there). The servo is on for the forked MiSTer core only:
+ * the one heard and judged smooth with it; the original core has not been
+ * tried. */
 static const struct groovy_peer_profile groovy_peer_profiles[GROOVY_PEER_COUNT] = {
     /* name             fallback hold   field  pad                       48k    cut    servo  ratio */
     { "standard",       true,    false, true,  GROOVY_PAD_MODE_OFF,      false, false, false, false },
-    { "crt-bridge",     false,   false, false, -1,                       false, false, false, false },
+    { "crt-bridge",     false,   false, true,  -1,                       false, false, false, false },
     { "mister",         true,    true,  true,  GROOVY_PAD_MODE_HEADERS,  true,  false, true,  true  },
     { "mister-stock",   true,    true,  true,  GROOVY_PAD_MODE_OFF,      false, true,  false, false },
 };
