@@ -2165,8 +2165,9 @@ static void *groovy_new(const struct record_params *params)
         /* The native fallback (the receiver's pinned table is a table of one
          * tube, 2560 columns) and ONE field per frame in 480i (the GroovyMAME
          * path; two fields per frame looked bad on a MiSTer). The crt-bridge
-         * receiver keeps its pinned table, and takes one field per frame too:
-         * its field gate shows it in the right order. */
+         * receiver follows the core's geometry too (its guard judges each mode
+         * and says a refusal on the tube), and takes one field per frame: its
+         * field gate shows it in the right order. */
         if (prof->native_fallback && !groovy_precedence_env_wins(getenv("GROOVY_MODE_FALLBACK"))) {
             st->mode_state.native_fallback = true;
             RARCH_LOG("[groovy] mode fallback: native (peer %s; GROOVY_MODE_FALLBACK=pinned "
